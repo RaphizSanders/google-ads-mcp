@@ -6,7 +6,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 
-const API_VERSION = process.env.GOOGLE_ADS_API_VERSION ?? "v18";
+const API_VERSION = process.env.GOOGLE_ADS_API_VERSION ?? "v23";
 const API_BASE = `https://googleads.googleapis.com/${API_VERSION}`;
 
 const MAX_RETRIES = 3;
@@ -317,6 +317,22 @@ export class GoogleAdsClient {
 
   async mutateCampaignAssetSets(customerId: string, operations: MutateOperation[]) {
     return this.mutate(customerId, "campaignAssetSets", operations);
+  }
+
+  async mutateCampaignAssets(customerId: string, operations: MutateOperation[]) {
+    return this.mutate(customerId, "campaignAssets", operations);
+  }
+
+  async mutateAssetGroups(customerId: string, operations: MutateOperation[]) {
+    return this.mutate(customerId, "assetGroups", operations);
+  }
+
+  async mutateAssetGroupAssets(customerId: string, operations: MutateOperation[]) {
+    return this.mutate(customerId, "assetGroupAssets", operations);
+  }
+
+  async mutateAssetGroupListingGroupFilters(customerId: string, operations: MutateOperation[]) {
+    return this.mutate(customerId, "assetGroupListingGroupFilters", operations);
   }
 
   // ── Convenience Methods ──────────────────────────────────────────────

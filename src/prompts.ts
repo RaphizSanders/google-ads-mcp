@@ -210,4 +210,116 @@ export function registerGoogleAdsPrompts(mcp: McpServer): void {
       ],
     })
   );
+
+  mcp.registerPrompt(
+    "pmax_optimization",
+    {
+      title: "Otimização de Performance Max",
+      description: "Análise e otimização de campanhas PMax: asset groups, sinais de audiência, produtos.",
+      argsSchema: {
+        customerId: z.string().describe("Customer ID."),
+        campaignId: z.string().optional().describe("Campaign ID da PMax (opcional, analisa todas se omitido)."),
+      },
+    },
+    (args) => ({
+      messages: [
+        {
+          role: "user" as const,
+          content: {
+            type: "text" as const,
+            text: [
+              `Otimize campanhas Performance Max da conta ${args.customerId}.`,
+              args.campaignId ? `Foque na campanha ${args.campaignId}.` : "Analise todas as campanhas PMax.",
+              "Passos:",
+              "1) run_gaql para listar campanhas PMax: SELECT campaign.id, campaign.name, campaign.status FROM campaign WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX' AND campaign.status != 'REMOVED'",
+              "2) get_campaign_performance para métricas de cada PMax (30 dias)",
+              "3) run_gaql para listar asset groups: SELECT asset_group.id, asset_group.name, asset_group.status, asset_group.ad_strength FROM asset_group WHERE campaign.id = {campaignId}",
+              "4) get_shopping_products (30 dias) para ver produtos top/bottom",
+              "5) Analise:",
+              "   - Ad strength dos asset groups (EXCELLENT, GOOD, AVERAGE, POOR)",
+              "   - Quais produtos têm ROAS alto mas pouco volume (oportunidade de escala)",
+              "   - Quais produtos gastam sem converter (candidatos a exclusão)",
+              "6) Recomende: adicionar/trocar assets, excluir produtos ruins, ajustar sinais de audiência, budget.",
+            ].join(" "),
+          },
+        },
+      ],
+    })
+  );
+
+  mcp.registerPrompt(
+    "search_terms_audit",
+    {
+      title: "Auditoria de termos de busca",
+      description: "Análise de search terms para encontrar termos irrelevantes e oportunidades de keywords.",
+      argsSchema: {
+        customerId: z.string().describe("Customer ID."),
+        campaignId: z.string().optional().describe("Campaign ID (opcional)."),
+      },
+    },
+    (args) => ({
+      messages: [
+        {
+          role: "user" as const,
+          content: {
+            type: "text" as const,
+            text: [
+              `Faça uma auditoria de termos de busca da conta ${args.customerId}.`,
+              args.campaignId ? `Foque na campanha ${args.campaignId}.` : "",
+              "Passos:",
+              "1) get_search_terms (30 dias, limit 100) — todos os termos com gasto",
+              "2) list_negative_keywords — negativos já adicionados",
+              "3) Classifique os termos em 3 categorias:",
+              "   A) NEGATIVAR: termos irrelevantes com spend > R$10 e 0 conversões",
+              "   B) ADICIONAR COMO KEYWORD: termos relevantes com conversões que não são keywords exatas",
+              "   C) MONITORAR: termos com pouco volume mas potencialmente relevantes",
+              "4) Para cada termo a negativar, sugira match type (EXACT para termos específicos, PHRASE para padrões)",
+              "5) Calcule economia potencial: soma do spend dos termos a negativar",
+              "6) Liste ações ordenadas por impacto (maior spend irrelevante primeiro).",
+            ].join(" "),
+          },
+        },
+      ],
+    })
+  );
+
+  mcp.registerPrompt(
+    "creative_analysis",
+    {
+      title: "Análise de criativos",
+      description: "Análise de RSAs: headlines, descriptions, CTR, fadiga criativa.",
+      argsSchema: {
+        customerId: z.string().describe("Customer ID."),
+        campaignId: z.string().optional().describe("Campaign ID (opcional)."),
+      },
+    },
+    (args) => ({
+      messages: [
+        {
+          role: "user" as const,
+          content: {
+            type: "text" as const,
+            text: [
+              `Analise os criativos (anúncios) da conta ${args.customerId}.`,
+              args.campaignId ? `Foque na campanha ${args.campaignId}.` : "",
+              "Passos:",
+              "1) get_ad_performance (30 dias) — performance de cada anúncio",
+              "2) get_ad_creatives — detalhes dos RSAs (headlines, descriptions)",
+              "3) get_daily_trend com campaignId — verificar se há queda de CTR ao longo do tempo (fadiga)",
+              "4) Analise:",
+              "   - Quais ads têm CTR acima/abaixo da média do grupo?",
+              "   - Há diversidade de headlines ou são muito similares?",
+              "   - CTR está caindo ao longo dos dias? (sinal de fadiga criativa)",
+              "   - Ad strength (se disponível): POOR/AVERAGE precisam de melhoria",
+              "5) Recomende:",
+              "   - Ads para pausar (CTR muito abaixo da média)",
+              "   - Novas headlines para testar (baseado nas que performam melhor)",
+              "   - Se há fadiga, sugerir novos criativos com ângulos diferentes",
+              "   - Limite de headlines pinadas (máximo 1-2, senão prejudica otimização do Google).",
+            ].join(" "),
+          },
+        },
+      ],
+    })
+  );
 }

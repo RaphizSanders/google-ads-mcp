@@ -8,6 +8,7 @@ export const GLOSSARY_URI = "google-ads://glossary";
 export const PLAYBOOK_URI = "google-ads://playbook";
 export const BENCHMARKS_URI = "google-ads://benchmarks";
 export const GAQL_REFERENCE_URI = "google-ads://gaql-reference";
+export const TROUBLESHOOTING_URI = "google-ads://troubleshooting";
 
 export const glossaryContent = `# Glossário Google Ads — Tráfego Pago
 
@@ -240,6 +241,93 @@ LIMIT 30
 - LIMIT máximo: 10.000 por query
 `;
 
+export const troubleshootingContent = `# Troubleshooting — Google Ads
+
+## Erros comuns da API
+
+### RESOURCE_EXHAUSTED (429)
+- **Causa:** Rate limit atingido (muitas requests por minuto).
+- **Solução:** O MCP já faz retry automático com backoff exponencial. Se persistir, espaçar chamadas.
+
+### PERMISSION_DENIED
+- **Causa:** Token sem permissão ou conta não acessível pela MCC.
+- **Solução:** Verificar se o token OAuth tem escopo \`https://www.googleapis.com/auth/adwords\`. Verificar se a conta está vinculada à MCC.
+
+### INVALID_ARGUMENT — "The required field was not present"
+- **Causa:** Campo obrigatório faltando na mutação. Comum ao criar campanhas sem todos os campos.
+- **Solução:** Verificar documentação do resource. Ex: PMax precisa de asset group, Shopping precisa de merchant_id.
+
+### INVALID_ARGUMENT — "Bidding strategy type is incompatible with shared budget"
+- **Causa:** Budget criado com \`explicitlyShared: true\` (default) mas bidding strategy não suporta budget compartilhado.
+- **Solução:** Sempre criar budgets com \`explicitlyShared: false\` para campanhas individuais.
+
+### MUTATE_NOT_ALLOWED — "The operation is not allowed for the given context"
+- **Causa:** Tentativa de operação não suportada (ex: mudar objetivo de campanha existente, editar PMax ad group diretamente).
+- **Solução:** Algumas operações exigem criar novos objetos em vez de editar.
+
+## Learning Phase (Fase de Aprendizado)
+
+### O que é
+Quando uma campanha com Smart Bidding (Maximize Conversions, Target CPA, Target ROAS) é criada ou sofre mudança significativa, o Google entra em "learning phase" por ~7-14 dias.
+
+### O que dispara
+- Criar campanha nova
+- Mudar estratégia de bidding
+- Mudar budget em mais de 20%
+- Mudar targeting significativamente
+- Mudar conversion action
+
+### Impacto
+- Performance instável (CPA pode subir 2-3x)
+- Não pausar/mudar durante learning — resete o ciclo
+- Esperar pelo menos 50 conversões antes de avaliar
+
+### Recomendação
+- Avisar o usuário quando uma ação pode resetar learning phase
+- Mudanças de budget: máximo 20% por vez
+- Aguardar estabilização antes de otimizar
+
+## Políticas de Anúncios — Reprovação
+
+### Motivos comuns
+1. **Marca registrada:** Usar marca de terceiro no texto do anúncio
+2. **Pontuação/capitalização:** TODAS AS LETRAS MAIÚSCULAS, pontuação excessiva (!!!)
+3. **Conteúdo enganoso:** Promessas irreais, preços falsos
+4. **Landing page:** Página não funciona, conteúdo diferente do anúncio
+5. **Produtos restritos:** Álcool, farmacêuticos, jogos de azar (precisam de certificação)
+
+### Como resolver
+- Verificar email de reprovação (detalha o motivo)
+- Editar o anúncio e resubmeter
+- Apelar se acreditar que foi erro (Google Ads → Policy Manager)
+
+## Conta Suspensa
+
+### Causas
+- Pagamento recusado/atrasado
+- Violação grave de política
+- Atividade suspeita (ex: cliques inválidos)
+
+### Resolução
+- Pagamento: atualizar forma de pagamento e pagar débito
+- Política: corrigir violação e apelar
+- Suspensão por clique inválido: apelar com evidências
+
+## Conversões não aparecendo
+
+### Checklist
+1. Tag do Google Ads instalada corretamente? (verificar com Tag Assistant)
+2. Conversion action configurada como PRIMARY? (só primary conta pra bidding)
+3. Janela de atribuição correta? (default: 30 dias click, 1 dia view)
+4. Enhanced conversions ativado? (melhora matching, especialmente iOS)
+5. Consent mode configurado? (GDPR/LGPD pode bloquear tracking)
+
+### Delay normal
+- Conversões podem levar até 72h pra aparecer (cross-device, data processing)
+- Enhanced conversions: até 48h adicionais
+- Offline conversions: depende do upload schedule
+`;
+
 export function registerGoogleAdsResources(server: McpServer): void {
   server.registerResource(
     "glossary", GLOSSARY_URI,
@@ -263,5 +351,11 @@ export function registerGoogleAdsResources(server: McpServer): void {
     "gaql-reference", GAQL_REFERENCE_URI,
     { title: "GAQL Reference", description: "Referência completa do Google Ads Query Language com exemplos." },
     (uri) => ({ contents: [{ uri: uri.toString(), mimeType: "text/plain" as const, text: gaqlReferenceContent }] })
+  );
+
+  server.registerResource(
+    "troubleshooting", TROUBLESHOOTING_URI,
+    { title: "Troubleshooting", description: "Erros comuns, learning phase, políticas de anúncios, reprovação e conta suspensa." },
+    (uri) => ({ contents: [{ uri: uri.toString(), mimeType: "text/plain" as const, text: troubleshootingContent }] })
   );
 }
