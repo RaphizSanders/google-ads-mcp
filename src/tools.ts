@@ -3509,6 +3509,195 @@ export function registerGoogleAdsTools(
     }
   );
 
+  // ══ REMARKETING LISTS ══════════════════════════════════════════════
+
+  mcp.registerTool(
+    "list_remarketing_lists",
+    {
+      description: [
+        "List all remarketing/audience lists in the account with size and membership details.",
+        "Shows list name, type, size for display/search, membership lifespan, and status.",
+      ].join("\n"),
+      inputSchema: {
+        customerId: z.string().describe("Customer ID."),
+        query: z.string().optional().describe("Filter by name (substring match)."),
+      },
+    },
+    async ({ customerId, query }) => {
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      if (blocked) return { content: [blocked], isError: true };
+      const client = getClient();
+      const nameFilter = query ? `AND user_list.name LIKE '%${query}%'` : "";
+
+      const results = await client.searchStream(customerId,
+        `SELECT user_list.id, user_list.name, user_list.type, user_list.status,
+                user_list.size_for_display, user_list.size_for_search,
+                user_list.membership_life_span, user_list.description,
+                user_list.membership_status, user_list.eligible_for_display,
+                user_list.eligible_for_search
+         FROM user_list
+         WHERE user_list.status != 'REMOVED' ${nameFilter}
+         ORDER BY user_list.size_for_display DESC`
+      );
+
+      const lists = results.map(r => {
+        const ul = r.userList as Record<string, unknown>;
+        return {
+          id: ul?.id,
+          name: ul?.name,
+          type: ul?.type,
+          status: ul?.status,
+          size_display: ul?.sizeForDisplay,
+          size_search: ul?.sizeForSearch,
+          membership_days: ul?.membershipLifeSpan,
+          membership_status: ul?.membershipStatus,
+          eligible_display: ul?.eligibleForDisplay,
+          eligible_search: ul?.eligibleForSearch,
+          description: ul?.description,
+        };
+      });
+
+      return { content: [text(`${lists.length} remarketing list(s).\n\n${formatJson(lists)}`)] };
+    }
+  );
+
+  mcp.registerTool(
+    "create_remarketing_list",
+    {
+      description: [
+        "Create a rule-based remarketing list.",
+        "WRITE OPERATION.",
+        "",
+        "Rule types:",
+        "- URL contains: match visitors who visited pages containing a string",
+        "- URL equals: match visitors who visited an exact URL",
+        "- Custom combination: combine multiple rules with AND/OR",
+        "",
+        "For GA4-based lists, create in GA4 and they sync automatically.",
+        "For CRM/customer match lists, use Google Ads UI (requires hashed data upload).",
+      ].join("\n"),
+      inputSchema: {
+        customerId: z.string().describe("Customer ID."),
+        name: z.string().describe("List name."),
+        description: z.string().optional().describe("List description."),
+        membershipLifeSpan: z.number().describe("Days a user stays in the list (1-540). Common: 30, 60, 90."),
+        rules: z.array(z.object({
+          ruleType: z.enum(["URL_CONTAINS", "URL_EQUALS", "CUSTOM_EVENT"]).describe("Rule type."),
+          value: z.string().describe("Value to match (URL string or event name)."),
+        })).describe("Rules for list membership."),
+        ruleOperator: z.enum(["AND", "OR"]).optional().describe("How to combine rules. Default: OR."),
+        excludeRules: z.array(z.object({
+          ruleType: z.enum(["URL_CONTAINS", "URL_EQUALS", "CUSTOM_EVENT"]).describe("Rule type to exclude."),
+          value: z.string().describe("Value to match for exclusion."),
+        })).optional().describe("Exclusion rules (e.g. exclude purchasers)."),
+        excludeLifeSpan: z.number().optional().describe("Days for exclusion rule (e.g. 7 = exclude purchasers from last 7 days)."),
+      },
+    },
+    async ({ customerId, name, description, membershipLifeSpan, rules, ruleOperator, excludeRules, excludeLifeSpan }) => {
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      if (blocked) return { content: [blocked], isError: true };
+      const client = getClient();
+
+      const ruleItems = ensureArray(rules).map((r: unknown) => {
+        const rule = r as Record<string, string>;
+        if (rule.ruleType === "URL_CONTAINS") {
+          return { name: "url__", stringRuleItems: [{ operator: "CONTAINS", value: rule.value }] };
+        } else if (rule.ruleType === "URL_EQUALS") {
+          return { name: "url__", stringRuleItems: [{ operator: "EQUALS", value: rule.value }] };
+        } else {
+          return { name: "ecomm_pagetype", stringRuleItems: [{ operator: "EQUALS", value: rule.value }] };
+        }
+      });
+
+      const ruleGroups = [{ ruleItems }];
+      const flexibleRuleUserList: Record<string, unknown> = {
+        inclusiveRuleOperator: (ruleOperator ?? "OR") === "AND" ? "AND" : "OR",
+        inclusiveOperands: ruleGroups.map(g => ({ ruleItems: g.ruleItems })),
+      };
+
+      if (excludeRules && ensureArray(excludeRules).length > 0) {
+        const excludeItems = ensureArray(excludeRules).map((r: unknown) => {
+          const rule = r as Record<string, string>;
+          if (rule.ruleType === "URL_CONTAINS") {
+            return { name: "url__", stringRuleItems: [{ operator: "CONTAINS", value: rule.value }] };
+          } else if (rule.ruleType === "URL_EQUALS") {
+            return { name: "url__", stringRuleItems: [{ operator: "EQUALS", value: rule.value }] };
+          } else {
+            return { name: "ecomm_pagetype", stringRuleItems: [{ operator: "EQUALS", value: rule.value }] };
+          }
+        });
+        flexibleRuleUserList.exclusiveOperands = [{ ruleItems: excludeItems }];
+        if (excludeLifeSpan) {
+          flexibleRuleUserList.exclusiveOperands = [{
+            ruleItems: excludeItems,
+            membershipLifeSpan: excludeLifeSpan,
+          }];
+        }
+      }
+
+      const listData: Record<string, unknown> = {
+        name,
+        type: "RULE_BASED",
+        membershipLifeSpan,
+        membershipStatus: "OPEN",
+        flexibleRuleUserList,
+      };
+      if (description) listData.description = description;
+
+      const result = await client.mutateUserLists(customerId, [{ create: listData }]);
+      const results = (result as Record<string, unknown>).results as Array<Record<string, unknown>> | undefined;
+      const resourceName = results?.[0]?.resourceName as string;
+
+      return { content: [text(`Remarketing list created: "${name}"\nMembership: ${membershipLifeSpan} days\nRules: ${ensureArray(rules).length} inclusion, ${ensureArray(excludeRules).length} exclusion\nResource: ${resourceName}\n\n${formatJson(result)}`)] };
+    }
+  );
+
+  mcp.registerTool(
+    "update_remarketing_list",
+    {
+      description: [
+        "Update an existing remarketing list (name, description, membership lifespan).",
+        "WRITE OPERATION.",
+        "",
+        "Note: Rules cannot be changed after creation. To change rules, create a new list.",
+      ].join("\n"),
+      inputSchema: {
+        customerId: z.string().describe("Customer ID."),
+        userListId: z.string().describe("User list ID."),
+        name: z.string().optional().describe("New name."),
+        description: z.string().optional().describe("New description."),
+        membershipLifeSpan: z.number().optional().describe("New membership lifespan in days (1-540)."),
+        status: z.enum(["OPEN", "CLOSED"]).optional().describe("OPEN = accepting new members, CLOSED = no new members."),
+      },
+    },
+    async ({ customerId, userListId, name, description, membershipLifeSpan, status }) => {
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      if (blocked) return { content: [blocked], isError: true };
+      const client = getClient();
+      const cid = customerId.replace(/-/g, "");
+
+      const update: Record<string, unknown> = {
+        resourceName: `customers/${cid}/userLists/${userListId}`,
+      };
+      const fields: string[] = [];
+
+      if (name) { update.name = name; fields.push("name"); }
+      if (description) { update.description = description; fields.push("description"); }
+      if (membershipLifeSpan) { update.membershipLifeSpan = membershipLifeSpan; fields.push("membership_life_span"); }
+      if (status) { update.membershipStatus = status; fields.push("membership_status"); }
+
+      if (fields.length === 0) {
+        return { content: [text("Error: provide at least one field to update.")], isError: true };
+      }
+
+      const result = await client.mutateUserLists(customerId, [
+        { update, updateMask: fields.join(",") },
+      ]);
+
+      return { content: [text(`Remarketing list ${userListId} updated: ${fields.join(", ")}.\n\n${formatJson(result)}`)] };
+    }
+  );
+
   // ── Account Currency (compat) ──────────────────────────────────────
 
   mcp.registerTool(

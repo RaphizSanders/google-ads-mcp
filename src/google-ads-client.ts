@@ -335,6 +335,10 @@ export class GoogleAdsClient {
     return this.mutate(customerId, "assetGroupListingGroupFilters", operations);
   }
 
+  async mutateUserLists(customerId: string, operations: MutateOperation[]) {
+    return this.mutate(customerId, "userLists", operations);
+  }
+
   // ── Convenience Methods ──────────────────────────────────────────────
 
   /** Get account currency code. */
