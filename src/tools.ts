@@ -3209,15 +3209,67 @@ export function registerGoogleAdsTools(
   mcp.registerTool(
     "list_merchant_centers",
     {
-      description: "List Merchant Center accounts linked to a Google Ads account.",
+      description: [
+        "List Merchant Center accounts linked to a Google Ads account.",
+        "Uses two methods: merchant_center_link (MCC level) and campaign shopping_setting (account level).",
+        "Returns merchant IDs, names, and which campaigns use them.",
+      ].join("\n"),
       inputSchema: { customerId: z.string().describe("Customer ID.") },
     },
     async ({ customerId }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
-      const results = await client.searchStream(customerId, `SELECT merchant_center_link.id, merchant_center_link.merchant_center_account_name, merchant_center_link.status FROM merchant_center_link`);
-      return { content: [text(`${results.length} Merchant Center link(s).\n\n${formatJson(results)}`)] };
+
+      // Method 1: merchant_center_link (works for MCC-linked accounts)
+      let links: Array<Record<string, unknown>> = [];
+      try {
+        links = await client.searchStream(customerId, `SELECT merchant_center_link.id, merchant_center_link.merchant_center_account_name, merchant_center_link.status FROM merchant_center_link`);
+      } catch { /* may not be available */ }
+
+      // Method 2: extract from campaign shopping_setting (always works if Shopping/PMax exists)
+      const campaigns = await client.searchStream(customerId,
+        `SELECT campaign.name, campaign.status, campaign.shopping_setting.merchant_id, campaign.shopping_setting.feed_label, campaign.advertising_channel_type
+         FROM campaign
+         WHERE campaign.shopping_setting.merchant_id > 0`);
+
+      const merchantIds = new Set<string>();
+      const campaignsByMerchant: Record<string, Array<{ name: string; type: string; status: string }>> = {};
+      for (const c of campaigns) {
+        const camp = c.campaign as Record<string, unknown>;
+        const setting = camp?.shoppingSetting as Record<string, unknown>;
+        const mid = String(setting?.merchantId ?? "");
+        if (mid) {
+          merchantIds.add(mid);
+          if (!campaignsByMerchant[mid]) campaignsByMerchant[mid] = [];
+          campaignsByMerchant[mid].push({
+            name: camp?.name as string,
+            type: camp?.advertisingChannelType as string,
+            status: camp?.status as string,
+          });
+        }
+      }
+
+      // Extract feed_label from first campaign with this merchant
+      const getFeedLabel = (mid: string): string | undefined => {
+        for (const c of campaigns) {
+          const setting = (c.campaign as Record<string, unknown>)?.shoppingSetting as Record<string, unknown> | undefined;
+          if (String(setting?.merchantId ?? "") === mid && setting?.feedLabel) return setting.feedLabel as string;
+        }
+        return undefined;
+      };
+
+      const result = {
+        merchant_center_links: links.length > 0 ? links : "(not available at account level — use campaign method below)",
+        merchants_from_campaigns: [...merchantIds].map(mid => ({
+          merchant_id: mid,
+          feed_label: getFeedLabel(mid),
+          campaigns_using: campaignsByMerchant[mid],
+        })),
+      };
+
+      const total = links.length + merchantIds.size;
+      return { content: [text(`${total > 0 ? `${merchantIds.size} merchant(s) found.` : "No Merchant Center linked."}\n\n${formatJson(result)}`)] };
     }
   );
 
