@@ -3598,49 +3598,35 @@ export function registerGoogleAdsTools(
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
 
-      const ruleItems = ensureArray(rules).map((r: unknown) => {
+      const makeRuleItem = (r: unknown) => {
         const rule = r as Record<string, string>;
-        if (rule.ruleType === "URL_CONTAINS") {
-          return { name: "url__", stringRuleItems: [{ operator: "CONTAINS", value: rule.value }] };
-        } else if (rule.ruleType === "URL_EQUALS") {
-          return { name: "url__", stringRuleItems: [{ operator: "EQUALS", value: rule.value }] };
-        } else {
-          return { name: "ecomm_pagetype", stringRuleItems: [{ operator: "EQUALS", value: rule.value }] };
-        }
-      });
+        const op = rule.ruleType === "URL_CONTAINS" ? "CONTAINS" : "EQUALS";
+        const fieldName = rule.ruleType === "CUSTOM_EVENT" ? "ecomm_pagetype" : "url__";
+        return { name: fieldName, stringRuleItem: { operator: op, value: rule.value } };
+      };
 
-      const ruleGroups = [{ ruleItems }];
-      const flexibleRuleUserList: Record<string, unknown> = {
+      const inclusiveRuleItems = ensureArray(rules).map(makeRuleItem);
+
+      const flexRule: Record<string, unknown> = {
         inclusiveRuleOperator: (ruleOperator ?? "OR") === "AND" ? "AND" : "OR",
-        inclusiveOperands: ruleGroups.map(g => ({ ruleItems: g.ruleItems })),
+        inclusiveOperands: [{ rule: { ruleItemGroups: [{ ruleItems: inclusiveRuleItems }] } }],
       };
 
       if (excludeRules && ensureArray(excludeRules).length > 0) {
-        const excludeItems = ensureArray(excludeRules).map((r: unknown) => {
-          const rule = r as Record<string, string>;
-          if (rule.ruleType === "URL_CONTAINS") {
-            return { name: "url__", stringRuleItems: [{ operator: "CONTAINS", value: rule.value }] };
-          } else if (rule.ruleType === "URL_EQUALS") {
-            return { name: "url__", stringRuleItems: [{ operator: "EQUALS", value: rule.value }] };
-          } else {
-            return { name: "ecomm_pagetype", stringRuleItems: [{ operator: "EQUALS", value: rule.value }] };
-          }
-        });
-        flexibleRuleUserList.exclusiveOperands = [{ ruleItems: excludeItems }];
-        if (excludeLifeSpan) {
-          flexibleRuleUserList.exclusiveOperands = [{
-            ruleItems: excludeItems,
-            membershipLifeSpan: excludeLifeSpan,
-          }];
-        }
+        const exclusiveRuleItems = ensureArray(excludeRules).map(makeRuleItem);
+        flexRule.exclusiveOperands = [{
+          rule: { ruleItemGroups: [{ ruleItems: exclusiveRuleItems }] },
+          ...(excludeLifeSpan && { lookbackWindowDays: excludeLifeSpan }),
+        }];
       }
+
+      const ruleBasedUserList = { flexibleRuleUserList: flexRule };
 
       const listData: Record<string, unknown> = {
         name,
-        type: "RULE_BASED",
         membershipLifeSpan,
         membershipStatus: "OPEN",
-        flexibleRuleUserList,
+        ruleBasedUserList,
       };
       if (description) listData.description = description;
 
