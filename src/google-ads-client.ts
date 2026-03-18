@@ -335,8 +335,30 @@ export class GoogleAdsClient {
     return this.mutate(customerId, "assetGroupListingGroupFilters", operations);
   }
 
+  async mutateAssetGroupSignals(customerId: string, operations: MutateOperation[]) {
+    return this.mutate(customerId, "assetGroupSignals", operations);
+  }
+
+  async mutateAudiences(customerId: string, operations: MutateOperation[]) {
+    return this.mutate(customerId, "audiences", operations);
+  }
+
   async mutateUserLists(customerId: string, operations: MutateOperation[]) {
     return this.mutate(customerId, "userLists", operations);
+  }
+
+  /**
+   * Atomic batch mutate across multiple resource types.
+   * Uses googleAds:mutate endpoint — essential for PMax creation
+   * where campaign assets must exist before asset group validation.
+   */
+  async batchMutate(
+    customerId: string,
+    mutateOperations: Array<Record<string, unknown>>
+  ): Promise<Record<string, unknown>> {
+    const cid = customerId.replace(/-/g, "");
+    const url = `${API_BASE}/customers/${cid}/googleAds:mutate`;
+    return this.request<Record<string, unknown>>("POST", url, { mutateOperations });
   }
 
   // ── Convenience Methods ──────────────────────────────────────────────

@@ -1822,21 +1822,28 @@ export function registerGoogleAdsTools(
     "create_pmax_campaign",
     {
       description: [
-        "Create a complete Performance Max campaign with budget and asset group.",
+        "Create a complete Performance Max campaign with budget, asset group, and all assets.",
         "WRITE OPERATION — creates a real PMax campaign in the account.",
         "Campaign is created PAUSED by default for safety.",
+        "",
+        "Uses atomic batch mutate (googleAds:mutate) to avoid race conditions with Brand Guidelines.",
+        "",
+        "IMPORTANT — Brand Guidelines (auto-enabled in API v23):",
+        "- Business name + logo are linked as CAMPAIGN-level assets (not asset group)",
+        "- Asset group inherits BN/logo from campaign — do NOT pass them in asset group",
         "",
         "PMax requires at minimum:",
         "- 3+ headlines (max 30 chars each)",
         "- 2+ long headlines (max 90 chars each)",
         "- 1+ description (max 90 chars each)",
-        "- 1+ marketing image asset (landscape 1200x628 recommended)",
+        "- 1+ marketing image asset (landscape 1200x628)",
         "- 1+ square marketing image asset (1200x1200)",
-        "- 1+ logo asset (1200x1200)",
+        "- 1+ logo asset (square, for Brand Guidelines)",
         "- Final URL",
         "",
-        "Pass image/logo/video resource names from upload_image_asset or get_image_assets.",
+        "Pass image/logo resource names from upload_image_asset or get_image_assets.",
         "For e-commerce: pass merchantId to link the Merchant Center feed.",
+        "Use feedLabel (e.g. 'BR') instead of salesCountry (deprecated in v23).",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
@@ -1850,205 +1857,138 @@ export function registerGoogleAdsTools(
         headlines: flexArray(z.string()).describe("3-5 headlines (max 30 chars each)."),
         longHeadlines: flexArray(z.string()).describe("1-5 long headlines (max 90 chars each)."),
         descriptions: flexArray(z.string()).describe("1-5 descriptions (max 90 chars each)."),
-        businessName: z.string().describe("Business name shown in ads."),
-        marketingImageAssets: flexArray(z.string()).describe("Resource names of landscape images (from upload_image_asset)."),
+        businessNameAsset: z.string().describe("Resource name of existing business name TEXT asset (from get_image_assets or run_gaql). Must already exist in the account."),
+        marketingImageAssets: flexArray(z.string()).describe("Resource names of landscape images."),
         squareMarketingImageAssets: flexArray(z.string()).describe("Resource names of square images."),
-        logoAssets: flexArray(z.string()).describe("Resource names of logo images."),
+        logoAssets: flexArray(z.string()).describe("Resource names of logo images (square). First one is used for Brand Guidelines campaign-level."),
         videoAssets: flexArray(z.string()).optional().describe("Resource names of video assets (optional)."),
-        merchantId: z.string().optional().describe("Merchant Center ID for e-commerce (links product feed)."),
-        salesCountry: z.string().optional().describe("Sales country code (e.g. 'BR'). Required with merchantId."),
+        merchantId: z.string().optional().describe("Merchant Center ID for e-commerce."),
+        feedLabel: z.string().optional().describe("Feed label (e.g. 'BR'). Default: 'BR'. Replaces deprecated salesCountry."),
+        audienceResourceName: z.string().optional().describe("Audience resource name for audience signal (from list_audience_segments or list_remarketing_lists)."),
       },
     },
-    async ({ customerId, name, dailyBudgetMicros, biddingStrategy, targetRoas, assetGroupName, finalUrl, headlines, longHeadlines, descriptions, businessName, marketingImageAssets, squareMarketingImageAssets, logoAssets, videoAssets, merchantId, salesCountry }) => {
+    async ({ customerId, name, dailyBudgetMicros, biddingStrategy, targetRoas, assetGroupName, finalUrl, headlines, longHeadlines, descriptions, businessNameAsset, marketingImageAssets, squareMarketingImageAssets, logoAssets, videoAssets, merchantId, feedLabel, audienceResourceName }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
 
-      // Step 1: Create budget
-      const budgetResult = await client.mutateCampaignBudgets(customerId, [
-        {
-          create: {
-            name: `Budget — ${name}`,
-            amountMicros: String(dailyBudgetMicros),
-            deliveryMethod: "STANDARD",
-            explicitlyShared: false,
-          },
-        },
-      ]);
-      const budgetResults = (budgetResult as Record<string, unknown>).results as Array<Record<string, unknown>>;
-      const budgetResourceName = budgetResults?.[0]?.resourceName as string;
-      if (!budgetResourceName) {
-        return { content: [text("Error: failed to create budget.")], isError: true };
-      }
-
-      // Step 2: Create campaign
-      const strategy = biddingStrategy ?? "MAXIMIZE_CONVERSION_VALUE";
-      const campaignData: Record<string, unknown> = {
-        name,
-        status: "PAUSED",
-        advertisingChannelType: "PERFORMANCE_MAX",
-        campaignBudget: budgetResourceName,
-        containsEuPoliticalAdvertising: 3,
-      };
-      if (strategy === "MAXIMIZE_CONVERSION_VALUE") {
-        campaignData.maximizeConversionValue = targetRoas ? { targetRoas } : {};
-      } else {
-        campaignData.maximizeConversions = {};
-      }
-      if (merchantId) {
-        campaignData.shoppingSetting = {
-          merchantId: String(merchantId),
-          salesCountry: salesCountry ?? "BR",
-        };
-      }
-
-      const campaignResult = await client.mutateCampaigns(customerId, [{ create: campaignData }]);
-      const campaignResults = (campaignResult as Record<string, unknown>).results as Array<Record<string, unknown>>;
-      const campaignResourceName = campaignResults?.[0]?.resourceName as string;
-      if (!campaignResourceName) {
-        return { content: [text("Error: failed to create campaign.")], isError: true };
-      }
-
-      // Step 3: Create asset group
-      const assetGroupData: Record<string, unknown> = {
-        name: assetGroupName,
-        campaign: campaignResourceName,
-        status: "PAUSED",
-        finalUrls: [finalUrl],
-      };
-
-      const assetGroupResult = await client.mutateAssetGroups(customerId, [{ create: assetGroupData }]);
-      const assetGroupResults = (assetGroupResult as Record<string, unknown>).results as Array<Record<string, unknown>>;
-      const assetGroupResourceName = assetGroupResults?.[0]?.resourceName as string;
-      if (!assetGroupResourceName) {
-        return { content: [text("Error: failed to create asset group.")], isError: true };
-      }
-
-      // Step 4: Create text assets (headlines, long headlines, descriptions) and link them
+      // Step 1: Create text assets for headlines, long headlines, descriptions
       const textAssetOps: Array<Record<string, unknown>> = [];
-
-      for (const h of headlines) {
-        textAssetOps.push({ create: { name: h.substring(0, 30), type: "TEXT", textAsset: { text: h } } });
+      for (const h of ensureArray<string>(headlines)) {
+        textAssetOps.push({ create: { type: "TEXT", textAsset: { text: h } } });
       }
-      for (const lh of longHeadlines) {
-        textAssetOps.push({ create: { name: lh.substring(0, 30), type: "TEXT", textAsset: { text: lh } } });
+      for (const lh of ensureArray<string>(longHeadlines)) {
+        textAssetOps.push({ create: { type: "TEXT", textAsset: { text: lh } } });
       }
-      for (const d of descriptions) {
-        textAssetOps.push({ create: { name: d.substring(0, 30), type: "TEXT", textAsset: { text: d } } });
+      for (const d of ensureArray<string>(descriptions)) {
+        textAssetOps.push({ create: { type: "TEXT", textAsset: { text: d } } });
       }
-
-      // Add business name asset
-      textAssetOps.push({ create: { name: `BN: ${businessName}`, type: "TEXT", textAsset: { text: businessName } } });
 
       const textAssetResult = await client.mutateAssets(customerId, textAssetOps as unknown as import("./google-ads-client.js").MutateOperation[]);
-      const textAssetResults = (textAssetResult as Record<string, unknown>).results as Array<Record<string, unknown>> | undefined;
-
-      if (!textAssetResults || textAssetResults.length === 0) {
+      const textResults = (textAssetResult as Record<string, unknown>).results as Array<Record<string, unknown>>;
+      if (!textResults || textResults.length === 0) {
         return { content: [text("Error: failed to create text assets.")], isError: true };
       }
 
-      // Step 5: Link ALL assets to asset group
-      const linkOps: Array<Record<string, unknown>> = [];
+      // Step 2: Atomic batch — budget + campaign + campaign assets + asset group + asset group assets + listing group
+      const budgetTmp = `customers/${cid}/campaignBudgets/-1`;
+      const campTmp = `customers/${cid}/campaigns/-2`;
+      const agTmp = `customers/${cid}/assetGroups/-3`;
+
+      const strategy = biddingStrategy ?? "MAXIMIZE_CONVERSION_VALUE";
+      const campaignCreate: Record<string, unknown> = {
+        resourceName: campTmp,
+        name,
+        status: "PAUSED",
+        advertisingChannelType: "PERFORMANCE_MAX",
+        campaignBudget: budgetTmp,
+        containsEuPoliticalAdvertising: 3,
+      };
+      if (strategy === "MAXIMIZE_CONVERSION_VALUE") {
+        campaignCreate.maximizeConversionValue = targetRoas ? { targetRoas } : {};
+      } else {
+        campaignCreate.maximizeConversions = {};
+      }
+      if (merchantId) {
+        campaignCreate.shoppingSetting = { merchantId: String(merchantId), feedLabel: feedLabel ?? "BR" };
+      }
+
+      const hlArr = ensureArray<string>(headlines);
+      const lhArr = ensureArray<string>(longHeadlines);
+      const descArr = ensureArray<string>(descriptions);
+      const mktImgs = ensureArray<string>(marketingImageAssets);
+      const sqImgs = ensureArray<string>(squareMarketingImageAssets);
+      const logos = ensureArray<string>(logoAssets);
+      const videos = videoAssets ? ensureArray<string>(videoAssets) : [];
+
+      const ops: Array<Record<string, unknown>> = [
+        // Budget
+        { campaignBudgetOperation: { create: { resourceName: budgetTmp, name: `Budget — ${name}`, amountMicros: String(dailyBudgetMicros), deliveryMethod: "STANDARD", explicitlyShared: false } } },
+        // Campaign
+        { campaignOperation: { create: campaignCreate } },
+        // Campaign Assets (Brand Guidelines) — BN + first logo
+        { campaignAssetOperation: { create: { campaign: campTmp, asset: businessNameAsset, fieldType: "BUSINESS_NAME" } } },
+        { campaignAssetOperation: { create: { campaign: campTmp, asset: logos[0], fieldType: "LOGO" } } },
+        // Asset Group
+        { assetGroupOperation: { create: { resourceName: agTmp, name: assetGroupName, campaign: campTmp, status: "PAUSED", finalUrls: [finalUrl] } } },
+      ];
+
+      // Asset Group Assets — text (NO BN/LOGO — inherited from campaign via Brand Guidelines)
       let idx = 0;
+      for (let i = 0; i < hlArr.length; i++) {
+        ops.push({ assetGroupAssetOperation: { create: { assetGroup: agTmp, asset: textResults[idx++]?.resourceName, fieldType: "HEADLINE" } } });
+      }
+      for (let i = 0; i < lhArr.length; i++) {
+        ops.push({ assetGroupAssetOperation: { create: { assetGroup: agTmp, asset: textResults[idx++]?.resourceName, fieldType: "LONG_HEADLINE" } } });
+      }
+      for (let i = 0; i < descArr.length; i++) {
+        ops.push({ assetGroupAssetOperation: { create: { assetGroup: agTmp, asset: textResults[idx++]?.resourceName, fieldType: "DESCRIPTION" } } });
+      }
+      // Images (in asset group)
+      for (const img of mktImgs) { ops.push({ assetGroupAssetOperation: { create: { assetGroup: agTmp, asset: img, fieldType: "MARKETING_IMAGE" } } }); }
+      for (const img of sqImgs) { ops.push({ assetGroupAssetOperation: { create: { assetGroup: agTmp, asset: img, fieldType: "SQUARE_MARKETING_IMAGE" } } }); }
+      // Videos
+      for (const vid of videos) { ops.push({ assetGroupAssetOperation: { create: { assetGroup: agTmp, asset: vid, fieldType: "YOUTUBE_VIDEO" } } }); }
+      // Listing group only for Shopping/Merchant campaigns (not required for non-shopping PMax)
+      // Created separately after batch to avoid caseValue issues
+      // Location + Language
+      ops.push({ campaignCriterionOperation: { create: { campaign: campTmp, location: { geoTargetConstant: "geoTargetConstants/2076" }, negative: false } } });
+      ops.push({ campaignCriterionOperation: { create: { campaign: campTmp, language: { languageConstant: "languageConstants/1014" } } } });
 
-      // Headlines
-      for (let i = 0; i < headlines.length; i++) {
-        linkOps.push({
-          create: {
-            assetGroup: assetGroupResourceName,
-            asset: textAssetResults[idx]?.resourceName,
-            fieldType: "HEADLINE",
-          },
-        });
-        idx++;
+      // Execute atomic batch
+      const batchResult = await client.batchMutate(customerId, ops);
+      const responses = (batchResult as Record<string, unknown>).mutateOperationResponses as Array<Record<string, unknown>> | undefined;
+      if (!responses) {
+        return { content: [text("Error: batch mutate failed.\n" + formatJson(batchResult))], isError: true };
       }
-      // Long headlines
-      for (let i = 0; i < longHeadlines.length; i++) {
-        linkOps.push({
-          create: {
-            assetGroup: assetGroupResourceName,
-            asset: textAssetResults[idx]?.resourceName,
-            fieldType: "LONG_HEADLINE",
-          },
-        });
-        idx++;
-      }
-      // Descriptions
-      for (let i = 0; i < descriptions.length; i++) {
-        linkOps.push({
-          create: {
-            assetGroup: assetGroupResourceName,
-            asset: textAssetResults[idx]?.resourceName,
-            fieldType: "DESCRIPTION",
-          },
-        });
-        idx++;
-      }
-      // Business name
-      linkOps.push({
-        create: {
-          assetGroup: assetGroupResourceName,
-          asset: textAssetResults[idx]?.resourceName,
-          fieldType: "BUSINESS_NAME",
-        },
-      });
 
-      // Marketing images (landscape)
-      for (const imgRes of marketingImageAssets) {
-        linkOps.push({
-          create: {
-            assetGroup: assetGroupResourceName,
-            asset: imgRes,
-            fieldType: "MARKETING_IMAGE",
-          },
-        });
-      }
-      // Square marketing images
-      for (const imgRes of squareMarketingImageAssets) {
-        linkOps.push({
-          create: {
-            assetGroup: assetGroupResourceName,
-            asset: imgRes,
-            fieldType: "SQUARE_MARKETING_IMAGE",
-          },
-        });
-      }
-      // Logos
-      for (const logoRes of logoAssets) {
-        linkOps.push({
-          create: {
-            assetGroup: assetGroupResourceName,
-            asset: logoRes,
-            fieldType: "LOGO",
-          },
-        });
-      }
-      // Videos (optional)
-      if (videoAssets) {
-        for (const vidRes of videoAssets) {
-          linkOps.push({
-            create: {
-              assetGroup: assetGroupResourceName,
-              asset: vidRes,
-              fieldType: "YOUTUBE_VIDEO",
-            },
-          });
+      const campaignResourceName = (responses.find(r => (r as Record<string, unknown>).campaignResult) as Record<string, unknown> | undefined)?.campaignResult as Record<string, unknown> | undefined;
+      const assetGroupResourceName = (responses.find(r => (r as Record<string, unknown>).assetGroupResult) as Record<string, unknown> | undefined)?.assetGroupResult as Record<string, unknown> | undefined;
+
+      // Step 3: Listing group filter (separate call for Shopping PMax — requires real resource names)
+      if (merchantId && assetGroupResourceName?.resourceName) {
+        try {
+          await client.mutateAssetGroupListingGroupFilters(customerId, [
+            { create: { assetGroup: assetGroupResourceName.resourceName as string, type: "UNIT_INCLUDED", listingSource: "SHOPPING" } },
+          ] as unknown as import("./google-ads-client.js").MutateOperation[]);
+        } catch {
+          // Non-fatal: listing group can be added manually
         }
       }
 
-      await client.mutateAssetGroupAssets(customerId, linkOps as unknown as import("./google-ads-client.js").MutateOperation[]);
-
-      // Step 6: Create listing group filter (required for PMax — "all products" by default)
-      await client.mutateAssetGroupListingGroupFilters(customerId, [
-        {
-          create: {
-            assetGroup: assetGroupResourceName,
-            type: "UNIT_INCLUDED",
-            listingSource: merchantId ? "SHOPPING" : "WEBPAGE",
-          },
-        },
-      ] as unknown as import("./google-ads-client.js").MutateOperation[]);
+      // Step 4: Audience signal (optional, separate call — not supported in batch with temp resource names)
+      let audienceInfo = "";
+      if (audienceResourceName) {
+        try {
+          await client.mutateAssetGroupSignals(customerId, [
+            { create: { assetGroup: assetGroupResourceName?.resourceName as string, audience: { audience: audienceResourceName } } },
+          ]);
+          audienceInfo = `\n- Audience Signal: ${audienceResourceName}`;
+        } catch (e) {
+          audienceInfo = `\n- Audience Signal: FAILED (${(e as Error).message.substring(0, 80)})`;
+        }
+      }
 
       return {
         content: [
@@ -2058,13 +1998,15 @@ export function registerGoogleAdsTools(
               `- Budget: R$ ${(dailyBudgetMicros / 1_000_000).toFixed(2)}/day\n` +
               `- Bidding: ${strategy}${targetRoas ? ` (target ROAS: ${targetRoas}x)` : ""}\n` +
               `- Asset Group: ${assetGroupName}\n` +
-              `  - ${headlines.length} headlines, ${longHeadlines.length} long headlines, ${descriptions.length} descriptions\n` +
-              `  - ${marketingImageAssets.length} landscape images, ${squareMarketingImageAssets.length} square images, ${logoAssets.length} logos\n` +
-              `  - ${videoAssets?.length ?? 0} videos\n` +
-              `${merchantId ? `- Merchant Center: ${merchantId} (${salesCountry ?? "BR"})\n` : ""}` +
-              `- Campaign: ${campaignResourceName}\n` +
-              `- Asset Group: ${assetGroupResourceName}\n\n` +
-              `Use update_campaign to ENABLE when ready.`
+              `  - ${hlArr.length} headlines, ${lhArr.length} long headlines, ${descArr.length} descriptions\n` +
+              `  - ${mktImgs.length} landscape, ${sqImgs.length} square, ${logos.length} logos\n` +
+              `  - ${videos.length} videos\n` +
+              `  - BN + Logo via Brand Guidelines (campaign level)\n` +
+              `${merchantId ? `- Merchant Center: ${merchantId} (feed: ${feedLabel ?? "BR"})\n` : ""}` +
+              `- Campaign: ${campaignResourceName?.resourceName}\n` +
+              `- Asset Group: ${assetGroupResourceName?.resourceName}` +
+              audienceInfo +
+              `\n\nUse update_campaign to ENABLE when ready.`
           ),
         ],
       };
@@ -2079,7 +2021,11 @@ export function registerGoogleAdsTools(
         "WRITE OPERATION — adds an asset group to a campaign.",
         "",
         "Use this to add additional asset groups to a PMax campaign (e.g. different product lines).",
-        "Each asset group needs its own set of text assets (headlines, descriptions) and image/video assets.",
+        "Each asset group needs headlines, descriptions, and images.",
+        "",
+        "IMPORTANT — Brand Guidelines (API v23):",
+        "- Do NOT include business name or logo in the asset group — they are inherited from campaign-level assets.",
+        "- Only pass headlines, long headlines, descriptions, and images.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
@@ -2089,54 +2035,51 @@ export function registerGoogleAdsTools(
         headlines: flexArray(z.string()).describe("3-5 headlines (max 30 chars)."),
         longHeadlines: flexArray(z.string()).describe("1-5 long headlines (max 90 chars)."),
         descriptions: flexArray(z.string()).describe("1-5 descriptions (max 90 chars)."),
-        businessName: z.string().describe("Business name."),
         marketingImageAssets: flexArray(z.string()).describe("Resource names of landscape images."),
         squareMarketingImageAssets: flexArray(z.string()).describe("Resource names of square images."),
-        logoAssets: flexArray(z.string()).describe("Resource names of logos."),
         videoAssets: flexArray(z.string()).optional().describe("Resource names of videos (optional)."),
       },
     },
-    async ({ customerId, campaignId, name, finalUrl, headlines, longHeadlines, descriptions, businessName, marketingImageAssets, squareMarketingImageAssets, logoAssets, videoAssets }) => {
+    async ({ customerId, campaignId, name, finalUrl, headlines, longHeadlines, descriptions, marketingImageAssets, squareMarketingImageAssets, videoAssets }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
-
       const campaignResource = `customers/${cid}/campaigns/${campaignId}`;
 
-      // Create asset group
-      const agResult = await client.mutateAssetGroups(customerId, [
-        { create: { name, campaign: campaignResource, status: "PAUSED", finalUrls: [finalUrl] } },
-      ]);
-      const agResults = (agResult as Record<string, unknown>).results as Array<Record<string, unknown>>;
-      const agResource = agResults?.[0]?.resourceName as string;
-      if (!agResource) {
-        return { content: [text("Error: failed to create asset group.")], isError: true };
-      }
+      const hlArr = ensureArray<string>(headlines);
+      const lhArr = ensureArray<string>(longHeadlines);
+      const descArr = ensureArray<string>(descriptions);
+      const mktImgs = ensureArray<string>(marketingImageAssets);
+      const sqImgs = ensureArray<string>(squareMarketingImageAssets);
+      const videos = videoAssets ? ensureArray<string>(videoAssets) : [];
 
       // Create text assets
       const textOps = [
-        ...headlines.map(h => ({ create: { name: h.substring(0, 30), type: "TEXT", textAsset: { text: h } } })),
-        ...longHeadlines.map(lh => ({ create: { name: lh.substring(0, 30), type: "TEXT", textAsset: { text: lh } } })),
-        ...descriptions.map(d => ({ create: { name: d.substring(0, 30), type: "TEXT", textAsset: { text: d } } })),
-        { create: { name: `BN: ${businessName}`, type: "TEXT", textAsset: { text: businessName } } },
+        ...hlArr.map(h => ({ create: { type: "TEXT", textAsset: { text: h } } })),
+        ...lhArr.map(lh => ({ create: { type: "TEXT", textAsset: { text: lh } } })),
+        ...descArr.map(d => ({ create: { type: "TEXT", textAsset: { text: d } } })),
       ];
 
       const textResult = await client.mutateAssets(customerId, textOps as unknown as import("./google-ads-client.js").MutateOperation[]);
       const textResults = (textResult as Record<string, unknown>).results as Array<Record<string, unknown>>;
 
-      // Link assets
+      // Create asset group
+      const agResult = await client.mutateAssetGroups(customerId, [
+        { create: { name, campaign: campaignResource, status: "PAUSED", finalUrls: [finalUrl] } },
+      ]);
+      const agResource = ((agResult as Record<string, unknown>).results as Array<Record<string, unknown>>)?.[0]?.resourceName as string;
+      if (!agResource) return { content: [text("Error: failed to create asset group.")], isError: true };
+
+      // Link assets — NO BN/LOGO (inherited from campaign via Brand Guidelines)
       const linkOps: Array<Record<string, unknown>> = [];
       let idx = 0;
-      for (let i = 0; i < headlines.length; i++) { linkOps.push({ create: { assetGroup: agResource, asset: textResults[idx++]?.resourceName, fieldType: "HEADLINE" } }); }
-      for (let i = 0; i < longHeadlines.length; i++) { linkOps.push({ create: { assetGroup: agResource, asset: textResults[idx++]?.resourceName, fieldType: "LONG_HEADLINE" } }); }
-      for (let i = 0; i < descriptions.length; i++) { linkOps.push({ create: { assetGroup: agResource, asset: textResults[idx++]?.resourceName, fieldType: "DESCRIPTION" } }); }
-      linkOps.push({ create: { assetGroup: agResource, asset: textResults[idx]?.resourceName, fieldType: "BUSINESS_NAME" } });
-
-      for (const r of marketingImageAssets) { linkOps.push({ create: { assetGroup: agResource, asset: r, fieldType: "MARKETING_IMAGE" } }); }
-      for (const r of squareMarketingImageAssets) { linkOps.push({ create: { assetGroup: agResource, asset: r, fieldType: "SQUARE_MARKETING_IMAGE" } }); }
-      for (const r of logoAssets) { linkOps.push({ create: { assetGroup: agResource, asset: r, fieldType: "LOGO" } }); }
-      if (videoAssets) { for (const r of videoAssets) { linkOps.push({ create: { assetGroup: agResource, asset: r, fieldType: "YOUTUBE_VIDEO" } }); } }
+      for (let i = 0; i < hlArr.length; i++) { linkOps.push({ create: { assetGroup: agResource, asset: textResults[idx++]?.resourceName, fieldType: "HEADLINE" } }); }
+      for (let i = 0; i < lhArr.length; i++) { linkOps.push({ create: { assetGroup: agResource, asset: textResults[idx++]?.resourceName, fieldType: "LONG_HEADLINE" } }); }
+      for (let i = 0; i < descArr.length; i++) { linkOps.push({ create: { assetGroup: agResource, asset: textResults[idx++]?.resourceName, fieldType: "DESCRIPTION" } }); }
+      for (const r of mktImgs) { linkOps.push({ create: { assetGroup: agResource, asset: r, fieldType: "MARKETING_IMAGE" } }); }
+      for (const r of sqImgs) { linkOps.push({ create: { assetGroup: agResource, asset: r, fieldType: "SQUARE_MARKETING_IMAGE" } }); }
+      if (videos.length > 0) { for (const r of videos) { linkOps.push({ create: { assetGroup: agResource, asset: r, fieldType: "YOUTUBE_VIDEO" } }); } }
 
       await client.mutateAssetGroupAssets(customerId, linkOps as unknown as import("./google-ads-client.js").MutateOperation[]);
 
@@ -2488,14 +2431,14 @@ export function registerGoogleAdsTools(
         name: z.string().describe("Campaign name."),
         merchantId: z.string().describe("Merchant Center ID."),
         dailyBudgetMicros: z.number().describe("Daily budget in MICROS."),
-        salesCountry: z.string().optional().describe("Sales country (default: BR)."),
+        feedLabel: z.string().optional().describe("Feed label (default: BR). Replaces deprecated salesCountry in API v23."),
         biddingStrategy: z.enum(["MAXIMIZE_CONVERSIONS", "MAXIMIZE_CONVERSION_VALUE", "MANUAL_CPC", "TARGET_ROAS"]).optional()
           .describe("Default: MAXIMIZE_CONVERSION_VALUE."),
         targetRoas: z.number().optional().describe("Target ROAS."),
         campaignPriority: z.number().optional().describe("Priority: 0 (low), 1 (medium), 2 (high). Default: 0."),
       },
     },
-    async ({ customerId, name, merchantId, dailyBudgetMicros, salesCountry, biddingStrategy, targetRoas, campaignPriority }) => {
+    async ({ customerId, name, merchantId, dailyBudgetMicros, feedLabel, biddingStrategy, targetRoas, campaignPriority }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
@@ -2510,7 +2453,7 @@ export function registerGoogleAdsTools(
         name, status: "PAUSED", advertisingChannelType: "SHOPPING", campaignBudget: budgetResource, containsEuPoliticalAdvertising: 3,
         shoppingSetting: {
           merchantId: String(merchantId),
-          salesCountry: salesCountry ?? "BR",
+          feedLabel: feedLabel ?? "BR",
           campaignPriority: campaignPriority ?? 0,
         },
         networkSettings: { targetGoogleSearch: true, targetSearchNetwork: true, targetContentNetwork: false },
@@ -3614,6 +3557,97 @@ export function registerGoogleAdsTools(
   );
 
   mcp.registerTool(
+    "add_audience_signal",
+    {
+      description: [
+        "Add an audience signal to a PMax asset group.",
+        "WRITE OPERATION.",
+        "",
+        "Audience signals tell PMax which users to prioritize. They DON'T restrict targeting",
+        "— PMax still finds new audiences, but starts with these as hints.",
+        "",
+        "Two types:",
+        "1. Audience signal: link an existing Audience (from list_audience_segments) or create one from user lists",
+        "2. Search theme signal: add a keyword/phrase signal",
+        "",
+        "For remarketing PMax: first use list_remarketing_lists to find existing populated lists,",
+        "then create an Audience from them, then link as signal.",
+        "",
+        "IMPORTANT: Do NOT create new empty remarketing lists. Use existing populated ones.",
+      ].join("\n"),
+      inputSchema: {
+        customerId: z.string().describe("Customer ID."),
+        assetGroupId: z.string().describe("Asset group ID."),
+        signalType: z.enum(["audience", "search_theme"]).describe("Signal type."),
+        audienceResourceName: z.string().optional().describe("For 'audience' type: Audience resource name. Create with create_audience_from_lists if needed."),
+        searchThemeText: z.string().optional().describe("For 'search_theme' type: keyword/phrase."),
+      },
+    },
+    async ({ customerId, assetGroupId, signalType, audienceResourceName, searchThemeText }) => {
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      if (blocked) return { content: [blocked], isError: true };
+      const client = getClient();
+      const cid = customerId.replace(/-/g, "");
+      const agResource = `customers/${cid}/assetGroups/${assetGroupId}`;
+
+      if (signalType === "audience" && audienceResourceName) {
+        await client.mutateAssetGroupSignals(customerId, [
+          { create: { assetGroup: agResource, audience: { audience: audienceResourceName } } },
+        ] as unknown as import("./google-ads-client.js").MutateOperation[]);
+        return { content: [text(`Audience signal linked to asset group ${assetGroupId}.\nAudience: ${audienceResourceName}`)] };
+      } else if (signalType === "search_theme" && searchThemeText) {
+        await client.mutateAssetGroupSignals(customerId, [
+          { create: { assetGroup: agResource, searchTheme: { text: searchThemeText } } },
+        ] as unknown as import("./google-ads-client.js").MutateOperation[]);
+        return { content: [text(`Search theme signal added: "${searchThemeText}"\nAsset group: ${assetGroupId}`)] };
+      }
+      return { content: [text("Error: provide audienceResourceName for 'audience' type or searchThemeText for 'search_theme' type.")], isError: true };
+    }
+  );
+
+  mcp.registerTool(
+    "create_audience_from_lists",
+    {
+      description: [
+        "Create an Audience resource from existing user lists (remarketing lists).",
+        "WRITE OPERATION.",
+        "",
+        "Use this to combine multiple remarketing lists into one Audience,",
+        "then link it as a signal to a PMax asset group with add_audience_signal.",
+        "",
+        "First call list_remarketing_lists to find populated lists (size > 0).",
+        "Pass their resource names (customers/XXX/userLists/YYY format).",
+      ].join("\n"),
+      inputSchema: {
+        customerId: z.string().describe("Customer ID."),
+        name: z.string().describe("Audience name."),
+        userListResourceNames: flexArray(z.string()).describe("Resource names of user lists to include."),
+      },
+    },
+    async ({ customerId, name, userListResourceNames }) => {
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      if (blocked) return { content: [blocked], isError: true };
+      const client = getClient();
+      const lists = ensureArray<string>(userListResourceNames);
+
+      const segments = lists.map(ul => ({ userList: { userList: ul } }));
+
+      const result = await client.mutateAudiences(customerId, [
+        {
+          create: {
+            name,
+            status: "ENABLED",
+            dimensions: [{ audienceSegments: { segments } }],
+          },
+        },
+      ] as unknown as import("./google-ads-client.js").MutateOperation[]);
+
+      const resourceName = ((result as Record<string, unknown>).results as Array<Record<string, unknown>>)?.[0]?.resourceName as string;
+      return { content: [text(`Audience created: "${name}"\nResource: ${resourceName}\nUser lists: ${lists.length}\n\nUse this resource name in add_audience_signal.`)] };
+    }
+  );
+
+  mcp.registerTool(
     "create_remarketing_list",
     {
       description: [
@@ -3672,15 +3706,17 @@ export function registerGoogleAdsTools(
         }];
       }
 
-      const ruleBasedUserList = { flexibleRuleUserList: flexRule };
-
       const listData: Record<string, unknown> = {
         name,
         membershipLifeSpan,
         membershipStatus: "OPEN",
-        ruleBasedUserList,
+        ruleBasedUserList: { flexibleRuleUserList: flexRule },
       };
       if (description) listData.description = description;
+
+      // NOTE: If flexibleRuleUserList fails (v23 format change), the tool will
+      // return the API error. Use GA4-based lists (created in GA4 UI) for more
+      // reliable rule-based remarketing — they sync automatically to Google Ads.
 
       const result = await client.mutateUserLists(customerId, [{ create: listData }]);
       const results = (result as Record<string, unknown>).results as Array<Record<string, unknown>> | undefined;
