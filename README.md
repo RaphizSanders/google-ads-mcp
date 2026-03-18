@@ -78,7 +78,7 @@ PORT=3333 GOOGLE_ADS_CREDENTIALS_PATH=./creds.json \
 
 ---
 
-## Tools (75 total)
+## Tools (78 total)
 
 ### Descoberta de contas
 
@@ -224,6 +224,14 @@ PORT=3333 GOOGLE_ADS_CREDENTIALS_PATH=./creds.json \
 | `assign_label` | Vincula label a campanha, ad group ou ad |
 | `list_labels` | Lista labels da conta |
 
+### Remarketing
+
+| Tool | Descricao |
+|------|-----------|
+| `list_remarketing_lists` | Lista listas de remarketing com tamanho, membership e status |
+| `create_remarketing_list` | Cria lista rule-based (URL contains/equals + exclusoes). Suporta carrinho abandonado, visitantes de produto, etc. |
+| `update_remarketing_list` | Edita nome, membership lifespan, descricao |
+
 ### Merchant Center
 
 | Tool | Descricao |
@@ -297,6 +305,15 @@ upload_video_asset (YouTube ID) → create_video_campaign
 ```
 create_shopping_campaign (merchantId) → create_ad_group
 → Produtos puxados automaticamente do Merchant Center
+```
+
+### Remarketing (Carrinho Abandonado)
+
+```
+create_remarketing_list (URL /cart, excluir /thank-you, 30 dias)
+→ create_display_campaign → create_ad_group
+→ update_ad_group_targeting (vincular lista)
+→ create_responsive_display_ad
 ```
 
 ---
