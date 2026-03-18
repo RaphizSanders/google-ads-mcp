@@ -78,7 +78,7 @@ PORT=3333 GOOGLE_ADS_CREDENTIALS_PATH=./creds.json \
 
 ---
 
-## Tools (78 total — atualizado 2026-03-18)
+## Tools (80 total — atualizado 2026-03-18)
 
 ### Descoberta de contas
 
@@ -175,6 +175,8 @@ PORT=3333 GOOGLE_ADS_CREDENTIALS_PATH=./creds.json \
 | `add_placement` | Adiciona placement (site, app, canal YouTube) |
 | `list_audience_segments` | Lista audiencias disponiveis |
 | `create_audience_segment` | Cria audiencia customizada por keywords/URLs |
+| `add_audience_signal` | Adiciona sinal de audiencia ou search theme a asset group PMax |
+| `create_audience_from_lists` | Cria Audience a partir de user lists existentes (para sinais PMax) |
 
 ### Bid Adjustments
 
@@ -265,6 +267,22 @@ PORT=3333 GOOGLE_ADS_CREDENTIALS_PATH=./creds.json \
 | `pmax_optimization` | Otimizacao PMax: asset groups, produtos, sinais de audiencia | `customerId`, `campaignId` |
 | `search_terms_audit` | Auditoria de termos: negativar irrelevantes, adicionar novos | `customerId` |
 | `creative_analysis` | Analise de criativos: RSAs, headlines, fadiga | `customerId` |
+
+---
+
+## PMax Creation — Notas Importantes (API v23)
+
+A criacao de campanhas Performance Max na API v23 tem particularidades criticas:
+
+| Regra | Detalhe |
+|-------|---------|
+| **Brand Guidelines** | Auto-ativado em PMax novas. NAO pode ser desativado via API. |
+| **Business Name + Logo** | Devem ser linkados como `campaignAssets` (nivel campanha), NAO no asset group. O asset group herda automaticamente. |
+| **Batch atomico** | Usar `googleAds:mutate` para criar budget + campaign + campaignAssets + assetGroup + assetGroupAssets em uma unica chamada. Evita race conditions. |
+| **salesCountry** | DEPRECATED na v23. Usar `feedLabel` (ex: `"BR"`). |
+| **containsEuPoliticalAdvertising** | Campo obrigatorio. Usar enum numerico `3` (nao boolean ou string). |
+| **Listing group filter** | Para PMax Shopping, criar separadamente apos o batch principal (problema de `caseValue` no batch). |
+| **Audience signals** | Usar `add_audience_signal` apos criacao. Para remarketing, usar `list_remarketing_lists` para encontrar listas populadas, `create_audience_from_lists` para criar Audience, e depois linkar como signal. |
 
 ---
 
