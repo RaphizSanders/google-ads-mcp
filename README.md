@@ -78,7 +78,7 @@ PORT=3333 GOOGLE_ADS_CREDENTIALS_PATH=./creds.json \
 
 ---
 
-## Tools (78 total)
+## Tools (78 total — atualizado 2026-03-18)
 
 ### Descoberta de contas
 
@@ -236,7 +236,7 @@ PORT=3333 GOOGLE_ADS_CREDENTIALS_PATH=./creds.json \
 
 | Tool | Descricao |
 |------|-----------|
-| `list_merchant_centers` | Lista Merchant Centers vinculados |
+| `list_merchant_centers` | Lista Merchant Centers vinculados (fallback duplo: merchant_center_link + campaign.shopping_setting) |
 
 ---
 
