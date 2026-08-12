@@ -22,7 +22,8 @@ export interface GoogleAdsCredentials {
 }
 
 export interface GoogleAdsClientConfig {
-  credentialsPath: string;
+  credentialsPath?: string;
+  credentials?: GoogleAdsCredentials;
   developerToken: string;
   loginCustomerId: string;
   readOnly?: boolean;
@@ -37,7 +38,7 @@ export interface MutateOperation {
 
 export class GoogleAdsClient {
   private credentials: GoogleAdsCredentials;
-  private credentialsPath: string;
+  private credentialsPath?: string;
   private developerToken: string;
   private loginCustomerId: string;
   private readOnly: boolean;
@@ -48,8 +49,14 @@ export class GoogleAdsClient {
     this.loginCustomerId = config.loginCustomerId.replace(/-/g, "");
     this.readOnly = config.readOnly ?? false;
 
-    const raw = readFileSync(config.credentialsPath, "utf8");
-    this.credentials = JSON.parse(raw) as GoogleAdsCredentials;
+    if (config.credentials) {
+      this.credentials = { ...config.credentials };
+    } else if (config.credentialsPath) {
+      const raw = readFileSync(config.credentialsPath, "utf8");
+      this.credentials = JSON.parse(raw) as GoogleAdsCredentials;
+    } else {
+      throw new Error("Google Ads credentials are required");
+    }
   }
 
   // ── Auth ─────────────────────────────────────────────────────────────
@@ -85,10 +92,12 @@ export class GoogleAdsClient {
     this.credentials.expiry = new Date(Date.now() + data.expires_in * 1000).toISOString();
 
     // Persist refreshed token
-    try {
-      writeFileSync(this.credentialsPath, JSON.stringify(this.credentials, null, 2));
-    } catch {
-      // Non-fatal: token will be refreshed again next time
+    if (this.credentialsPath) {
+      try {
+        writeFileSync(this.credentialsPath, JSON.stringify(this.credentials, null, 2));
+      } catch {
+        // Non-fatal: token will be refreshed again next time
+      }
     }
   }
 

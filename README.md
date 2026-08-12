@@ -22,10 +22,12 @@ Funciona em modo **local** (stdio) e **remoto** (HTTP/SSE), com suporte a deploy
 | Variavel | Obrigatorio | Descricao |
 |----------|-------------|-----------|
 | `GOOGLE_ADS_CREDENTIALS_PATH` | Sim | Caminho para JSON com OAuth credentials (token, refresh_token, client_id, client_secret) |
+| `GOOGLE_ADS_CREDENTIALS_JSON` | Alternativa hospedada | JSON OAuth completo fornecido por secret do ambiente. Mutuamente exclusivo com `GOOGLE_ADS_CREDENTIALS_PATH`; refresh ocorre apenas em memória |
 | `GOOGLE_ADS_DEVELOPER_TOKEN` | Sim | Developer token da Google Ads API |
 | `GOOGLE_ADS_LOGIN_CUSTOMER_ID` | Sim | ID da MCC (Manager account), sem hifens |
 | `GOOGLE_ADS_API_VERSION` | Nao | Versao da API (default: v23) |
 | `MCP_API_KEY` | Nao | Chave de autenticacao para modo HTTP |
+| `MCP_ALLOWED_HOSTS` | No modo hospedado read-only | Hostnames aceitos, separados por vírgula e sem porta. Ativa proteção contra DNS rebinding |
 | `ALLOWED_CUSTOMER_IDS` | Nao | Restringe acesso a contas especificas. IDs separados por virgula |
 | `GOOGLE_ADS_READ_ONLY` | Nao | Modo somente leitura (`true`/`1`). Remove as 51 tools mutáveis do catálogo e bloqueia mutações no cliente. Ausente mantém compatibilidade com o comportamento atual |
 | `PORT` | Nao | Se definido, inicia servidor HTTP. Sem `PORT`, usa stdio |
@@ -89,6 +91,11 @@ Para integrações analíticas, defina `GOOGLE_ADS_READ_ONLY=true`. Nesse modo:
 O modo é opt-in para não alterar deployments existentes. Em ambientes de cliente, combine-o com
 `ALLOWED_CUSTOMER_IDS` e credenciais do MCP. Valores inválidos para `GOOGLE_ADS_READ_ONLY` fazem o
 processo falhar na inicialização, evitando configuração ambígua.
+
+Quando o modo read-only roda por HTTP (`PORT` definido), `MCP_API_KEY` e `MCP_ALLOWED_HOSTS`
+são obrigatórios. O processo recusa iniciar se qualquer um estiver ausente. Para hospedagem,
+prefira `GOOGLE_ADS_CREDENTIALS_JSON` como secret write-only; o refresh token permanece somente
+em memória e nunca é gravado no filesystem do container.
 
 Quando `ALLOWED_CUSTOMER_IDS` está configurada, `list_accounts` também filtra a descoberta e não
 revela contas fora da lista permitida.

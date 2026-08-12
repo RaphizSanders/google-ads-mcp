@@ -23,6 +23,11 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { GoogleAdsClient } from "./google-ads-client.js";
 import { createMcpServer } from "./server.js";
 import { parseReadOnlyMode } from "./read-only.js";
+import {
+  assertHostedReadOnlySecurity,
+  parseAllowedHosts,
+  parseGoogleAdsCredentialsJson,
+} from "./hosted-config.js";
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 0;
 const MCP_API_KEY = process.env.MCP_API_KEY ?? "";
@@ -30,6 +35,14 @@ const ALLOWED_CUSTOMER_IDS = process.env.ALLOWED_CUSTOMER_IDS
   ? process.env.ALLOWED_CUSTOMER_IDS.split(",").map((id) => id.trim()).filter(Boolean)
   : [];
 const READ_ONLY = parseReadOnlyMode(process.env.GOOGLE_ADS_READ_ONLY);
+const ALLOWED_HOSTS = parseAllowedHosts(process.env.MCP_ALLOWED_HOSTS);
+
+assertHostedReadOnlySecurity({
+  port: PORT,
+  readOnly: READ_ONLY,
+  apiKey: MCP_API_KEY,
+  allowedHosts: ALLOWED_HOSTS,
+});
 
 // Runner run-http.mjs injeta o token aqui quando carrega .env
 const g = globalThis as unknown as { __GOOGLE_ADS_DEVELOPER_TOKEN?: string };
@@ -40,11 +53,15 @@ if (tokenFromRunner) {
 
 function getClient(): GoogleAdsClient {
   const credentialsPath = process.env.GOOGLE_ADS_CREDENTIALS_PATH;
+  const credentialsJson = process.env.GOOGLE_ADS_CREDENTIALS_JSON;
   const developerToken = process.env.GOOGLE_ADS_DEVELOPER_TOKEN ?? tokenFromRunner;
   const loginCustomerId = process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID;
 
-  if (!credentialsPath) {
-    throw new Error("GOOGLE_ADS_CREDENTIALS_PATH não definido.");
+  if (credentialsPath && credentialsJson) {
+    throw new Error("Defina apenas GOOGLE_ADS_CREDENTIALS_PATH ou GOOGLE_ADS_CREDENTIALS_JSON.");
+  }
+  if (!credentialsPath && !credentialsJson) {
+    throw new Error("GOOGLE_ADS_CREDENTIALS_PATH ou GOOGLE_ADS_CREDENTIALS_JSON deve ser definido.");
   }
   if (!developerToken) {
     throw new Error("GOOGLE_ADS_DEVELOPER_TOKEN não definido.");
@@ -54,10 +71,12 @@ function getClient(): GoogleAdsClient {
   }
 
   // Expand ~ in path
-  const resolvedPath = credentialsPath.replace(/^~/, process.env.HOME ?? "");
+  const resolvedPath = credentialsPath?.replace(/^~/, process.env.HOME ?? "");
 
   return new GoogleAdsClient({
-    credentialsPath: resolvedPath,
+    ...(credentialsJson
+      ? { credentials: parseGoogleAdsCredentialsJson(credentialsJson) }
+      : { credentialsPath: resolvedPath }),
     developerToken,
     loginCustomerId,
     readOnly: READ_ONLY,
@@ -89,7 +108,12 @@ function checkAuth(req: IncomingMessage, res: ServerResponse): boolean {
 async function runHttp(): Promise<void> {
   const app = createMcpExpressApp({
     host: "0.0.0.0",
-    allowedHosts: undefined,
+    allowedHosts: ALLOWED_HOSTS.length > 0 ? ALLOWED_HOSTS : undefined,
+  });
+
+  app.get("/health", (_req: IncomingMessage, res: ServerResponse) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "ok", mode: READ_ONLY ? "read-only" : "compatibility" }));
   });
 
   app.get("/", (_req: IncomingMessage, res: ServerResponse) => {
