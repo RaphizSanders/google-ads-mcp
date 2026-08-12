@@ -1,0 +1,126 @@
+name: Publish Google Ads MCP runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release identifier, for example google-ads-mcp-v1.1.0-1
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: publish-google-ads-mcp-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/raphizsanders/google-ads-mcp
+
+jobs:
+  publish:
+    name: Build, smoke-test and publish
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout approved source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Validate release identity
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag='${{ inputs.release_tag }}'
+          if [[ ! "$tag" =~ ^google-ads-mcp-v[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ ]]; then
+            echo "release_tag must look like google-ads-mcp-v1.1.0-1"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Require CI green on this exact commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          conclusion=$(gh run list --repo "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA" \
+            --workflow ci.yml --limit 1 --json conclusion --jq '.[0].conclusion // "none"')
+          if [ "$conclusion" != "success" ]; then
+            echo "ci.yml on $GITHUB_SHA is '$conclusion'; refusing to publish"
+            exit 1
+          fi
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+      - name: Extract immutable OCI metadata
+        id: meta
+        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=${{ steps.release.outputs.tag }}
+            type=sha,format=long
+          labels: |
+            org.opencontainers.image.title=Sanders Google Ads MCP
+            org.opencontainers.image.description=Opt-in read-only Google Ads MCP runtime
+            org.opencontainers.image.version=${{ steps.release.outputs.tag }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+      - name: Log in to private GHCR
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish approved runtime
+        id: push
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+      - name: Pull and verify the published digest
+        shell: bash
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker pull "${IMAGE}@${DIGEST}"
+          docker run -d --rm --name google-ads-mcp-published -p 127.0.0.1:13333:3333 \
+            -e PORT=3333 \
+            -e GOOGLE_ADS_CREDENTIALS_JSON='{"token":"publish-token","refresh_token":"publish-refresh","token_uri":"https://oauth2.googleapis.com/token","client_id":"publish-client","client_secret":"publish-secret","expiry":"2999-01-01T00:00:00.000Z"}' \
+            -e GOOGLE_ADS_DEVELOPER_TOKEN=publish-developer-token \
+            -e GOOGLE_ADS_LOGIN_CUSTOMER_ID=1234567890 \
+            -e GOOGLE_ADS_READ_ONLY=true \
+            -e MCP_API_KEY=publish-only-not-a-secret-32-bytes-long \
+            -e MCP_ALLOWED_HOSTS=localhost,127.0.0.1 \
+            "${IMAGE}@${DIGEST}"
+          trap 'docker rm -f google-ads-mcp-published >/dev/null 2>&1 || true' EXIT
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:13333/health >/dev/null; then break; fi
+            sleep 2
+          done
+          node scripts/smoke-read-only.mjs http://localhost:13333 publish-only-not-a-secret-32-bytes-long
+      - name: Record publication identity
+        shell: bash
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "### Google Ads MCP runtime published"
+            echo
+            echo "- Image: \`${IMAGE}@${DIGEST}\`"
+            echo "- Source commit: \`${GITHUB_SHA}\`"
+            echo "- Release alias: \`${{ steps.release.outputs.tag }}\`"
+            echo "- Supply chain: digest pull-smoke, SBOM, provenance mode=max"
+          } >> "$GITHUB_STEP_SUMMARY"

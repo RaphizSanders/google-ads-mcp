@@ -8,6 +8,11 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createMcpServer } from "../src/server.js";
 import { GoogleAdsClient } from "../src/google-ads-client.js";
 import {
+  assertHostedReadOnlySecurity,
+  parseAllowedHosts,
+  parseGoogleAdsCredentialsJson,
+} from "../src/hosted-config.js";
+import {
   GOOGLE_ADS_READ_TOOL_NAMES,
   GOOGLE_ADS_WRITE_TOOL_NAMES,
   createReadOnlyToolServer,
@@ -141,4 +146,48 @@ test("client blocks generic and batch mutations before network access", async ()
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("hosted OAuth credentials are validated and can remain in memory", async () => {
+  const credentials = parseGoogleAdsCredentialsJson(
+    JSON.stringify({
+      token: "test-token",
+      refresh_token: "test-refresh",
+      token_uri: "https://oauth2.googleapis.com/token",
+      client_id: "test-client",
+      client_secret: "test-secret",
+      expiry: "2999-01-01T00:00:00.000Z",
+    })
+  );
+  const client = new GoogleAdsClient({
+    credentials,
+    developerToken: "test-developer-token",
+    loginCustomerId: "1234567890",
+    readOnly: true,
+  });
+  await assert.rejects(() => client.mutate("123", "campaigns", []), /read-only mode/);
+  assert.throws(() => parseGoogleAdsCredentialsJson("not-json"), /valid JSON/);
+  assert.throws(
+    () => parseGoogleAdsCredentialsJson(JSON.stringify({ token: "only-one-field" })),
+    /missing required field/
+  );
+});
+
+test("hosted read-only mode requires MCP auth and allowed hosts", () => {
+  assert.deepEqual(
+    parseAllowedHosts("google-ads-mcp.railway.internal,localhost,localhost"),
+    ["google-ads-mcp.railway.internal", "localhost"]
+  );
+  assert.throws(() => parseAllowedHosts("localhost:3333"), /without ports/);
+  assert.throws(
+    () => assertHostedReadOnlySecurity({ port: 3333, readOnly: true, apiKey: "", allowedHosts: ["localhost"] }),
+    /MCP_API_KEY/
+  );
+  assert.throws(
+    () => assertHostedReadOnlySecurity({ port: 3333, readOnly: true, apiKey: "test", allowedHosts: [] }),
+    /MCP_ALLOWED_HOSTS/
+  );
+  assert.doesNotThrow(() =>
+    assertHostedReadOnlySecurity({ port: 3333, readOnly: true, apiKey: "test", allowedHosts: ["localhost"] })
+  );
 });
