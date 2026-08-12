@@ -121,7 +121,7 @@ function checkCustomerAccess(
 ): ReturnType<typeof text> | null {
   if (allowedIds.length === 0) return null;
   const cid = customerId.replace(/-/g, "");
-  if (!allowedIds.includes(cid)) {
+  if (!allowedIds.some((allowedId) => allowedId.replace(/-/g, "") === cid)) {
     return {
       type: "text" as const,
       text: `Access denied: customer ${customerId} not in allowed list.`,
@@ -162,6 +162,7 @@ export function registerGoogleAdsTools(
   getClient: () => GoogleAdsClient,
   allowedCustomerIds: string[]
 ): void {
+  const allowedCustomerIdSet = new Set(allowedCustomerIds.map((id) => id.replace(/-/g, "")));
 
   // ── Discovery ──────────────────────────────────────────────────────
 
@@ -178,16 +179,22 @@ export function registerGoogleAdsTools(
     async () => {
       const client = getClient();
       const results = await client.listChildAccounts();
-      const accounts = results.map((r) => {
-        const c = r.customerClient as Record<string, unknown> | undefined;
-        return {
-          customer_id: c?.id,
-          name: c?.descriptiveName,
-          currency: c?.currencyCode,
-          timezone: c?.timeZone,
-          status: c?.status,
-        };
-      });
+      const accounts = results
+        .map((r) => {
+          const c = r.customerClient as Record<string, unknown> | undefined;
+          return {
+            customer_id: c?.id,
+            name: c?.descriptiveName,
+            currency: c?.currencyCode,
+            timezone: c?.timeZone,
+            status: c?.status,
+          };
+        })
+        .filter(
+          (account) =>
+            allowedCustomerIdSet.size === 0 ||
+            allowedCustomerIdSet.has(String(account.customer_id ?? "").replace(/-/g, ""))
+        );
       return {
         content: [text(`${accounts.length} conta(s) encontrada(s).\n\n${formatJson(accounts)}`)],
       };

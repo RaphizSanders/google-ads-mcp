@@ -25,6 +25,7 @@ export interface GoogleAdsClientConfig {
   credentialsPath: string;
   developerToken: string;
   loginCustomerId: string;
+  readOnly?: boolean;
 }
 
 export interface MutateOperation {
@@ -39,11 +40,13 @@ export class GoogleAdsClient {
   private credentialsPath: string;
   private developerToken: string;
   private loginCustomerId: string;
+  private readOnly: boolean;
 
   constructor(config: GoogleAdsClientConfig) {
     this.credentialsPath = config.credentialsPath;
     this.developerToken = config.developerToken;
     this.loginCustomerId = config.loginCustomerId.replace(/-/g, "");
+    this.readOnly = config.readOnly ?? false;
 
     const raw = readFileSync(config.credentialsPath, "utf8");
     this.credentials = JSON.parse(raw) as GoogleAdsCredentials;
@@ -276,12 +279,19 @@ export class GoogleAdsClient {
 
   // ── Mutations (WRITE) ────────────────────────────────────────────────
 
+  private assertWriteAllowed(): void {
+    if (this.readOnly) {
+      throw new Error("Google Ads MCP is running in read-only mode; mutation blocked.");
+    }
+  }
+
   /** Generic mutate for any resource type. */
   async mutate(
     customerId: string,
     resource: string,
     operations: MutateOperation[]
   ): Promise<Record<string, unknown>> {
+    this.assertWriteAllowed();
     const cid = customerId.replace(/-/g, "");
     const url = `${API_BASE}/customers/${cid}/${resource}:mutate`;
     return this.request<Record<string, unknown>>("POST", url, { operations });
@@ -356,6 +366,7 @@ export class GoogleAdsClient {
     customerId: string,
     mutateOperations: Array<Record<string, unknown>>
   ): Promise<Record<string, unknown>> {
+    this.assertWriteAllowed();
     const cid = customerId.replace(/-/g, "");
     const url = `${API_BASE}/customers/${cid}/googleAds:mutate`;
     return this.request<Record<string, unknown>>("POST", url, { mutateOperations });

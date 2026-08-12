@@ -22,12 +22,14 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { GoogleAdsClient } from "./google-ads-client.js";
 import { createMcpServer } from "./server.js";
+import { parseReadOnlyMode } from "./read-only.js";
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 0;
 const MCP_API_KEY = process.env.MCP_API_KEY ?? "";
 const ALLOWED_CUSTOMER_IDS = process.env.ALLOWED_CUSTOMER_IDS
   ? process.env.ALLOWED_CUSTOMER_IDS.split(",").map((id) => id.trim()).filter(Boolean)
   : [];
+const READ_ONLY = parseReadOnlyMode(process.env.GOOGLE_ADS_READ_ONLY);
 
 // Runner run-http.mjs injeta o token aqui quando carrega .env
 const g = globalThis as unknown as { __GOOGLE_ADS_DEVELOPER_TOKEN?: string };
@@ -58,11 +60,12 @@ function getClient(): GoogleAdsClient {
     credentialsPath: resolvedPath,
     developerToken,
     loginCustomerId,
+    readOnly: READ_ONLY,
   });
 }
 
 function serverOpts() {
-  return { getClient, allowedCustomerIds: ALLOWED_CUSTOMER_IDS };
+  return { getClient, allowedCustomerIds: ALLOWED_CUSTOMER_IDS, readOnly: READ_ONLY };
 }
 
 async function runStdio(): Promise<void> {
