@@ -3,10 +3,12 @@ import { GoogleAdsClient } from "./google-ads-client.js";
 import { registerGoogleAdsPrompts } from "./prompts.js";
 import { registerGoogleAdsResources } from "./resources.js";
 import { registerGoogleAdsTools } from "./tools.js";
+import { createReadOnlyToolServer } from "./read-only.js";
 
 export interface McpServerOptions {
   getClient: () => GoogleAdsClient;
   allowedCustomerIds?: string[];
+  readOnly?: boolean;
 }
 
 export function createMcpServer(opts: McpServerOptions): McpServer {
@@ -23,7 +25,11 @@ export function createMcpServer(opts: McpServerOptions): McpServer {
       },
     }
   );
-  registerGoogleAdsTools(server, opts.getClient, opts.allowedCustomerIds ?? []);
+  registerGoogleAdsTools(
+    createReadOnlyToolServer(server, opts.readOnly ?? false),
+    opts.getClient,
+    opts.allowedCustomerIds ?? []
+  );
   registerGoogleAdsResources(server);
   registerGoogleAdsPrompts(server);
   return server;

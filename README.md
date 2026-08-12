@@ -27,6 +27,7 @@ Funciona em modo **local** (stdio) e **remoto** (HTTP/SSE), com suporte a deploy
 | `GOOGLE_ADS_API_VERSION` | Nao | Versao da API (default: v23) |
 | `MCP_API_KEY` | Nao | Chave de autenticacao para modo HTTP |
 | `ALLOWED_CUSTOMER_IDS` | Nao | Restringe acesso a contas especificas. IDs separados por virgula |
+| `GOOGLE_ADS_READ_ONLY` | Nao | Modo somente leitura (`true`/`1`). Remove as 51 tools mutáveis do catálogo e bloqueia mutações no cliente. Ausente mantém compatibilidade com o comportamento atual |
 | `PORT` | Nao | Se definido, inicia servidor HTTP. Sem `PORT`, usa stdio |
 
 ---
@@ -75,6 +76,22 @@ PORT=3333 GOOGLE_ADS_CREDENTIALS_PATH=./creds.json \
 1. Crie projeto no [Railway](https://railway.app) e conecte o repositorio
 2. Configure variaveis de ambiente
 3. URL do endpoint: `https://<seu-app>.up.railway.app/mcp`
+
+### Modo somente leitura
+
+Para integrações analíticas, defina `GOOGLE_ADS_READ_ONLY=true`. Nesse modo:
+
+- `tools/list` publica somente as 29 tools classificadas como leitura;
+- as 51 tools de criação, edição, upload e exclusão não são registradas;
+- chamadas diretas à camada de mutação também são recusadas antes de qualquer acesso à API;
+- uma tool nova e ainda não classificada permanece bloqueada por padrão.
+
+O modo é opt-in para não alterar deployments existentes. Em ambientes de cliente, combine-o com
+`ALLOWED_CUSTOMER_IDS` e credenciais do MCP. Valores inválidos para `GOOGLE_ADS_READ_ONLY` fazem o
+processo falhar na inicialização, evitando configuração ambígua.
+
+Quando `ALLOWED_CUSTOMER_IDS` está configurada, `list_accounts` também filtra a descoberta e não
+revela contas fora da lista permitida.
 
 ---
 
