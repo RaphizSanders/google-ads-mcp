@@ -48,11 +48,53 @@ export function parseAllowedHosts(raw: string | undefined): string[] {
   return [...new Set(hosts)];
 }
 
+/**
+ * Parses ALLOWED_CUSTOMER_IDS, refusing anything that is not a real allowlist.
+ *
+ * The variable used to be optional, and an absent or empty value meant "do not
+ * filter" — which reads as permissive-by-default on a server whose OAuth
+ * credential can reach every customer under the MCC. One client's service
+ * misconfigured that way would answer for another client's accounts, so the
+ * empty case is now a startup failure rather than a wildcard.
+ *
+ * Ids are stored normalised without hyphens because Google writes them both
+ * ways and a mismatch here would silently deny instead of silently allow.
+ */
+export function parseAllowedCustomerIds(raw: string | undefined): string[] {
+  if (raw === undefined || raw.trim() === "") {
+    throw new Error(
+      "ALLOWED_CUSTOMER_IDS is required: an empty allowlist is not a wildcard",
+    );
+  }
+  const ids = raw
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean)
+    .map((id) => id.replace(/-/g, ""));
+  if (ids.length === 0) {
+    throw new Error(
+      "ALLOWED_CUSTOMER_IDS is required: an empty allowlist is not a wildcard",
+    );
+  }
+  for (const id of ids) {
+    if (!/^\d{10}$/.test(id)) {
+      throw new Error(
+        "ALLOWED_CUSTOMER_IDS must be comma-separated 10-digit customer ids",
+      );
+    }
+  }
+  return [...new Set(ids)];
+}
+
 export function assertHostedReadOnlySecurity(options: {
   port: number;
   readOnly: boolean;
   apiKey: string;
   allowedHosts: string[];
+  /* Optional in the type so a caller that forgets it lands on the fail-closed
+     branch with a readable message instead of a TypeError. Absent is treated
+     exactly like empty: nobody said which customers. */
+  allowedCustomerIds?: string[];
 }): void {
   if (options.port <= 0 || !options.readOnly) return;
   if (!options.apiKey) {
@@ -60,5 +102,10 @@ export function assertHostedReadOnlySecurity(options: {
   }
   if (options.allowedHosts.length === 0) {
     throw new Error("MCP_ALLOWED_HOSTS is required for hosted read-only mode");
+  }
+  if ((options.allowedCustomerIds ?? []).length === 0) {
+    throw new Error(
+      "ALLOWED_CUSTOMER_IDS is required for hosted read-only mode",
+    );
   }
 }

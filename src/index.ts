@@ -25,15 +25,24 @@ import { createMcpServer } from "./server.js";
 import { parseReadOnlyMode } from "./read-only.js";
 import {
   assertHostedReadOnlySecurity,
+  parseAllowedCustomerIds,
   parseAllowedHosts,
   parseGoogleAdsCredentialsJson,
 } from "./hosted-config.js";
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 0;
 const MCP_API_KEY = process.env.MCP_API_KEY ?? "";
-const ALLOWED_CUSTOMER_IDS = process.env.ALLOWED_CUSTOMER_IDS
-  ? process.env.ALLOWED_CUSTOMER_IDS.split(",").map((id) => id.trim()).filter(Boolean)
-  : [];
+/* Hosted read-only mode requires a real allowlist; stdio/dev keeps the old
+   permissive shape so local exploration is unchanged. The strict parse runs
+   only where the service is actually exposed. */
+const ALLOWED_CUSTOMER_IDS =
+  Number(process.env.PORT ?? 0) > 0
+    ? parseAllowedCustomerIds(process.env.ALLOWED_CUSTOMER_IDS)
+    : (process.env.ALLOWED_CUSTOMER_IDS ?? "")
+        .split(",")
+        .map((id) => id.trim())
+        .filter(Boolean)
+        .map((id) => id.replace(/-/g, ""));
 const READ_ONLY = parseReadOnlyMode(process.env.GOOGLE_ADS_READ_ONLY);
 const ALLOWED_HOSTS = parseAllowedHosts(process.env.MCP_ALLOWED_HOSTS);
 
@@ -42,6 +51,7 @@ assertHostedReadOnlySecurity({
   readOnly: READ_ONLY,
   apiKey: MCP_API_KEY,
   allowedHosts: ALLOWED_HOSTS,
+  allowedCustomerIds: ALLOWED_CUSTOMER_IDS,
 });
 
 // Runner run-http.mjs injeta o token aqui quando carrega .env

@@ -119,7 +119,16 @@ function checkCustomerAccess(
   customerId: string,
   allowedIds: string[]
 ): ReturnType<typeof text> | null {
-  if (allowedIds.length === 0) return null;
+  /* Defence in depth. Startup already refuses an empty allowlist in hosted
+     mode, but this used to return "allowed" for the empty case, so any future
+     path that reached the tools without that gate would be wide open rather
+     than closed. Deny is the safe reading of "nobody said which accounts". */
+  if (allowedIds.length === 0) {
+    return {
+      type: "text" as const,
+      text: "Access denied: no customer allowlist is configured.",
+    };
+  }
   const cid = customerId.replace(/-/g, "");
   if (!allowedIds.some((allowedId) => allowedId.replace(/-/g, "") === cid)) {
     return {
@@ -190,10 +199,11 @@ export function registerGoogleAdsTools(
             status: c?.status,
           };
         })
-        .filter(
-          (account) =>
-            allowedCustomerIdSet.size === 0 ||
-            allowedCustomerIdSet.has(String(account.customer_id ?? "").replace(/-/g, ""))
+        /* An empty set filters everything out rather than nothing: discovery
+           must not enumerate the whole MCC just because no allowlist was
+           given. */
+        .filter((account) =>
+          allowedCustomerIdSet.has(String(account.customer_id ?? "").replace(/-/g, ""))
         );
       return {
         content: [text(`${accounts.length} conta(s) encontrada(s).\n\n${formatJson(accounts)}`)],

@@ -10,9 +10,10 @@
     "dev": "tsc --watch & node --watch dist/index.js",
     "dev:local": "tsx src/index.ts",
     "dev:http": "PORT=3333 node dist/index.js",
-    "test": "npm run test:read-only",
+    "test": "npm run test:read-only && npm run test:allowlist",
     "test:read-only": "tsx --test tests/read-only.test.ts",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "test:allowlist": "tsx --test tests/allowlist.test.ts"
   },
   "engines": {
     "node": ">=20"

@@ -187,7 +187,20 @@ test("hosted read-only mode requires MCP auth and allowed hosts", () => {
     () => assertHostedReadOnlySecurity({ port: 3333, readOnly: true, apiKey: "test", allowedHosts: [] }),
     /MCP_ALLOWED_HOSTS/
   );
+  /* A customer allowlist is now part of the same gate: hosted read-only mode
+     with auth and hosts but no allowlist used to be accepted, and that was the
+     fail-open case. Covered in depth in tests/allowlist.test.ts. */
+  assert.throws(
+    () => assertHostedReadOnlySecurity({ port: 3333, readOnly: true, apiKey: "test", allowedHosts: ["localhost"] }),
+    /ALLOWED_CUSTOMER_IDS/
+  );
   assert.doesNotThrow(() =>
-    assertHostedReadOnlySecurity({ port: 3333, readOnly: true, apiKey: "test", allowedHosts: ["localhost"] })
+    assertHostedReadOnlySecurity({
+      port: 3333,
+      readOnly: true,
+      apiKey: "test",
+      allowedHosts: ["localhost"],
+      allowedCustomerIds: ["1234567890"],
+    })
   );
 });
