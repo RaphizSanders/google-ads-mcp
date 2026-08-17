@@ -28,7 +28,7 @@ Funciona em modo **local** (stdio) e **remoto** (HTTP/SSE), com suporte a deploy
 | `GOOGLE_ADS_API_VERSION` | Nao | Versao da API (default: v23) |
 | `MCP_API_KEY` | Nao | Chave de autenticacao para modo HTTP |
 | `MCP_ALLOWED_HOSTS` | No modo hospedado read-only | Hostnames aceitos, separados por vírgula e sem porta. Ativa proteção contra DNS rebinding |
-| `ALLOWED_CUSTOMER_IDS` | Nao | Restringe acesso a contas especificas. IDs separados por virgula |
+| `ALLOWED_CUSTOMER_IDS` | Obrigatório no modo hospedado read-only | Allowlist não vazia de contas específicas. IDs de 10 dígitos separados por vírgula; ausência, vazio ou valor malformado recusam o boot |
 | `GOOGLE_ADS_READ_ONLY` | Nao | Modo somente leitura (`true`/`1`). Remove as 51 tools mutáveis do catálogo e bloqueia mutações no cliente. Ausente mantém compatibilidade com o comportamento atual |
 | `PORT` | Nao | Se definido, inicia servidor HTTP. Sem `PORT`, usa stdio |
 
@@ -88,7 +88,7 @@ Para integrações analíticas, defina `GOOGLE_ADS_READ_ONLY=true`. Nesse modo:
 - chamadas diretas à camada de mutação também são recusadas antes de qualquer acesso à API;
 - uma tool nova e ainda não classificada permanece bloqueada por padrão.
 
-O modo é opt-in para não alterar deployments existentes. Em ambientes de cliente, combine-o com
+O modo é opt-in para não alterar deployments existentes. Em ambientes de cliente, ele exige
 `ALLOWED_CUSTOMER_IDS` e credenciais do MCP. Valores inválidos para `GOOGLE_ADS_READ_ONLY` fazem o
 processo falhar na inicialização, evitando configuração ambígua.
 
@@ -97,8 +97,9 @@ são obrigatórios. O processo recusa iniciar se qualquer um estiver ausente. Pa
 prefira `GOOGLE_ADS_CREDENTIALS_JSON` como secret write-only; o refresh token permanece somente
 em memória e nunca é gravado no filesystem do container.
 
-Quando `ALLOWED_CUSTOMER_IDS` está configurada, `list_accounts` também filtra a descoberta e não
-revela contas fora da lista permitida.
+`list_accounts` sempre filtra a descoberta pela allowlist em modo hospedado read-only. A ausência
+ou lista vazia nunca significa wildcard: o processo recusa iniciar e a guarda de cada tool também
+nega o acesso como defesa em profundidade.
 
 ---
 
