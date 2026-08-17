@@ -101,6 +101,7 @@ jobs:
             -e GOOGLE_ADS_CREDENTIALS_JSON='{"token":"publish-token","refresh_token":"publish-refresh","token_uri":"https://oauth2.googleapis.com/token","client_id":"publish-client","client_secret":"publish-secret","expiry":"2999-01-01T00:00:00.000Z"}' \
             -e GOOGLE_ADS_DEVELOPER_TOKEN=publish-developer-token \
             -e GOOGLE_ADS_LOGIN_CUSTOMER_ID=1234567890 \
+            -e ALLOWED_CUSTOMER_IDS=1234567890 \
             -e GOOGLE_ADS_READ_ONLY=true \
             -e MCP_API_KEY=publish-only-not-a-secret-32-bytes-long \
             -e MCP_ALLOWED_HOSTS=localhost,127.0.0.1 \
