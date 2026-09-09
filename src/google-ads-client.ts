@@ -177,7 +177,7 @@ export class GoogleAdsClient {
       : undefined;
 
     // Google-specific error handling
-    const dataObj = (errorFromBatch ? { error: errorFromBatch } : data) as Record<string, unknown>;
+    const dataObj = (errorFromBatch ? { error: errorFromBatch } : (data ?? {})) as Record<string, unknown>;
     if (dataObj.error) {
       const err = dataObj.error as Record<string, unknown>;
       const status = (err.status as string) ?? "";
@@ -201,6 +201,12 @@ export class GoogleAdsClient {
 
       const detailStr = errorDetails.length > 0 ? ` — ${errorDetails.join("; ")}` : "";
       throw new Error(`Google Ads API: ${message}${detailStr}`);
+    }
+
+    /* Não-2xx sem `error` no corpo (página JSON de proxy/LB, `[]` ou `{}` de um
+       5xx após as tentativas) voltaria como dado e viraria "0 resultados". */
+    if (!res.ok) {
+      throw new Error(`Google Ads API: HTTP ${res.status} sem detalhe de erro — ${JSON.stringify(data).slice(0, 200)}`);
     }
 
     return data as T;
@@ -419,6 +425,19 @@ export class GoogleAdsClient {
     body: unknown
   ): Promise<T> {
     this.assertWriteAllowed();
+    /* Dry-run tem que ser fail-closed. Só os endpoints de upload de conversão
+       aceitam validateOnly; recommendations:apply/dismiss não têm o campo e
+       gravariam de verdade — para esses a chamada é recusada em dry-run. */
+    if (this.dryRun) {
+      const supportsValidateOnly = [":uploadClickConversions", ":uploadCallConversions", ":uploadConversionAdjustments"]
+        .some((suffix) => action.endsWith(suffix));
+      if (!supportsValidateOnly) {
+        throw new Error(`GOOGLE_ADS_DRY_RUN: ${action} não aceita validateOnly — mutação bloqueada em dry-run.`);
+      }
+      if (body && typeof body === "object" && !Array.isArray(body)) {
+        body = { ...(body as Record<string, unknown>), validateOnly: true };
+      }
+    }
     return this.customerAction<T>(customerId, action, body);
   }
 

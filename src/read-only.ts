@@ -101,12 +101,19 @@ export const GOOGLE_ADS_WRITE_TOOL_NAMES = new Set([
   "upload_offline_conversion",
 ] as const);
 
-export function parseReadOnlyMode(value: string | undefined): boolean {
+/* Booleano de env com rejeição de valor ambíguo. O nome entra na mensagem: o
+   mesmo parser serve GOOGLE_ADS_READ_ONLY e GOOGLE_ADS_DRY_RUN, e um erro que
+   citasse a variável errada mandaria o operador procurar no lugar errado. */
+export function parseBoolEnv(name: string, value: string | undefined): boolean {
   if (value === undefined || value.trim() === "") return false;
   const normalized = value.trim().toLowerCase();
   if (normalized === "true" || normalized === "1") return true;
   if (normalized === "false" || normalized === "0") return false;
-  throw new Error("GOOGLE_ADS_READ_ONLY must be one of: true, false, 1, 0");
+  throw new Error(`${name} must be one of: true, false, 1, 0`);
+}
+
+export function parseReadOnlyMode(value: string | undefined): boolean {
+  return parseBoolEnv("GOOGLE_ADS_READ_ONLY", value);
 }
 
 export function createReadOnlyToolServer<T extends object>(server: T, readOnly: boolean): T {

@@ -30,7 +30,7 @@ Funciona em modo **local** (stdio) e **remoto** (HTTP/SSE), com suporte a deploy
 | `MCP_ALLOWED_HOSTS` | Em qualquer modo HTTP | Hostnames aceitos, separados por vírgula e sem porta. Ativa proteção contra DNS rebinding |
 | `ALLOWED_CUSTOMER_IDS` | Em qualquer modo HTTP | Allowlist não vazia de contas específicas. IDs de 10 dígitos separados por vírgula; ausência, vazio ou valor malformado recusam o boot. **Em stdio é opcional**: ausente significa "sem filtro", e todas as contas da MCC ficam acessíveis — é o que permite `list_accounts` funcionar como descoberta |
 | `GOOGLE_ADS_READ_ONLY` | Nao | Modo somente leitura (`true`/`1`). Remove as 56 tools mutáveis do catálogo e bloqueia mutações no cliente. Ausente mantém compatibilidade com o comportamento atual |
-| `GOOGLE_ADS_DRY_RUN` | Nao | Dry-run (`true`/`1`). Envia `validateOnly=true` nos endpoints `:mutate`: a API valida o payload inteiro e devolve os mesmos erros de uma gravação real, sem alterar a conta. Serve para exercitar tools de escrita com segurança. Desligado por padrão |
+| `GOOGLE_ADS_DRY_RUN` | Nao | Dry-run (`true`/`1`). Envia `validateOnly=true` nos endpoints `:mutate` e nos uploads de conversão: a API valida o payload inteiro e devolve os mesmos erros de uma gravação real, sem alterar a conta. `apply_recommendation`/`dismiss_recommendation` não aceitam `validateOnly` e são **recusados** em dry-run (fail-closed). Tools encadeadas (orçamento→campanha, asset→vínculo) validam só o primeiro passo — a API não devolve `results` em `validateOnly`, então o passo seguinte falha com mensagem de "resource ausente", não por defeito de payload. Desligado por padrão |
 | `PORT` | Nao | Se definido, inicia servidor HTTP. Sem `PORT`, usa stdio |
 
 ---
@@ -165,10 +165,10 @@ buscar aqui. Por isso uma allowlist vazia mantém o significado original de "sem
 
 | Tool | Descricao |
 |------|-----------|
-| `create_campaign` | Cria campanha (Search, Display, Shopping, PMax, Video, Demand Gen) com budget. Criada PAUSED. |
+| `create_campaign` | Cria campanha (Search, Display, PMax, Video, Demand Gen) com budget. Criada PAUSED. Shopping: use `create_shopping_campaign` (exige merchantId). networkSettings derivado por canal |
 | `create_pmax_campaign` | Cria campanha PMax completa: budget + campaign + asset group + listing group. Suporta Merchant Center. |
 | `create_display_campaign` | Cria campanha Display |
-| `create_video_campaign` | Cria campanha Video (YouTube) |
+| `create_video_campaign` | **Não suportado pela API**: o Google Ads não cria nem altera campanhas de video via API (`campaigns:mutate` e `adGroups:mutate` recusam). A tool retorna erro explicativo sem tocar na conta. Video programatico = `create_demand_gen_campaign`; em campanha de video criada no Google Ads, so `create_video_ad` (anuncio em ad group VIDEO_RESPONSIVE existente) e aceito |
 | `create_shopping_campaign` | Cria campanha Shopping com Merchant Center |
 | `create_demand_gen_campaign` | Cria campanha Demand Gen |
 
@@ -201,7 +201,7 @@ buscar aqui. Por isso uma allowlist vazia mantém o significado original de "sem
 | `create_asset_group` | Cria asset group com textos + imagens + videos |
 | `update_asset_group` | Edita nome, status, final URL |
 | `list_asset_groups` | Lista asset groups com ad_strength |
-| `set_listing_group_filter` | Filtra produtos por marca, categoria, ID, custom attribute |
+| `set_listing_group_filter` | Filtra produtos por marca, categoria (categoryId), tipo, canal, ID, custom attribute. Substitui a árvore numa requisição atômica; mesma dimensão em todos os filtros; com filtro de inclusão, o resto fica excluído |
 
 ### Targeting
 
@@ -383,8 +383,11 @@ create_display_campaign → create_ad_group → upload_image_asset
 ### Video (YouTube)
 
 ```
-upload_video_asset (YouTube ID) → create_video_campaign
-→ create_ad_group → create_video_ad
+Video programatico: create_demand_gen_campaign (a API nao cria nem altera campanhas VIDEO).
+Campanha VIDEO ja existente (criada no Google Ads, com ad group VIDEO_RESPONSIVE):
+→ get_image_assets (logo 1:1)
+→ create_video_ad (headline, description, callToAction, businessName, logoAssetId —
+   o asset do video e reaproveitado ou criado a partir do YouTube ID)
 ```
 
 ### Shopping

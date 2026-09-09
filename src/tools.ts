@@ -23,17 +23,30 @@ function buildDateClause(dateRange?: { since: string; until: string }, days?: nu
 
 /* change_event nao aceita segments.date: o recurso filtra pelo proprio
    change_date_time, em datetime e nao em data. A API tambem exige LIMIT e
-   uma janela de no maximo 30 dias. */
+   recusa "start date is too old" no limite exato de 30 dias — a janela maxima
+   real e 29. dateRange fora do formato YYYY-MM-DD ou alem da janela e recusado
+   aqui com mensagem clara, em vez do erro cru da API. */
+const CHANGE_EVENT_MAX_DAYS = 29;
 function buildChangeEventDateClause(dateRange?: { since: string; until: string }, days?: number): string {
-  if (dateRange?.since && dateRange?.until) {
+  const iso = (d: Date) => d.toISOString().split("T")[0];
+  const isIso = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s);
+  if (dateRange && (dateRange.since || dateRange.until)) {
+    if (!dateRange.since || !dateRange.until) {
+      throw new Error("get_change_history: dateRange precisa de since E until (ou use days).");
+    }
+    if (!isIso(dateRange.since) || !isIso(dateRange.until)) {
+      throw new Error(`get_change_history: dateRange precisa de datas YYYY-MM-DD (recebido ${dateRange.since} / ${dateRange.until}).`);
+    }
+    const spanDays = Math.round((Date.parse(dateRange.until) - Date.parse(dateRange.since)) / 86_400_000);
+    const ageDays = Math.round((Date.now() - Date.parse(dateRange.since)) / 86_400_000);
+    if (spanDays < 0 || ageDays > CHANGE_EVENT_MAX_DAYS) {
+      throw new Error(`get_change_history: a API só devolve os últimos ${CHANGE_EVENT_MAX_DAYS} dias — since não pode ser anterior a ${iso(new Date(Date.now() - CHANGE_EVENT_MAX_DAYS * 86_400_000))}.`);
+    }
     return `change_event.change_date_time >= '${dateRange.since} 00:00:00' AND change_event.change_date_time <= '${dateRange.until} 23:59:59'`;
   }
-  /* A API recusa "start date is too old" no limite exato de 30 dias, então a
-     janela máxima real é 29. */
-  const janela = Math.min(days ?? 29, 29);
+  const janela = Math.min(days ?? CHANGE_EVENT_MAX_DAYS, CHANGE_EVENT_MAX_DAYS);
   const ate = new Date();
-  const de = new Date(ate.getTime() - janela * 24 * 60 * 60 * 1000);
-  const iso = (d: Date) => d.toISOString().split("T")[0];
+  const de = new Date(ate.getTime() - janela * 86_400_000);
   return `change_event.change_date_time >= '${iso(de)} 00:00:00' AND change_event.change_date_time <= '${iso(ate)} 23:59:59'`;
 }
 
@@ -1175,8 +1188,8 @@ export function registerGoogleAdsTools(
       description: "Get recent account change history (who changed what and when).",
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
-        dateRange: dateRangeSchema.describe(DATE_RANGE_DESC),
-        days: z.number().optional().describe(DAYS_DESC),
+        dateRange: dateRangeSchema.describe("Date range YYYY-MM-DD (use this OR days). A API só devolve os últimos 29 dias."),
+        days: z.number().optional().describe("Days to look back (use this OR dateRange). Default e máximo: 29 — a API rejeita janela de 30 dias."),
         limit: z.number().optional().describe("Max results. Default: 25."),
       },
     },
@@ -1184,7 +1197,6 @@ export function registerGoogleAdsTools(
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
-      const dateClause = buildDateClause(dateRange, days);
 
       const results = await client.searchStream(
         customerId,
@@ -1378,7 +1390,7 @@ export function registerGoogleAdsTools(
         "Steps: 1) Creates a campaign budget, 2) Creates the campaign linked to it.",
         "Budget is in MICROS (1,000,000 = R$1.00 / $1.00).",
         "",
-        "Supported types: SEARCH, DISPLAY, SHOPPING, PERFORMANCE_MAX, VIDEO, DEMAND_GEN.",
+        "Supported types: SEARCH, DISPLAY, PERFORMANCE_MAX, DEMAND_GEN. SHOPPING é recusado aqui (exige merchantId) — use create_shopping_campaign. VIDEO é recusado: a API não cria campanhas de vídeo novas.",
         "Bidding strategies: MAXIMIZE_CONVERSIONS, MAXIMIZE_CONVERSION_VALUE, TARGET_CPA, TARGET_ROAS, MANUAL_CPC.",
       ].join("\n"),
       inputSchema: {
@@ -1424,6 +1436,23 @@ export function registerGoogleAdsTools(
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
 
+      // A API do Google Ads não cria campanhas de VIDEO novas (só leitura/relatório e
+      // anúncios em campanhas existentes): campaigns:mutate responde "Mutates are not
+      // allowed for the requested resource". Recusar aqui evita criar o orçamento e
+      // deixá-lo órfão a cada tentativa.
+      if (channelType === "VIDEO") {
+        return {
+          content: [
+            text(
+              "create_campaign não cria campanhas VIDEO: a API do Google Ads não permite criar nem alterar campanhas de vídeo " +
+                "(só leitura, e anúncios em ad groups VIDEO_RESPONSIVE já existentes via create_video_ad). " +
+                "Para vídeo programático use create_demand_gen_campaign.",
+            ),
+          ],
+          isError: true,
+        };
+      }
+
       // SHOPPING exige shoppingSetting.merchantId (+ feedLabel), que esta tool não coleta.
       // Recusa ANTES da Step 1 para não deixar budget órfão quando o mutate falhar.
       if (channelType === "SHOPPING") {
@@ -1438,6 +1467,16 @@ export function registerGoogleAdsTools(
           ],
           isError: true,
         };
+      }
+
+      // Valida a estratégia de lance ANTES de criar o orçamento: TARGET_CPA/ROAS sem o
+      // alvo retornaria erro depois do mutate do budget e deixaria um orçamento órfão.
+      const strategy = biddingStrategy ?? "MAXIMIZE_CONVERSIONS";
+      if (strategy === "TARGET_CPA" && !targetCpaMicros) {
+        return { content: [text("TARGET_CPA exige targetCpaMicros (ex: 50000000 = R$50 por conversão).")], isError: true };
+      }
+      if (strategy === "TARGET_ROAS" && !targetRoas) {
+        return { content: [text("TARGET_ROAS exige targetRoas (ex: 5.0 = 500%).")], isError: true };
       }
 
       // Step 1: Create budget
@@ -1477,8 +1516,7 @@ export function registerGoogleAdsTools(
         ...(effectiveNetworkSettings ? { networkSettings: effectiveNetworkSettings } : {}),
       };
 
-      // Bidding strategy
-      const strategy = biddingStrategy ?? "MAXIMIZE_CONVERSIONS";
+      // Bidding strategy (alvos já validados antes do orçamento)
       if (strategy === "MAXIMIZE_CONVERSIONS") {
         campaignData.maximizeConversions = {};
       } else if (strategy === "MAXIMIZE_CONVERSION_VALUE") {
@@ -1652,10 +1690,15 @@ export function registerGoogleAdsTools(
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
 
+      // campaignId entra cru na GAQL abaixo: exigir numérico impede que um valor
+      // manipulado amplie o WHERE e derive o canal de outra campanha.
+      if (!/^\d+$/.test(campaignId)) {
+        return { content: [text("Error: campaignId inválido — use apenas o ID numérico da campanha.")], isError: true };
+      }
       // O type do ad group precisa casar com o canal da campanha — SEARCH_STANDARD dentro
       // de campanha DISPLAY/VIDEO/SHOPPING é recusado pela API. Consulta o canal antes.
       const campRows = await client.searchStream(customerId,
-        `SELECT campaign.id, campaign.advertising_channel_type FROM campaign WHERE campaign.id = ${campaignId}`);
+        `SELECT campaign.id, campaign.advertising_channel_type FROM campaign WHERE campaign.id = ${campaignId} AND campaign.status != 'REMOVED'`);
       const camp = (campRows[0]?.campaign ?? {}) as Record<string, unknown>;
       const channel = camp.advertisingChannelType as string | undefined;
       if (!channel) {
@@ -1667,6 +1710,16 @@ export function registerGoogleAdsTools(
       if (channel === "PERFORMANCE_MAX") {
         return {
           content: [text("Campanhas PERFORMANCE_MAX não têm ad groups — use create_asset_group.")],
+          isError: true,
+        };
+      }
+      // A API não altera campanhas VIDEO existentes: adGroups:mutate responde "Mutates
+      // are not allowed for the requested resource" (testado). Vídeo programático é
+      // Demand Gen; em campanha de vídeo criada no Google Ads, só create_video_ad
+      // (anúncio em ad group VIDEO_RESPONSIVE existente) passa.
+      if (channel === "VIDEO") {
+        return {
+          content: [text("A API do Google Ads não cria ad groups em campanhas VIDEO (nem cria/altera essas campanhas). Para vídeo programático use create_demand_gen_campaign; para anúncio num ad group VIDEO_RESPONSIVE já existente, use create_video_ad.")],
           isError: true,
         };
       }
@@ -2581,7 +2634,10 @@ export function registerGoogleAdsTools(
     "create_video_campaign",
     {
       description: [
-        "Create a Video (YouTube) campaign.",
+        "Create a Video (YouTube) campaign — NÃO SUPORTADO PELA API: campaigns:mutate recusa campanhas VIDEO novas",
+        "('Mutates are not allowed for the requested resource'). A tool retorna erro explicativo sem tocar na conta.",
+        "Para vídeo programático use create_demand_gen_campaign. Em campanha de vídeo criada no Google Ads,",
+        "só create_video_ad (anúncio em ad group VIDEO_RESPONSIVE existente) é aceito pela API.",
         "WRITE OPERATION — created PAUSED by default.",
         "",
         "After creating, use create_video_ad to add video ads.",
@@ -2593,25 +2649,47 @@ export function registerGoogleAdsTools(
         dailyBudgetMicros: z.number().describe("Daily budget in MICROS."),
         biddingStrategy: z.enum(["MAXIMIZE_CONVERSIONS", "TARGET_CPA", "MANUAL_CPV"]).optional()
           .describe("Default: MAXIMIZE_CONVERSIONS. MANUAL_CPV for awareness."),
+        targetCpaMicros: z.number().optional().describe("Alvo de CPA em MICROS (ex: 50000000 = R$50). Obrigatório com TARGET_CPA."),
       },
     },
-    async ({ customerId, name, dailyBudgetMicros, biddingStrategy }) => {
+    async ({ customerId, name, dailyBudgetMicros, biddingStrategy, targetCpaMicros }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
+
+      // A API do Google Ads não cria campanhas de VIDEO novas: campaigns:mutate responde
+      // "Mutates are not allowed for the requested resource" em todas as variantes
+      // (com/sem networkSettings, subtype VIDEO_ACTION). Recusar antes do orçamento
+      // evita um budget órfão a cada tentativa.
+      return {
+        content: [
+          text(
+            "create_video_campaign: a API do Google Ads não permite criar nem alterar campanhas de vídeo " +
+              "(só leitura, e anúncios em ad groups VIDEO_RESPONSIVE já existentes via create_video_ad). " +
+              `Para vídeo programático use create_demand_gen_campaign. Nada foi alterado na conta ${customerId}.`,
+          ),
+        ],
+        isError: true,
+      };
+
+      // Valida ANTES de criar o orçamento: TARGET_CPA sem alvo subia a campanha sem
+      // CPA-alvo nenhum (o ramo virava MAXIMIZE_CONVERSIONS puro) e dizia sucesso.
+      const strategy = biddingStrategy ?? "MAXIMIZE_CONVERSIONS";
+      if (strategy === "TARGET_CPA" && !targetCpaMicros) {
+        return { content: [text("TARGET_CPA exige targetCpaMicros (ex: 50000000 = R$50 por conversão).")], isError: true };
+      }
 
       const budgetResult = await client.mutateCampaignBudgets(customerId, [
         { create: { name: `Budget — ${name}`, amountMicros: String(dailyBudgetMicros), deliveryMethod: "STANDARD", explicitlyShared: false } },
       ]);
       const budgetResource = ((budgetResult as Record<string, unknown>).results as Array<Record<string, unknown>>)?.[0]?.resourceName as string;
 
-      const strategy = biddingStrategy ?? "MAXIMIZE_CONVERSIONS";
       const campaignData: Record<string, unknown> = {
         name, status: "PAUSED", advertisingChannelType: "VIDEO", campaignBudget: budgetResource, containsEuPoliticalAdvertising: EU_POLITICAL_DECLARATION,
       };
-      if (strategy === "MAXIMIZE_CONVERSIONS") campaignData.maximizeConversions = {};
-      else if (strategy === "TARGET_CPA") campaignData.maximizeConversions = {};
+      if (strategy === "TARGET_CPA") campaignData.maximizeConversions = { targetCpaMicros: String(targetCpaMicros) };
       else if (strategy === "MANUAL_CPV") campaignData.manualCpv = {};
+      else campaignData.maximizeConversions = {};
 
       const result = await client.mutateCampaigns(customerId, [{ create: campaignData }]);
       const resource = ((result as Record<string, unknown>).results as Array<Record<string, unknown>>)?.[0]?.resourceName as string;
@@ -2639,9 +2717,10 @@ export function registerGoogleAdsTools(
         callToAction: z.string().optional().describe("CTA text (e.g. 'Saiba mais', 'Comprar agora'). Max 10 chars. Obrigatório na prática."),
         logoAssetId: z.string().optional().describe("ID de um asset IMAGE quadrado (1:1, ex.: 1200x1200) já na conta, usado como logo — a API exige ao menos um. Ache com get_image_assets."),
         businessName: z.string().optional().describe("Nome da marca/anunciante exibido no anúncio (max 25 chars). Obrigatório na prática: a API exige business_name no responsive video ad."),
+        longHeadline: z.string().optional().describe("Long headline (max 90 chars). Default: reutiliza headline."),
       },
     },
-    async ({ customerId, adGroupId, youtubeVideoId, finalUrl, headline, description, callToAction, logoAssetId, businessName }) => {
+    async ({ customerId, adGroupId, youtubeVideoId, finalUrl, headline, description, callToAction, logoAssetId, businessName, longHeadline }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
@@ -2674,7 +2753,7 @@ export function registerGoogleAdsTools(
       const videoAdInfo: Record<string, unknown> = {
         videos: [{ asset: videoAsset }],
         headlines: [{ text: headline }],
-        longHeadlines: [{ text: headline }],
+        longHeadlines: [{ text: longHeadline ?? headline }],
         descriptions: [{ text: description }],
         callToActions: [{ text: callToAction }],
         // A API exige ao menos um logo (asset IMAGE 1:1) no responsive video ad.
@@ -2835,7 +2914,7 @@ export function registerGoogleAdsTools(
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
-      const nameFilter = query ? `AND audience.name LIKE '%${query}%'` : "";
+      const nameFilter = query ? `AND audience.name LIKE '%${gaqlLiteral(query)}%'` : "";
 
       const results = await client.searchStream(
         customerId,
@@ -3484,7 +3563,10 @@ export function registerGoogleAdsTools(
     {
       description: [
         "Set product filters for a PMax asset group (listing group subdivisions).",
-        "WRITE OPERATION.",
+        "WRITE OPERATION. Substitui a árvore atual numa única requisição atômica.",
+        "Todos os filtros precisam usar a MESMA dimensão. 'Todo o resto': se houver",
+        "filtro de inclusão, os demais produtos ficam EXCLUÍDOS (só o listado veicula);",
+        "se só houver exclusões, os demais ficam incluídos.",
         "",
         "Dimensions: PRODUCT_BRAND, PRODUCT_CATEGORY_LEVEL1..5, PRODUCT_TYPE_LEVEL1..5,",
         "PRODUCT_ITEM_ID, PRODUCT_CHANNEL, PRODUCT_CUSTOM_ATTRIBUTE0..4.",
@@ -3504,6 +3586,11 @@ export function registerGoogleAdsTools(
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
+      // assetGroupId entra cru na GAQL do remove: exigir numérico impede que um valor
+      // manipulado amplie o WHERE e apague filtros de outros asset groups.
+      if (!/^\d+$/.test(assetGroupId)) {
+        return { content: [text("Error: assetGroupId inválido — use apenas o ID numérico do asset group.")], isError: true };
+      }
       const agResource = `customers/${cid}/assetGroups/${assetGroupId}`;
 
       // Valida tudo ANTES de tocar na conta: buildListingGroupCaseValue lança em
@@ -3527,8 +3614,23 @@ export function registerGoogleAdsTools(
       }
 
       const existing = await client.searchStream(customerId,
-        `SELECT asset_group_listing_group_filter.resource_name FROM asset_group_listing_group_filter WHERE asset_group.id = ${assetGroupId}`);
-      const removeOps = existing.map(r => ({ remove: (r.assetGroupListingGroupFilter as Record<string, unknown>)?.resourceName as string }));
+        `SELECT asset_group_listing_group_filter.resource_name, asset_group_listing_group_filter.parent_listing_group_filter
+         FROM asset_group_listing_group_filter WHERE asset_group.id = ${assetGroupId}`);
+      // A API exige remover os filhos antes do pai. Ordena por profundidade (folhas
+      // primeiro) a partir de parent_listing_group_filter, como no sample de PMax
+      // retail do Google — senão substituir uma árvore já subdividida é recusado.
+      const nodes = existing
+        .map(r => r.assetGroupListingGroupFilter as Record<string, unknown> | undefined)
+        .filter((n): n is Record<string, unknown> => !!n && !!n.resourceName)
+        .map(n => ({ name: n.resourceName as string, parent: (n.parentListingGroupFilter as string | undefined) ?? "" }));
+      const parentOf = new Map(nodes.map(n => [n.name, n.parent]));
+      const depth = (name: string, seen = 0): number => {
+        const p = parentOf.get(name);
+        return p && seen < 50 ? 1 + depth(p, seen + 1) : 0;
+      };
+      const removeOps = nodes
+        .sort((a, b) => depth(b.name) - depth(a.name))
+        .map(n => ({ remove: n.name }));
 
       // Uma única requisição: a API valida a árvore ao fim de CADA request, então
       // raiz criada sem filhos, ou remove sem a árvore nova, deixariam estado
@@ -3550,7 +3652,7 @@ export function registerGoogleAdsTools(
       ];
 
       const childResult = await client.mutateAssetGroupListingGroupFilters(customerId, ops as unknown as import("./google-ads-client.js").MutateOperation[]);
-      return { content: [text(`Listing group filters set for asset group ${assetGroupId}:\n${filters.map(f => `${f.included === false ? "EXCLUDE" : "INCLUDE"} ${f.dimension} = "${f.value}"`).join("\n")}\n\n${formatJson(childResult)}`)] };
+      return { content: [text(`Listing group filters set for asset group ${assetGroupId}:\n${filters.map(f => `${f.included === false ? "EXCLUDE" : "INCLUDE"} ${f.dimension} = "${f.value}"`).join("\n")}\nTodo o resto: ${othersType === "UNIT_EXCLUDED" ? "EXCLUÍDO (só o listado veicula)" : "INCLUÍDO"}\n\n${formatJson(childResult)}`)] };
     }
   );
 
@@ -3589,34 +3691,35 @@ export function registerGoogleAdsTools(
         return { content: [text("Error: locationIds vazio — informe ao menos um geo_target_constant ID.")], isError: true };
       }
 
-      let removedCount = 0;
+      // campaignId entra cru em GAQL e em resource names: exigir numérico impede que um
+      // valor manipulado amplie o WHERE do remove ou gere um resource name inválido.
+      if (!/^\d+$/.test(campaignId)) {
+        return { content: [text("Error: campaignId inválido — use apenas o ID numérico da campanha.")], isError: true };
+      }
+
+      let removeOps: Array<Record<string, unknown>> = [];
       if (replace) {
-        // campaignId entra cru na GAQL: exigir numérico impede que um valor manipulado
-        // amplie o WHERE e faça o remove alcançar critérios de outras campanhas.
-        if (!/^\d+$/.test(campaignId)) {
-          return { content: [text("Error: campaignId inválido — use apenas o ID numérico da campanha.")], isError: true };
-        }
         const existing = await client.searchStream(customerId,
           `SELECT campaign_criterion.resource_name, campaign_criterion.type, campaign_criterion.negative
            FROM campaign_criterion
            WHERE campaign.id = ${campaignId}
              AND campaign_criterion.type = 'LOCATION'
              AND campaign_criterion.status != 'REMOVED'`);
-        const removeOps = existing
+        removeOps = existing
           .map(r => r.campaignCriterion as Record<string, unknown> | undefined)
           // Dupla checagem do type no cliente + negative=false vem OMITIDO no JSON da
           // API (default de proto3), então undefined tem que valer false.
           .filter((cc): cc is Record<string, unknown> =>
             !!cc && cc.type === "LOCATION" && ((cc.negative as boolean) ?? false) === isNegative && !!cc.resourceName)
           .map(cc => ({ remove: cc.resourceName as string }));
-        if (removeOps.length > 0) {
-          await client.mutateCampaignCriteria(customerId, removeOps as unknown as import("./google-ads-client.js").MutateOperation[]);
-          removedCount = removeOps.length;
-        }
       }
 
-      const ops = locationIds.map(locId => ({ create: { campaign: `customers/${cid}/campaigns/${campaignId}`, location: { geoTargetConstant: `geoTargetConstants/${locId}` }, negative: isNegative } }));
-      const result = await client.mutateCampaignCriteria(customerId, ops as unknown as import("./google-ads-client.js").MutateOperation[]);
+      // Remove e create na MESMA requisição: a API aplica a lista inteira de forma
+      // atômica (sem partialFailure). Em duas requisições, um create recusado deixaria
+      // a campanha sem nenhum critério de LOCATION — entregando no mundo inteiro.
+      const createOps = locationIds.map(locId => ({ create: { campaign: `customers/${cid}/campaigns/${campaignId}`, location: { geoTargetConstant: `geoTargetConstants/${locId}` }, negative: isNegative } }));
+      const result = await client.mutateCampaignCriteria(customerId, [...removeOps, ...createOps] as unknown as import("./google-ads-client.js").MutateOperation[]);
+      const removedCount = removeOps.length;
       const mode = replace ? `substituindo (${removedCount} critério(s) de LOCATION removido(s))` : "adicionando à segmentação existente";
       return { content: [text(`${isNegative ? "Excluded" : "Targeted"} ${locationIds.length} location(s) for campaign ${campaignId} — ${mode}.\n\n${formatJson(result)}`)] };
     }
@@ -3904,20 +4007,23 @@ export function registerGoogleAdsTools(
         percentOff: z.number().optional().describe("Percent off (e.g. 20)."),
         moneyAmountOff: z.number().optional().describe("Money off in currency."),
         occasion: z.string().optional().describe("PromotionExtensionOccasion (e.g. BLACK_FRIDAY, CHRISTMAS, CARNIVAL). Omit for no occasion — NONE is not a valid value."),
+        languageCode: z.string().optional().describe("Idioma do asset em BCP-47 regional (ex: 'pt-BR', 'en-US'). Default: 'pt-BR'. A API rejeita 'pt' sem região."),
         finalUrl: z.string().describe("Landing page."),
       },
     },
-    async ({ customerId, campaignId, promotionTarget, percentOff, moneyAmountOff, occasion, finalUrl }) => {
+    async ({ customerId, campaignId, promotionTarget, percentOff, moneyAmountOff, occasion, finalUrl, languageCode }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
       // v25: discountModifier só aceita UP_TO e PromotionExtensionOccasion não tem NONE —
       // ambos precisam ser OMITIDOS quando não informados (a API rejeita o enum "NONE").
-      const promoData: Record<string, unknown> = { promotionTarget, languageCode: "pt-BR", redemptionStartDate: new Date().toISOString().split("T")[0], redemptionEndDate: new Date(Date.now() + 90*24*60*60*1000).toISOString().split("T")[0] };
+      const promoData: Record<string, unknown> = { promotionTarget, languageCode: languageCode ?? "pt-BR", redemptionStartDate: new Date().toISOString().split("T")[0], redemptionEndDate: new Date(Date.now() + 90*24*60*60*1000).toISOString().split("T")[0] };
       const occasionCode = occasion?.trim().toUpperCase();
       if (occasionCode && occasionCode !== "NONE" && occasionCode !== "UNSPECIFIED" && occasionCode !== "UNKNOWN") promoData.occasion = occasionCode;
-      if (percentOff) promoData.percentOff = percentOff * 10000;
+      // percent_off: 1.000.000 = 100% (referência v25), logo 1% = 10.000. Math.round
+      // porque o campo é int64 e 0.07 * 10000 dá 700.0000000000001 em ponto flutuante.
+      if (percentOff) promoData.percentOff = Math.round(percentOff * 10000);
       if (moneyAmountOff) promoData.moneyAmountOff = { amountMicros: String(Math.round(moneyAmountOff * 1_000_000)), currencyCode: "BRL" };
       const assetResult = await client.mutateAssets(customerId, [{ create: { type: "PROMOTION", promotionAsset: promoData, finalUrls: [finalUrl] } }]);
       const assetResource = ((assetResult as Record<string, unknown>).results as Array<Record<string, unknown>>)?.[0]?.resourceName as string;
@@ -4017,7 +4123,7 @@ export function registerGoogleAdsTools(
     {
       description: [
         "List all remarketing/audience lists in the account with size and membership details.",
-        "Shows list name, type, size for display/search, membership lifespan, and status.",
+        "Shows list name, type, size for display/search, membership lifespan, and membership_status (OPEN/CLOSED). Lista todas, inclusive fechadas.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
@@ -4028,7 +4134,9 @@ export function registerGoogleAdsTools(
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
-      const nameFilter = query ? `AND user_list.name LIKE '%${gaqlLiteral(query)}%'` : "";
+      // Sem filtro de status: user_list.status não existe na v25, e filtrar por
+      // membership_status esconderia listas CLOSED, que são legítimas e reabríveis.
+      const nameFilter = query ? `WHERE user_list.name LIKE '%${gaqlLiteral(query)}%'` : "";
 
       const results = await client.searchStream(customerId,
         `SELECT user_list.id, user_list.name, user_list.type,
@@ -4037,7 +4145,7 @@ export function registerGoogleAdsTools(
                 user_list.membership_status, user_list.eligible_for_display,
                 user_list.eligible_for_search
          FROM user_list
-         WHERE user_list.membership_status != 'CLOSED' ${nameFilter}
+         ${nameFilter}
          ORDER BY user_list.size_for_display DESC`
       );
 
@@ -4047,7 +4155,6 @@ export function registerGoogleAdsTools(
           id: ul?.id,
           name: ul?.name,
           type: ul?.type,
-          status: ul?.status,
           size_display: ul?.sizeForDisplay,
           size_search: ul?.sizeForSearch,
           membership_days: ul?.membershipLifeSpan,
