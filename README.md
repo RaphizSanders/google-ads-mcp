@@ -28,7 +28,7 @@ Funciona em modo **local** (stdio) e **remoto** (HTTP/SSE), com suporte a deploy
 | `GOOGLE_ADS_API_VERSION` | Nao | Versao da API (default: v25 — v21 ja foi desligada, v22/v23 estao proximas do sunset) |
 | `MCP_API_KEY` | Em qualquer modo HTTP | Chave de autenticacao (`Authorization: Bearer`). Obrigatoria sempre que `PORT` estiver definido — sem ela o endpoint aceitaria qualquer requisicao. Nao se aplica ao stdio |
 | `MCP_ALLOWED_HOSTS` | Em qualquer modo HTTP | Hostnames aceitos, separados por vírgula e sem porta. Ativa proteção contra DNS rebinding |
-| `ALLOWED_CUSTOMER_IDS` | Em qualquer modo HTTP | Allowlist não vazia de contas específicas. IDs de 10 dígitos separados por vírgula; ausência, vazio ou valor malformado recusam o boot |
+| `ALLOWED_CUSTOMER_IDS` | Em qualquer modo HTTP | Allowlist não vazia de contas específicas. IDs de 10 dígitos separados por vírgula; ausência, vazio ou valor malformado recusam o boot. **Em stdio é opcional**: ausente significa "sem filtro", e todas as contas da MCC ficam acessíveis — é o que permite `list_accounts` funcionar como descoberta |
 | `GOOGLE_ADS_READ_ONLY` | Nao | Modo somente leitura (`true`/`1`). Remove as 56 tools mutáveis do catálogo e bloqueia mutações no cliente. Ausente mantém compatibilidade com o comportamento atual |
 | `PORT` | Nao | Se definido, inicia servidor HTTP. Sem `PORT`, usa stdio |
 
@@ -102,9 +102,15 @@ são obrigatórios. O processo recusa iniciar se qualquer um estiver ausente. Pa
 prefira `GOOGLE_ADS_CREDENTIALS_JSON` como secret write-only; o refresh token permanece somente
 em memória e nunca é gravado no filesystem do container.
 
-`list_accounts` sempre filtra a descoberta pela allowlist em modo hospedado read-only. A ausência
-ou lista vazia nunca significa wildcard: o processo recusa iniciar e a guarda de cada tool também
-nega o acesso como defesa em profundidade.
+`list_accounts` filtra a descoberta pela allowlist **quando o servidor está exposto por HTTP**
+(`PORT` definido). Aí a ausência ou lista vazia nunca significa wildcard: o processo recusa
+iniciar e a guarda de cada tool também nega o acesso, como defesa em profundidade.
+
+Em **stdio** o critério é outro, e de propósito: o processo é iniciado pelo próprio cliente com a
+credencial dele, não há superfície de rede nem outro inquilino para vazar, e `list_accounts` é o
+ponto de descoberta — o id que você precisaria colocar na allowlist é justamente o que se vem
+buscar aqui. Por isso uma allowlist vazia mantém o significado original de "sem filtro". Passar
+`ALLOWED_CUSTOMER_IDS` em stdio continua funcionando e restringe normalmente.
 
 ---
 
@@ -416,7 +422,7 @@ create_remarketing_list (URL /cart, excluir /thank-you, 30 dias)
 - **Tudo PAUSED por padrao**: Todas as tools de criacao criam objetos pausados.
 - **Budgets em MICROS**: R$1,00 = 1.000.000 micros. Descricoes explicitas.
 - **`MCP_API_KEY`**: Protege o endpoint HTTP.
-- **`ALLOWED_CUSTOMER_IDS`**: Restringe quais contas o agente pode acessar.
+- **`ALLOWED_CUSTOMER_IDS`**: Restringe quais contas o agente pode acessar. Obrigatoria sob HTTP; opcional em stdio.
 - **Delete com confirmacao**: `confirm: true` obrigatorio para remocao.
 - **OAuth auto-refresh**: Token renova automaticamente, persiste no arquivo.
 

@@ -128,13 +128,17 @@ function gaqlLiteral(value: string): string {
 
 function checkCustomerAccess(
   customerId: string,
-  allowedIds: string[]
+  allowedIds: string[],
+  hosted: boolean
 ): ReturnType<typeof text> | null {
-  /* Defence in depth. Startup already refuses an empty allowlist in hosted
-     mode, but this used to return "allowed" for the empty case, so any future
-     path that reached the tools without that gate would be wide open rather
-     than closed. Deny is the safe reading of "nobody said which accounts". */
+  /* Defence in depth, but only where a network surface exists. On a hosted run
+     (port > 0) startup already refuses an empty allowlist, and denying here too
+     keeps any future path that skipped that gate closed rather than wide open.
+     On stdio the client spawns this process with its own credential and no
+     allowlist is expected, so an empty list keeps its original meaning of "no
+     filter" — otherwise every tool would deny on a normal local setup. */
   if (allowedIds.length === 0) {
+    if (!hosted) return null;
     return {
       type: "text" as const,
       text: "Access denied: no customer allowlist is configured.",
@@ -238,7 +242,8 @@ export function resolveEnumAlias(value: string, aliases: Record<string, string>)
 export function registerGoogleAdsTools(
   mcp: McpServer,
   getClient: () => GoogleAdsClient,
-  allowedCustomerIds: string[]
+  allowedCustomerIds: string[],
+  hosted = false
 ): void {
   const allowedCustomerIdSet = new Set(allowedCustomerIds.map((id) => id.replace(/-/g, "")));
 
@@ -268,11 +273,16 @@ export function registerGoogleAdsTools(
             status: c?.status,
           };
         })
-        /* An empty set filters everything out rather than nothing: discovery
-           must not enumerate the whole MCC just because no allowlist was
-           given. */
+        /* A hosted run must not enumerate the whole MCC just because no
+           allowlist was given, so there an empty set filters everything out.
+           On stdio there is no cross-tenant surface and this tool is the
+           discovery entry point — the id you would need to allowlist is
+           precisely what you come here to find — so an empty set means
+           "no filter". */
         .filter((account) =>
-          allowedCustomerIdSet.has(String(account.customer_id ?? "").replace(/-/g, ""))
+          allowedCustomerIdSet.size === 0
+            ? !hosted
+            : allowedCustomerIdSet.has(String(account.customer_id ?? "").replace(/-/g, ""))
         );
       return {
         content: [text(`${accounts.length} conta(s) encontrada(s).\n\n${formatJson(accounts)}`)],
@@ -290,7 +300,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const result = await client.getCustomer(customerId);
@@ -328,7 +338,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, query, format }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const results = await client.searchStream(customerId, query);
@@ -373,7 +383,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, dateRange, days, status }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const dateClause = buildDateClause(dateRange, days);
@@ -439,7 +449,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, dateRange, days, campaignId }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const dateClause = buildDateClause(dateRange, days);
@@ -501,7 +511,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, dateRange, days, campaignId, limit }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const dateClause = buildDateClause(dateRange, days);
@@ -566,7 +576,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, dateRange, days, campaignId, limit }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const dateClause = buildDateClause(dateRange, days);
@@ -642,7 +652,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, dateRange, days, orderBy, limit }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const dateClause = buildDateClause(dateRange, days);
@@ -700,7 +710,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, dateRange, days }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const dateClause = buildDateClause(dateRange, days);
@@ -749,7 +759,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, dateRange, days, campaignId }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const dateClause = buildDateClause(dateRange, days);
@@ -796,7 +806,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, dateRange, days, limit }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const dateClause = buildDateClause(dateRange, days);
@@ -837,7 +847,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, dateRange, days, campaignId, limit }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const dateClause = buildDateClause(dateRange, days);
@@ -897,7 +907,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, dateRange, days }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const dateClause = buildDateClause(dateRange, days);
@@ -959,7 +969,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, periodA, periodB }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
 
@@ -1030,7 +1040,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, dateRange, days }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const dateClause = buildDateClause(dateRange, days);
@@ -1112,7 +1122,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, dateRange, days, limit }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const dateClause = buildDateClause(dateRange, days);
@@ -1147,7 +1157,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, campaignId, limit }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const campaignFilter = campaignId ? `AND campaign.id = ${campaignId}` : "";
@@ -1181,7 +1191,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, limit }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
 
@@ -1210,7 +1220,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, limit }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
 
@@ -1240,7 +1250,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
 
@@ -1271,7 +1281,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, campaignId, limit }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const campaignFilter = campaignId ? `AND campaign.id = ${campaignId}` : "";
@@ -1350,7 +1360,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, name, channelType, dailyBudgetMicros, biddingStrategy, targetCpaMicros, targetRoas, networkSettings }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -1445,7 +1455,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, campaignId, name, status }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -1495,7 +1505,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, budgetResourceName, amountMicros }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
 
@@ -1536,7 +1546,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, campaignId, name, cpcBidMicros }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -1569,7 +1579,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, adGroupId, name, status }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -1619,7 +1629,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, adGroupId, finalUrl, headlines, descriptions, path1, path2 }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -1661,7 +1671,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, adGroupId, adId, status }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -1704,7 +1714,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, adGroupId, keyword, matchType, cpcBidMicros }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -1737,7 +1747,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, adGroupId, criterionId }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -1764,7 +1774,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, campaignId, keyword, matchType }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -1806,7 +1816,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, resourceType, resourceIds, status }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -1851,7 +1861,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, name, imageBase64 }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
 
@@ -1888,7 +1898,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, youtubeVideoId }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
 
@@ -1960,7 +1970,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, name, dailyBudgetMicros, biddingStrategy, targetRoas, assetGroupName, finalUrl, headlines, longHeadlines, descriptions, businessNameAsset, marketingImageAssets, squareMarketingImageAssets, logoAssets, videoAssets, merchantId, feedLabel, audienceResourceName }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -2133,7 +2143,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, campaignId, name, finalUrl, headlines, longHeadlines, descriptions, marketingImageAssets, squareMarketingImageAssets, videoAssets }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -2200,7 +2210,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, assetGroupId, name, status, finalUrl }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -2235,7 +2245,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, campaignId }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
 
@@ -2277,7 +2287,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, campaignId, dateRange, days }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const dateClause = buildDateClause(dateRange, days);
@@ -2341,7 +2351,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, name, dailyBudgetMicros, biddingStrategy, targetCpaMicros }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
 
@@ -2391,7 +2401,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, adGroupId, finalUrl, headlines, longHeadline, descriptions, businessName, marketingImageAssets, squareMarketingImageAssets, logoAssets }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -2437,7 +2447,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, name, dailyBudgetMicros, biddingStrategy }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
 
@@ -2481,7 +2491,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, adGroupId, youtubeVideoId, finalUrl, headline, description, callToAction }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -2531,7 +2541,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, name, merchantId, dailyBudgetMicros, feedLabel, biddingStrategy, targetRoas, campaignPriority }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
 
@@ -2582,7 +2592,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, name, dailyBudgetMicros, biddingStrategy, targetCpaMicros }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
 
@@ -2621,7 +2631,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, query, limit }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const nameFilter = query ? `AND audience.name LIKE '%${query}%'` : "";
@@ -2653,7 +2663,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, name, keywords, urls }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -2703,7 +2713,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, adGroupId, audienceResourceName, bidModifier }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -2736,7 +2746,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, adGroupId, url }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -2765,7 +2775,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, campaignId, limit }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const campaignFilter = campaignId ? `AND campaign.id = ${campaignId}` : "";
@@ -2807,7 +2817,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, campaignId, linkText, finalUrl, description1, description2 }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -2857,7 +2867,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, campaignId, calloutText }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -2897,7 +2907,7 @@ export function registerGoogleAdsTools(
     },
     async ({ customerId, campaignId, confirm }) => {
       if (!confirm) return { content: [text("Error: set confirm: true to proceed.")], isError: true };
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -2922,7 +2932,7 @@ export function registerGoogleAdsTools(
     },
     async ({ customerId, adGroupId, confirm }) => {
       if (!confirm) return { content: [text("Error: set confirm: true.")], isError: true };
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -2948,7 +2958,7 @@ export function registerGoogleAdsTools(
     },
     async ({ customerId, adGroupId, adId, confirm }) => {
       if (!confirm) return { content: [text("Error: set confirm: true.")], isError: true };
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -2985,7 +2995,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, campaignId, deviceType, bidModifier }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -3044,7 +3054,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, campaignId, dayOfWeek, startHour, startMinute, endHour, endMinute, bidModifier }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -3110,7 +3120,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, name, type, category, countingType, attributionModel, valueSetting, viewThroughLookbackWindowDays, clickThroughLookbackWindowDays, primary, includeInConversionsMetric, phoneCallDurationSeconds }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
 
@@ -3195,7 +3205,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, conversionActionId, name, status, category, countingType, attributionModel, primary, includeInConversionsMetric, valueSetting, viewThroughLookbackWindowDays, clickThroughLookbackWindowDays, phoneCallDurationSeconds }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -3289,7 +3299,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, assetGroupId, filters }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -3334,7 +3344,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, campaignId, locationIds: rawLocationIds, negative }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -3359,7 +3369,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, campaignId, languageIds: rawLangIds }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -3381,7 +3391,7 @@ export function registerGoogleAdsTools(
       inputSchema: { customerId: z.string().describe("Customer ID.") },
     },
     async ({ customerId }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
 
@@ -3451,7 +3461,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, campaignId, locationId, bidModifier }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -3472,7 +3482,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, adGroupId, ageRange, bidModifier }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -3493,7 +3503,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, adGroupId, gender, bidModifier }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -3520,7 +3530,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, adId, finalUrl, headlines, descriptions, path1, path2 }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -3551,7 +3561,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, campaignId, header, values }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -3574,7 +3584,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, campaignId, phoneNumber, countryCode }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -3600,7 +3610,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, campaignId, priceType, items }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -3627,7 +3637,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, campaignId, promotionTarget, percentOff, moneyAmountOff, occasion, finalUrl }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -3651,7 +3661,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, name }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const result = await client.mutate(customerId, "labels", [{ create: { name } }]);
@@ -3671,7 +3681,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, resourceType, resourceId, labelId }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -3689,7 +3699,7 @@ export function registerGoogleAdsTools(
       inputSchema: { customerId: z.string().describe("Customer ID.") },
     },
     async ({ customerId }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const results = await client.searchStream(customerId, `SELECT label.id, label.name, label.status FROM label WHERE label.status = 'ENABLED'`);
@@ -3709,7 +3719,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, name, keywords, campaignIds }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -3740,7 +3750,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, query }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const nameFilter = query ? `AND user_list.name LIKE '%${gaqlLiteral(query)}%'` : "";
@@ -3805,7 +3815,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, assetGroupId, signalType, audienceResourceName, searchThemeText }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -3846,7 +3856,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, name, userListResourceNames }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const lists = ensureArray<string>(userListResourceNames);
@@ -3901,7 +3911,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, name, description, membershipLifeSpan, rules, ruleOperator, excludeRules, excludeLifeSpan }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
 
@@ -3966,7 +3976,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, userListId, name, description, membershipLifeSpan, status }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -4004,7 +4014,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const currency = await client.getAccountCurrency(customerId);
@@ -4042,7 +4052,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, keywords, pageUrl, languageCode, geoTargetIds, network, includeAdultKeywords, limit, format }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
 
@@ -4126,7 +4136,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, query, countryCode, targetType, limit, format }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
 
@@ -4182,7 +4192,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, types, campaignId, limit, format }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -4245,7 +4255,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, resourceNames, confirm }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       if (!confirm) {
         return { content: [text("Cancelado: aplicar recomendação altera a conta na hora. Envie confirm: true.")], isError: true };
@@ -4290,7 +4300,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, resourceNames }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const names = ensureArray<string>(resourceNames);
       if (names.length === 0) return { content: [text("Informe ao menos um resourceName.")], isError: true };
@@ -4342,7 +4352,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, campaignId, goals }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -4397,7 +4407,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, conversionActionId, conversions, validateOnly }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
@@ -4478,7 +4488,7 @@ export function registerGoogleAdsTools(
       },
     },
     async ({ customerId, level, campaignId, assetGroupId, dateRange, days, format }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
 

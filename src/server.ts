@@ -9,6 +9,10 @@ export interface McpServerOptions {
   getClient: () => GoogleAdsClient;
   allowedCustomerIds?: string[];
   readOnly?: boolean;
+  /* True when the server is exposed over HTTP (port > 0). Gates the
+     fail-closed reading of an empty allowlist, which must not apply to a
+     locally spawned stdio process. */
+  hosted?: boolean;
 }
 
 export function createMcpServer(opts: McpServerOptions): McpServer {
@@ -28,7 +32,8 @@ export function createMcpServer(opts: McpServerOptions): McpServer {
   registerGoogleAdsTools(
     createReadOnlyToolServer(server, opts.readOnly ?? false),
     opts.getClient,
-    opts.allowedCustomerIds ?? []
+    opts.allowedCustomerIds ?? [],
+    opts.hosted ?? false
   );
   registerGoogleAdsResources(server);
   registerGoogleAdsPrompts(server);

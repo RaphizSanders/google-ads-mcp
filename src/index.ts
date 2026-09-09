@@ -95,7 +95,12 @@ function getClient(): GoogleAdsClient {
 }
 
 function serverOpts() {
-  return { getClient, allowedCustomerIds: ALLOWED_CUSTOMER_IDS, readOnly: READ_ONLY };
+  return {
+    getClient,
+    allowedCustomerIds: ALLOWED_CUSTOMER_IDS,
+    readOnly: READ_ONLY,
+    hosted: PORT > 0,
+  };
 }
 
 async function runStdio(): Promise<void> {
