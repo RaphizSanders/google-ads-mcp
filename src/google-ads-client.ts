@@ -27,6 +27,11 @@ export interface GoogleAdsClientConfig {
   developerToken: string;
   loginCustomerId: string;
   readOnly?: boolean;
+  /* Dry-run: envia validateOnly=true nos endpoints :mutate, de modo que a API
+     valide o payload inteiro (campos, enums, updateMask, dependências) e
+     devolva os mesmos erros de uma gravação real, sem alterar a conta.
+     Desligado por padrão — com dryRun=false o comportamento é o de antes. */
+  dryRun?: boolean;
 }
 
 export interface MutateOperation {
@@ -42,12 +47,14 @@ export class GoogleAdsClient {
   private developerToken: string;
   private loginCustomerId: string;
   private readOnly: boolean;
+  private dryRun: boolean;
 
   constructor(config: GoogleAdsClientConfig) {
     this.credentialsPath = config.credentialsPath;
     this.developerToken = config.developerToken;
     this.loginCustomerId = config.loginCustomerId.replace(/-/g, "");
     this.readOnly = config.readOnly ?? false;
+    this.dryRun = config.dryRun ?? false;
 
     if (config.credentials) {
       this.credentials = { ...config.credentials };
@@ -159,8 +166,18 @@ export class GoogleAdsClient {
       );
     }
 
+    /* googleAds:searchStream devolve o corpo como ARRAY de lotes, e um erro vem
+       como [{ error: {...} }]. Um array não tem .error, então a checagem abaixo
+       passava batido: searchStream não achava .results em lote nenhum e a tool
+       reportava "0 resultados". Query inválida virava dado vazio silencioso —
+       num relatório isso lê como "0 conversões", não como falha. Normalizar
+       aqui trata as duas formas com o mesmo caminho de erro. */
+    const errorFromBatch = Array.isArray(data)
+      ? (data as Array<Record<string, unknown>>).find((batch) => batch && batch.error)?.error
+      : undefined;
+
     // Google-specific error handling
-    const dataObj = data as Record<string, unknown>;
+    const dataObj = (errorFromBatch ? { error: errorFromBatch } : data) as Record<string, unknown>;
     if (dataObj.error) {
       const err = dataObj.error as Record<string, unknown>;
       const status = (err.status as string) ?? "";
@@ -303,7 +320,10 @@ export class GoogleAdsClient {
     this.assertWriteAllowed();
     const cid = customerId.replace(/-/g, "");
     const url = `${API_BASE}/customers/${cid}/${resource}:mutate`;
-    return this.request<Record<string, unknown>>("POST", url, { operations });
+    return this.request<Record<string, unknown>>("POST", url, {
+      operations,
+      ...(this.dryRun ? { validateOnly: true } : {}),
+    });
   }
 
   async mutateCampaignBudgets(customerId: string, operations: MutateOperation[]) {
@@ -414,7 +434,10 @@ export class GoogleAdsClient {
     this.assertWriteAllowed();
     const cid = customerId.replace(/-/g, "");
     const url = `${API_BASE}/customers/${cid}/googleAds:mutate`;
-    return this.request<Record<string, unknown>>("POST", url, { mutateOperations });
+    return this.request<Record<string, unknown>>("POST", url, {
+      mutateOperations,
+      ...(this.dryRun ? { validateOnly: true } : {}),
+    });
   }
 
   // ── Convenience Methods ──────────────────────────────────────────────

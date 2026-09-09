@@ -30,6 +30,7 @@ Funciona em modo **local** (stdio) e **remoto** (HTTP/SSE), com suporte a deploy
 | `MCP_ALLOWED_HOSTS` | Em qualquer modo HTTP | Hostnames aceitos, separados por vírgula e sem porta. Ativa proteção contra DNS rebinding |
 | `ALLOWED_CUSTOMER_IDS` | Em qualquer modo HTTP | Allowlist não vazia de contas específicas. IDs de 10 dígitos separados por vírgula; ausência, vazio ou valor malformado recusam o boot. **Em stdio é opcional**: ausente significa "sem filtro", e todas as contas da MCC ficam acessíveis — é o que permite `list_accounts` funcionar como descoberta |
 | `GOOGLE_ADS_READ_ONLY` | Nao | Modo somente leitura (`true`/`1`). Remove as 56 tools mutáveis do catálogo e bloqueia mutações no cliente. Ausente mantém compatibilidade com o comportamento atual |
+| `GOOGLE_ADS_DRY_RUN` | Nao | Dry-run (`true`/`1`). Envia `validateOnly=true` nos endpoints `:mutate`: a API valida o payload inteiro e devolve os mesmos erros de uma gravação real, sem alterar a conta. Serve para exercitar tools de escrita com segurança. Desligado por padrão |
 | `PORT` | Nao | Se definido, inicia servidor HTTP. Sem `PORT`, usa stdio |
 
 ---
@@ -423,6 +424,7 @@ create_remarketing_list (URL /cart, excluir /thank-you, 30 dias)
 - **Budgets em MICROS**: R$1,00 = 1.000.000 micros. Descricoes explicitas.
 - **`MCP_API_KEY`**: Protege o endpoint HTTP.
 - **`ALLOWED_CUSTOMER_IDS`**: Restringe quais contas o agente pode acessar. Obrigatoria sob HTTP; opcional em stdio.
+- **`GOOGLE_ADS_DRY_RUN`**: Valida payloads de escrita contra a API sem gravar (`validateOnly`).
 - **Delete com confirmacao**: `confirm: true` obrigatorio para remocao.
 - **OAuth auto-refresh**: Token renova automaticamente, persiste no arquivo.
 

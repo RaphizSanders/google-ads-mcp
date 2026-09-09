@@ -45,6 +45,10 @@ const ALLOWED_CUSTOMER_IDS =
         .filter(Boolean)
         .map((id) => id.replace(/-/g, ""));
 const READ_ONLY = parseReadOnlyMode(process.env.GOOGLE_ADS_READ_ONLY);
+/* GOOGLE_ADS_DRY_RUN=true faz toda mutação :mutate viajar com validateOnly=true:
+   a API valida o payload completo e devolve os mesmos erros de uma gravação
+   real, sem alterar a conta. Desligado por padrão. */
+const DRY_RUN = parseReadOnlyMode(process.env.GOOGLE_ADS_DRY_RUN);
 const ALLOWED_HOSTS = parseAllowedHosts(process.env.MCP_ALLOWED_HOSTS);
 
 assertHostedReadOnlySecurity({
@@ -91,6 +95,7 @@ function getClient(): GoogleAdsClient {
     developerToken,
     loginCustomerId,
     readOnly: READ_ONLY,
+    dryRun: DRY_RUN,
   });
 }
 

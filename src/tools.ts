@@ -21,6 +21,22 @@ function buildDateClause(dateRange?: { since: string; until: string }, days?: nu
   return `segments.date DURING LAST_${days ?? 30}_DAYS`;
 }
 
+/* change_event nao aceita segments.date: o recurso filtra pelo proprio
+   change_date_time, em datetime e nao em data. A API tambem exige LIMIT e
+   uma janela de no maximo 30 dias. */
+function buildChangeEventDateClause(dateRange?: { since: string; until: string }, days?: number): string {
+  if (dateRange?.since && dateRange?.until) {
+    return `change_event.change_date_time >= '${dateRange.since} 00:00:00' AND change_event.change_date_time <= '${dateRange.until} 23:59:59'`;
+  }
+  /* A API recusa "start date is too old" no limite exato de 30 dias, então a
+     janela máxima real é 29. */
+  const janela = Math.min(days ?? 29, 29);
+  const ate = new Date();
+  const de = new Date(ate.getTime() - janela * 24 * 60 * 60 * 1000);
+  const iso = (d: Date) => d.toISOString().split("T")[0];
+  return `change_event.change_date_time >= '${iso(de)} 00:00:00' AND change_event.change_date_time <= '${iso(ate)} 23:59:59'`;
+}
+
 /** Format GAQL results as table string */
 function formatAsTable(results: Array<Record<string, unknown>>): string {
   if (results.length === 0) return "(no results)";
@@ -815,7 +831,7 @@ export function registerGoogleAdsTools(
         customerId,
         `SELECT geographic_view.country_criterion_id,
                 geographic_view.location_type,
-                campaign_criterion.location.geo_target_constant,
+                campaign.id, campaign.name,
                 metrics.impressions, metrics.clicks, metrics.cost_micros,
                 metrics.conversions, metrics.conversions_value
          FROM geographic_view
@@ -1134,7 +1150,7 @@ export function registerGoogleAdsTools(
                 change_event.user_email, change_event.old_resource,
                 change_event.new_resource, campaign.name
          FROM change_event
-         WHERE ${dateClause}
+         WHERE ${buildChangeEventDateClause(dateRange, days)}
          ORDER BY change_event.change_date_time DESC
          LIMIT ${limit ?? 25}`
       );
@@ -2784,7 +2800,7 @@ export function registerGoogleAdsTools(
         customerId,
         `SELECT asset.id, asset.name, asset.type,
                 asset.sitelink_asset.description1, asset.sitelink_asset.description2,
-                asset.sitelink_asset.link_text, asset.sitelink_asset.final_urls,
+                asset.sitelink_asset.link_text, asset.final_urls,
                 asset.callout_asset.callout_text,
                 asset.structured_snippet_asset.header, asset.structured_snippet_asset.values,
                 campaign_asset.campaign, campaign_asset.field_type
@@ -3756,13 +3772,13 @@ export function registerGoogleAdsTools(
       const nameFilter = query ? `AND user_list.name LIKE '%${gaqlLiteral(query)}%'` : "";
 
       const results = await client.searchStream(customerId,
-        `SELECT user_list.id, user_list.name, user_list.type, user_list.status,
+        `SELECT user_list.id, user_list.name, user_list.type,
                 user_list.size_for_display, user_list.size_for_search,
                 user_list.membership_life_span, user_list.description,
                 user_list.membership_status, user_list.eligible_for_display,
                 user_list.eligible_for_search
          FROM user_list
-         WHERE user_list.status != 'REMOVED' ${nameFilter}
+         WHERE user_list.membership_status != 'CLOSED' ${nameFilter}
          ORDER BY user_list.size_for_display DESC`
       );
 
