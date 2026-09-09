@@ -1,5 +1,14 @@
 #!/usr/bin/env node
 
+// A contagem esperada vem do proprio catalogo classificado (dist/read-only.js),
+// entao adicionar uma tool nova nao exige editar um numero magico aqui.
+let expectedReadTools;
+try {
+  ({ GOOGLE_ADS_READ_TOOL_NAMES: expectedReadTools } = await import("../dist/read-only.js"));
+} catch {
+  throw new Error("dist/read-only.js nao encontrado — rode `npm run build` antes do smoke test");
+}
+
 const base = process.argv[2] ?? "http://127.0.0.1:3333";
 const apiKey = process.argv[3];
 if (!apiKey) throw new Error("usage: smoke-read-only.mjs <base-url> <mcp-api-key>");
@@ -33,8 +42,18 @@ const dataLine = body.split("\n").find((line) => line.startsWith("data:"));
 if (!dataLine) throw new Error("tools/list response did not contain an SSE data line");
 const payload = JSON.parse(dataLine.slice(5));
 const names = payload?.result?.tools?.map((tool) => tool.name) ?? [];
-if (names.length !== 29) throw new Error(`expected 29 read tools, received ${names.length}`);
+const expected = [...expectedReadTools].sort();
+const actual = [...names].sort();
+if (actual.length !== expected.length || actual.some((name, i) => name !== expected[i])) {
+  const extra = actual.filter((name) => !expectedReadTools.has(name));
+  const missing = expected.filter((name) => !names.includes(name));
+  throw new Error(
+    `read catalogue mismatch: expected ${expected.length} tools, received ${actual.length}` +
+      (extra.length ? `; unexpected: ${extra.join(", ")}` : "") +
+      (missing.length ? `; missing: ${missing.join(", ")}` : "")
+  );
+}
 for (const forbidden of ["create_campaign", "update_budget", "delete_campaign"]) {
   if (names.includes(forbidden)) throw new Error(`write tool exposed: ${forbidden}`);
 }
-console.log("Google Ads read-only runtime smoke: PASS (29 tools, auth enforced)");
+console.log(`Google Ads read-only runtime smoke: PASS (${actual.length} tools, auth enforced)`);
