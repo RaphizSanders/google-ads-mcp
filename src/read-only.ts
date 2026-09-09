@@ -36,6 +36,10 @@ export const GOOGLE_ADS_READ_TOOL_NAMES = new Set([
   "list_labels",
   "list_remarketing_lists",
   "get_account_currency",
+  "generate_keyword_ideas",
+  "list_geo_targets",
+  "list_recommendations",
+  "get_asset_performance",
 ] as const);
 
 export const GOOGLE_ADS_WRITE_TOOL_NAMES = new Set([
@@ -90,6 +94,11 @@ export const GOOGLE_ADS_WRITE_TOOL_NAMES = new Set([
   "create_audience_from_lists",
   "create_remarketing_list",
   "update_remarketing_list",
+  "update_conversion_action",
+  "apply_recommendation",
+  "dismiss_recommendation",
+  "set_campaign_conversion_goals",
+  "upload_offline_conversion",
 ] as const);
 
 export function parseReadOnlyMode(value: string | undefined): boolean {

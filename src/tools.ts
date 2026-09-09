@@ -164,6 +164,65 @@ function dimensionToCaseKey(dimension: string): string {
   return map[dimension] ?? "productBrand";
 }
 
+/** Declaração obrigatória de propaganda política na UE (enum EuPoliticalAdvertisingStatus). */
+const EU_POLITICAL_DECLARATION = "DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING";
+
+// ── Conversion actions (validado contra a API v25) ───────────────────
+
+/** Categorias válidas de ConversionActionCategory na API atual. */
+const CONVERSION_CATEGORIES = [
+  "DEFAULT", "PAGE_VIEW", "PURCHASE", "SIGNUP", "DOWNLOAD", "ADD_TO_CART",
+  "BEGIN_CHECKOUT", "SUBSCRIBE_PAID", "PHONE_CALL_LEAD", "IMPORTED_LEAD",
+  "SUBMIT_LEAD_FORM", "BOOK_APPOINTMENT", "REQUEST_QUOTE", "GET_DIRECTIONS",
+  "OUTBOUND_CLICK", "CONTACT", "ENGAGEMENT", "STORE_VISIT", "STORE_SALE",
+  "QUALIFIED_LEAD", "CONVERTED_LEAD",
+] as const;
+
+/** Nomes antigos/amigáveis que a API não aceita mais — traduzidos antes do mutate. */
+const CONVERSION_CATEGORY_ALIASES: Record<string, string> = {
+  LEAD: "SUBMIT_LEAD_FORM", // LEAD foi removido da API
+  SIGN_UP: "SIGNUP",        // a API escreve sem underscore
+};
+
+/** Tipos de conversão criáveis via API + apelidos amigáveis. */
+const CONVERSION_TYPE_ALIASES: Record<string, string> = {
+  UPLOAD: "UPLOAD_CLICKS",   // UPLOAD não existe no enum
+  PHONE_CALL: "WEBSITE_CALL", // chamadas a partir do número no site
+};
+
+/** Modelos de atribuição: nomes amigáveis → nomes reais do enum AttributionModel. */
+const ATTRIBUTION_MODEL_ALIASES: Record<string, string> = {
+  DATA_DRIVEN: "GOOGLE_SEARCH_ATTRIBUTION_DATA_DRIVEN",
+  LAST_CLICK: "GOOGLE_ADS_LAST_CLICK",
+  FIRST_CLICK: "GOOGLE_SEARCH_ATTRIBUTION_FIRST_CLICK",
+  LINEAR: "GOOGLE_SEARCH_ATTRIBUTION_LINEAR",
+  TIME_DECAY: "GOOGLE_SEARCH_ATTRIBUTION_TIME_DECAY",
+  POSITION_BASED: "GOOGLE_SEARCH_ATTRIBUTION_POSITION_BASED",
+};
+
+const conversionCategorySchema = z.enum([
+  ...CONVERSION_CATEGORIES,
+  "LEAD",
+  "SIGN_UP",
+]);
+
+const conversionTypeSchema = z.enum([
+  "WEBPAGE", "UPLOAD", "UPLOAD_CLICKS", "UPLOAD_CALLS",
+  "PHONE_CALL", "WEBSITE_CALL", "AD_CALL", "CLICK_TO_CALL",
+]);
+
+const attributionModelSchema = z.enum([
+  "DATA_DRIVEN", "LAST_CLICK", "FIRST_CLICK", "LINEAR", "TIME_DECAY", "POSITION_BASED",
+  "GOOGLE_SEARCH_ATTRIBUTION_DATA_DRIVEN", "GOOGLE_ADS_LAST_CLICK",
+  "GOOGLE_SEARCH_ATTRIBUTION_FIRST_CLICK", "GOOGLE_SEARCH_ATTRIBUTION_LINEAR",
+  "GOOGLE_SEARCH_ATTRIBUTION_TIME_DECAY", "GOOGLE_SEARCH_ATTRIBUTION_POSITION_BASED",
+]);
+
+/** Resolve apelido → valor aceito pela API. */
+function resolveEnumAlias(value: string, aliases: Record<string, string>): string {
+  return aliases[value] ?? value;
+}
+
 // ── Main Registration ────────────────────────────────────────────────
 
 export function registerGoogleAdsTools(
@@ -1310,7 +1369,7 @@ export function registerGoogleAdsTools(
         status: "PAUSED",
         advertisingChannelType: channelType,
         campaignBudget: budgetResourceName,
-        containsEuPoliticalAdvertising: 3,
+        containsEuPoliticalAdvertising: EU_POLITICAL_DECLARATION,
         networkSettings: networkSettings ?? {
           targetGoogleSearch: true,
           targetSearchNetwork: false,
@@ -1324,9 +1383,15 @@ export function registerGoogleAdsTools(
         campaignData.maximizeConversions = {};
       } else if (strategy === "MAXIMIZE_CONVERSION_VALUE") {
         campaignData.maximizeConversionValue = {};
-      } else if (strategy === "TARGET_CPA" && targetCpaMicros) {
+      } else if (strategy === "TARGET_CPA") {
+        if (!targetCpaMicros) {
+          return { content: [text("TARGET_CPA exige targetCpaMicros (ex: 50000000 = R$50 por conversão).")], isError: true };
+        }
         campaignData.maximizeConversions = { targetCpaMicros: String(targetCpaMicros) };
-      } else if (strategy === "TARGET_ROAS" && targetRoas) {
+      } else if (strategy === "TARGET_ROAS") {
+        if (!targetRoas) {
+          return { content: [text("TARGET_ROAS exige targetRoas (ex: 5.0 = 500%).")], isError: true };
+        }
         campaignData.maximizeConversionValue = { targetRoas };
       } else if (strategy === "MANUAL_CPC") {
         campaignData.manualCpc = { enhancedCpcEnabled: true };
@@ -1348,7 +1413,7 @@ export function registerGoogleAdsTools(
               `- Budget: R$ ${(dailyBudgetMicros / 1_000_000).toFixed(2)}/day\n` +
               `- Bidding: ${strategy}\n` +
               `- Resource: ${campaignResourceName}\n\n` +
-              `Use google_update_campaign to ENABLE when ready.`
+              `Use update_campaign to ENABLE when ready.`
           ),
         ],
       };
@@ -1920,7 +1985,7 @@ export function registerGoogleAdsTools(
         status: "PAUSED",
         advertisingChannelType: "PERFORMANCE_MAX",
         campaignBudget: budgetTmp,
-        containsEuPoliticalAdvertising: 3,
+        containsEuPoliticalAdvertising: EU_POLITICAL_DECLARATION,
       };
       if (strategy === "MAXIMIZE_CONVERSION_VALUE") {
         campaignCreate.maximizeConversionValue = targetRoas ? { targetRoas } : {};
@@ -2277,7 +2342,7 @@ export function registerGoogleAdsTools(
 
       const strategy = biddingStrategy ?? "MAXIMIZE_CONVERSIONS";
       const campaignData: Record<string, unknown> = {
-        name, status: "PAUSED", advertisingChannelType: "DISPLAY", campaignBudget: budgetResource, containsEuPoliticalAdvertising: 3,
+        name, status: "PAUSED", advertisingChannelType: "DISPLAY", campaignBudget: budgetResource, containsEuPoliticalAdvertising: EU_POLITICAL_DECLARATION,
         networkSettings: { targetContentNetwork: true, targetGoogleSearch: false, targetSearchNetwork: false },
       };
       if (strategy === "MAXIMIZE_CONVERSIONS") campaignData.maximizeConversions = {};
@@ -2373,7 +2438,7 @@ export function registerGoogleAdsTools(
 
       const strategy = biddingStrategy ?? "MAXIMIZE_CONVERSIONS";
       const campaignData: Record<string, unknown> = {
-        name, status: "PAUSED", advertisingChannelType: "VIDEO", campaignBudget: budgetResource, containsEuPoliticalAdvertising: 3,
+        name, status: "PAUSED", advertisingChannelType: "VIDEO", campaignBudget: budgetResource, containsEuPoliticalAdvertising: EU_POLITICAL_DECLARATION,
       };
       if (strategy === "MAXIMIZE_CONVERSIONS") campaignData.maximizeConversions = {};
       else if (strategy === "TARGET_CPA") campaignData.maximizeConversions = {};
@@ -2467,7 +2532,7 @@ export function registerGoogleAdsTools(
 
       const strategy = biddingStrategy ?? "MAXIMIZE_CONVERSION_VALUE";
       const campaignData: Record<string, unknown> = {
-        name, status: "PAUSED", advertisingChannelType: "SHOPPING", campaignBudget: budgetResource, containsEuPoliticalAdvertising: 3,
+        name, status: "PAUSED", advertisingChannelType: "SHOPPING", campaignBudget: budgetResource, containsEuPoliticalAdvertising: EU_POLITICAL_DECLARATION,
         shoppingSetting: {
           merchantId: String(merchantId),
           feedLabel: feedLabel ?? "BR",
@@ -2518,7 +2583,7 @@ export function registerGoogleAdsTools(
 
       const strategy = biddingStrategy ?? "MAXIMIZE_CONVERSIONS";
       const campaignData: Record<string, unknown> = {
-        name, status: "PAUSED", advertisingChannelType: "DEMAND_GEN", campaignBudget: budgetResource, containsEuPoliticalAdvertising: 3,
+        name, status: "PAUSED", advertisingChannelType: "DEMAND_GEN", campaignBudget: budgetResource, containsEuPoliticalAdvertising: EU_POLITICAL_DECLARATION,
       };
       if (strategy === "MAXIMIZE_CONVERSIONS") campaignData.maximizeConversions = targetCpaMicros ? { targetCpaMicros: String(targetCpaMicros) } : {};
       else if (strategy === "MAXIMIZE_CONVERSION_VALUE") campaignData.maximizeConversionValue = {};
@@ -2999,23 +3064,29 @@ export function registerGoogleAdsTools(
         "Create a conversion action for tracking.",
         "WRITE OPERATION.",
         "",
-        "Types:",
-        "- WEBPAGE: tracks conversions on your website (requires Google tag)",
-        "- UPLOAD: for offline conversion uploads",
-        "- PHONE_CALL: tracks phone calls",
+        "Types (aceita apelidos, traduzidos para o enum real da API):",
+        "- WEBPAGE: conversões no site (requer Google tag)",
+        "- UPLOAD (= UPLOAD_CLICKS): importação de conversões offline por gclid",
+        "- UPLOAD_CALLS: importação de chamadas offline",
+        "- PHONE_CALL (= WEBSITE_CALL): chamadas para o número exibido no site",
+        "- AD_CALL: chamadas a partir do recurso de chamada do anúncio",
+        "- CLICK_TO_CALL: cliques em telefone no site mobile",
         "",
-        "Categories: PURCHASE, ADD_TO_CART, BEGIN_CHECKOUT, LEAD, SIGN_UP, SUBSCRIBE_PAID, PAGE_VIEW, DEFAULT.",
+        "Categorias (API atual): " + CONVERSION_CATEGORIES.join(", ") + ".",
+        "Apelidos aceitos: LEAD → SUBMIT_LEAD_FORM, SIGN_UP → SIGNUP.",
         "",
-        "Attribution model: DATA_DRIVEN (recommended), LAST_CLICK, FIRST_CLICK, LINEAR, TIME_DECAY, POSITION_BASED.",
-        "Counting: ONE_PER_CLICK (leads) or MANY_PER_CLICK (purchases).",
+        "Attribution model: DATA_DRIVEN (recomendado), LAST_CLICK, FIRST_CLICK, LINEAR, TIME_DECAY, POSITION_BASED.",
+        "Counting: ONE_PER_CLICK (leads) ou MANY_PER_CLICK (compras).",
+        "",
+        "O tipo é IMUTÁVEL depois de criado — use update_conversion_action para o resto.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
         name: z.string().describe("Conversion action name (e.g. 'Purchase', 'Lead Form Submit')."),
-        type: z.enum(["WEBPAGE", "UPLOAD", "PHONE_CALL"]).describe("Conversion type."),
-        category: z.enum(["PURCHASE", "ADD_TO_CART", "BEGIN_CHECKOUT", "LEAD", "SIGN_UP", "SUBSCRIBE_PAID", "PAGE_VIEW", "DEFAULT"]).describe("Conversion category."),
+        type: conversionTypeSchema.describe("Conversion type. IMUTÁVEL após a criação."),
+        category: conversionCategorySchema.describe("Conversion category."),
         countingType: z.enum(["ONE_PER_CLICK", "MANY_PER_CLICK"]).optional().describe("How to count. Default: ONE_PER_CLICK."),
-        attributionModel: z.enum(["DATA_DRIVEN", "LAST_CLICK", "FIRST_CLICK", "LINEAR", "TIME_DECAY", "POSITION_BASED"]).optional().describe("Attribution model. Default: DATA_DRIVEN."),
+        attributionModel: attributionModelSchema.optional().describe("Attribution model. Default: DATA_DRIVEN."),
         valueSetting: z.object({
           defaultValue: z.number().optional().describe("Default conversion value."),
           alwaysUseDefaultValue: z.boolean().optional().describe("True = always use default value. False = use dynamic value from tag."),
@@ -3023,22 +3094,29 @@ export function registerGoogleAdsTools(
         viewThroughLookbackWindowDays: z.number().optional().describe("View-through lookback window (1-30 days). Default: 1."),
         clickThroughLookbackWindowDays: z.number().optional().describe("Click-through lookback window (1-90 days). Default: 30."),
         primary: z.boolean().optional().describe("True = PRIMARY (used for bidding). False = SECONDARY (observation only). Default: true."),
+        includeInConversionsMetric: z.boolean().optional().describe("Inclui esta ação na coluna 'Conversões'. Default: API decide (true)."),
+        phoneCallDurationSeconds: z.number().optional().describe("Duração mínima da ligação para contar conversão (apenas tipos de chamada)."),
       },
     },
-    async ({ customerId, name, type, category, countingType, attributionModel, valueSetting, viewThroughLookbackWindowDays, clickThroughLookbackWindowDays, primary }) => {
+    async ({ customerId, name, type, category, countingType, attributionModel, valueSetting, viewThroughLookbackWindowDays, clickThroughLookbackWindowDays, primary, includeInConversionsMetric, phoneCallDurationSeconds }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
 
+      const apiType = resolveEnumAlias(type, CONVERSION_TYPE_ALIASES);
+      const apiCategory = resolveEnumAlias(category, CONVERSION_CATEGORY_ALIASES);
+      const apiAttribution = resolveEnumAlias(
+        attributionModel ?? "DATA_DRIVEN",
+        ATTRIBUTION_MODEL_ALIASES
+      );
+
       const convData: Record<string, unknown> = {
         name,
-        type,
-        category,
+        type: apiType,
+        category: apiCategory,
         countingType: countingType ?? "ONE_PER_CLICK",
-        attributionModelSettings: {
-          attributionModel: attributionModel ?? "GOOGLE_ADS_LAST_CLICK",
-          dataDrivenModelStatus: attributionModel === "DATA_DRIVEN" ? "AVAILABLE" : undefined,
-        },
+        // data_driven_model_status é OUTPUT_ONLY — enviar causa erro na API.
+        attributionModelSettings: { attributionModel: apiAttribution },
         status: "ENABLED",
         primaryForGoal: primary !== false,
       };
@@ -3053,10 +3131,119 @@ export function registerGoogleAdsTools(
 
       if (viewThroughLookbackWindowDays) convData.viewThroughLookbackWindowDays = String(viewThroughLookbackWindowDays);
       if (clickThroughLookbackWindowDays) convData.clickThroughLookbackWindowDays = String(clickThroughLookbackWindowDays);
+      if (includeInConversionsMetric !== undefined) convData.includeInConversionsMetric = includeInConversionsMetric;
+      if (phoneCallDurationSeconds !== undefined) convData.phoneCallDurationSeconds = String(phoneCallDurationSeconds);
 
-      const result = await client.mutate(customerId, "conversionActions", [{ create: convData }]);
+      const result = await client.mutateConversionActions(customerId, [{ create: convData }]);
 
-      return { content: [text(`Conversion action created: "${name}"\nType: ${type} | Category: ${category} | Counting: ${countingType ?? "ONE_PER_CLICK"}\nPrimary: ${primary !== false}\n\n${formatJson(result)}`)] };
+      const translated: string[] = [];
+      if (apiType !== type) translated.push(`type ${type} → ${apiType}`);
+      if (apiCategory !== category) translated.push(`category ${category} → ${apiCategory}`);
+      if (apiAttribution !== (attributionModel ?? "DATA_DRIVEN")) translated.push(`attribution ${attributionModel ?? "DATA_DRIVEN"} → ${apiAttribution}`);
+
+      return { content: [text(
+        `Conversion action created: "${name}"\n` +
+        `Type: ${apiType} | Category: ${apiCategory} | Counting: ${countingType ?? "ONE_PER_CLICK"}\n` +
+        `Attribution: ${apiAttribution} | Primary: ${primary !== false}\n` +
+        (translated.length ? `Traduzido para a API: ${translated.join("; ")}\n` : "") +
+        `\n${formatJson(result)}`
+      )] };
+    }
+  );
+
+  mcp.registerTool(
+    "update_conversion_action",
+    {
+      description: [
+        "Update an existing conversion action.",
+        "WRITE OPERATION — só envia os campos informados (updateMask).",
+        "",
+        "O campo `type` é IMUTÁVEL na API: para trocar o tipo, crie outra ação.",
+        "Use list_conversion_actions para descobrir o conversionActionId.",
+        "",
+        "Status: ENABLED (ativa), REMOVED (excluída), HIDDEN (oculta).",
+        "Categorias e modelos de atribuição aceitam os mesmos apelidos de create_conversion_action.",
+      ].join("\n"),
+      inputSchema: {
+        customerId: z.string().describe("Customer ID."),
+        conversionActionId: z.string().describe("Conversion action ID (de list_conversion_actions)."),
+        name: z.string().optional().describe("Novo nome."),
+        status: z.enum(["ENABLED", "REMOVED", "HIDDEN"]).optional().describe("Novo status."),
+        category: conversionCategorySchema.optional().describe("Nova categoria."),
+        countingType: z.enum(["ONE_PER_CLICK", "MANY_PER_CLICK"]).optional().describe("Nova contagem."),
+        attributionModel: attributionModelSchema.optional().describe("Novo modelo de atribuição."),
+        primary: z.boolean().optional().describe("True = PRIMARY (usada para lances). False = SECONDARY."),
+        includeInConversionsMetric: z.boolean().optional().describe("Incluir na coluna 'Conversões'."),
+        valueSetting: z.object({
+          defaultValue: z.number().optional().describe("Valor padrão da conversão."),
+          alwaysUseDefaultValue: z.boolean().optional().describe("True = sempre usar o valor padrão."),
+        }).optional().describe("Configuração de valor."),
+        viewThroughLookbackWindowDays: z.number().optional().describe("Janela view-through (1-30 dias)."),
+        clickThroughLookbackWindowDays: z.number().optional().describe("Janela click-through (1-90 dias)."),
+        phoneCallDurationSeconds: z.number().optional().describe("Duração mínima da ligação (tipos de chamada)."),
+      },
+    },
+    async ({ customerId, conversionActionId, name, status, category, countingType, attributionModel, primary, includeInConversionsMetric, valueSetting, viewThroughLookbackWindowDays, clickThroughLookbackWindowDays, phoneCallDurationSeconds }) => {
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      if (blocked) return { content: [blocked], isError: true };
+      const client = getClient();
+      const cid = customerId.replace(/-/g, "");
+
+      const updateData: Record<string, unknown> = {
+        resourceName: `customers/${cid}/conversionActions/${conversionActionId}`,
+      };
+      const mask: string[] = [];
+
+      if (name !== undefined) { updateData.name = name; mask.push("name"); }
+      if (status !== undefined) { updateData.status = status; mask.push("status"); }
+      if (category !== undefined) {
+        updateData.category = resolveEnumAlias(category, CONVERSION_CATEGORY_ALIASES);
+        mask.push("category");
+      }
+      if (countingType !== undefined) { updateData.countingType = countingType; mask.push("counting_type"); }
+      if (attributionModel !== undefined) {
+        updateData.attributionModelSettings = {
+          attributionModel: resolveEnumAlias(attributionModel, ATTRIBUTION_MODEL_ALIASES),
+        };
+        mask.push("attribution_model_settings.attribution_model");
+      }
+      if (primary !== undefined) { updateData.primaryForGoal = primary; mask.push("primary_for_goal"); }
+      if (includeInConversionsMetric !== undefined) {
+        updateData.includeInConversionsMetric = includeInConversionsMetric;
+        mask.push("include_in_conversions_metric");
+      }
+      if (valueSetting !== undefined) {
+        updateData.valueSettings = {
+          defaultValue: valueSetting.defaultValue ?? 0,
+          alwaysUseDefaultValue: valueSetting.alwaysUseDefaultValue ?? false,
+          defaultCurrencyCode: await client.getAccountCurrency(customerId),
+        };
+        mask.push("value_settings");
+      }
+      if (viewThroughLookbackWindowDays !== undefined) {
+        updateData.viewThroughLookbackWindowDays = String(viewThroughLookbackWindowDays);
+        mask.push("view_through_lookback_window_days");
+      }
+      if (clickThroughLookbackWindowDays !== undefined) {
+        updateData.clickThroughLookbackWindowDays = String(clickThroughLookbackWindowDays);
+        mask.push("click_through_lookback_window_days");
+      }
+      if (phoneCallDurationSeconds !== undefined) {
+        updateData.phoneCallDurationSeconds = String(phoneCallDurationSeconds);
+        mask.push("phone_call_duration_seconds");
+      }
+
+      if (mask.length === 0) {
+        return { content: [text("Nada para atualizar: informe ao menos um campo (name, status, category, ...).")], isError: true };
+      }
+
+      const result = await client.mutateConversionActions(customerId, [
+        { update: updateData, updateMask: mask.join(",") },
+      ]);
+
+      return { content: [text(
+        `Conversion action ${conversionActionId} atualizada.\nCampos: ${mask.join(", ")}\n\n${formatJson(result)}`
+      )] };
     }
   );
 
@@ -3805,6 +3992,523 @@ export function registerGoogleAdsTools(
       const client = getClient();
       const currency = await client.getAccountCurrency(customerId);
       return { content: [text(currency)] };
+    }
+  );
+  // ══════════════════════════════════════════════════════════════════
+  // ══ PLANEJAMENTO, RECOMENDAÇÕES E CONVERSÕES OFFLINE ══════════════
+  // ══════════════════════════════════════════════════════════════════
+
+  mcp.registerTool(
+    "generate_keyword_ideas",
+    {
+      description: [
+        "Gera ideias de palavras-chave com volume de busca, concorrência e faixa de CPC (Keyword Planner).",
+        "READ OPERATION — não altera nada na conta.",
+        "",
+        "Use sementes de keywords, uma URL, ou os dois juntos.",
+        "Idioma é resolvido pelo código ISO (pt, en, es...) direto na API — sem IDs mágicos.",
+        "Localização usa geo target IDs (use list_geo_targets para descobrir). Default: 2076 (Brasil).",
+        "",
+        "Métricas retornadas: avgMonthlySearches, competition, competitionIndex (0-100),",
+        "lowTopOfPageBid / highTopOfPageBid (em moeda, convertidos de micros).",
+      ].join("\n"),
+      inputSchema: {
+        customerId: z.string().describe("Customer ID."),
+        keywords: flexArray(z.string()).optional().describe("Palavras-chave semente (ex: ['tênis de corrida'])."),
+        pageUrl: z.string().optional().describe("URL semente (ex: página de produto ou concorrente)."),
+        languageCode: z.string().optional().describe("Código do idioma ISO. Default: 'pt'."),
+        geoTargetIds: flexArray(z.string()).optional().describe("Geo target IDs. Default: ['2076'] (Brasil)."),
+        network: z.enum(["GOOGLE_SEARCH", "GOOGLE_SEARCH_AND_PARTNERS"]).optional().describe("Rede. Default: GOOGLE_SEARCH."),
+        includeAdultKeywords: z.boolean().optional().describe("Incluir termos adultos. Default: false."),
+        limit: z.number().optional().describe("Máximo de ideias retornadas. Default: 50."),
+        format: formatSchema,
+      },
+    },
+    async ({ customerId, keywords, pageUrl, languageCode, geoTargetIds, network, includeAdultKeywords, limit, format }) => {
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      if (blocked) return { content: [blocked], isError: true };
+      const client = getClient();
+
+      const seedKeywords = ensureArray<string>(keywords);
+      if (seedKeywords.length === 0 && !pageUrl) {
+        return { content: [text("Informe keywords, pageUrl, ou ambos.")], isError: true };
+      }
+
+      // Resolve o idioma pelo código na própria API (evita IDs hardcoded)
+      const code = languageCode ?? "pt";
+      const langRows = await client.searchStream(customerId,
+        `SELECT language_constant.id, language_constant.code, language_constant.name
+         FROM language_constant
+         WHERE language_constant.code = '${code}'
+         LIMIT 1`);
+      const langId = ((langRows[0]?.languageConstant as Record<string, unknown>)?.id) as string | undefined;
+      if (!langId) {
+        return { content: [text(`Idioma '${code}' não encontrado. Use códigos ISO como pt, en, es.`)], isError: true };
+      }
+
+      const geoIds = ensureArray<string>(geoTargetIds);
+      const body: Record<string, unknown> = {
+        language: `languageConstants/${langId}`,
+        geoTargetConstants: (geoIds.length > 0 ? geoIds : ["2076"]).map((id) => `geoTargetConstants/${id}`),
+        keywordPlanNetwork: network ?? "GOOGLE_SEARCH",
+        includeAdultKeywords: includeAdultKeywords ?? false,
+        pageSize: Math.min(limit ?? 50, 1000),
+      };
+
+      if (seedKeywords.length > 0 && pageUrl) {
+        body.keywordAndUrlSeed = { url: pageUrl, keywords: seedKeywords };
+      } else if (pageUrl) {
+        body.urlSeed = { url: pageUrl };
+      } else {
+        body.keywordSeed = { keywords: seedKeywords };
+      }
+
+      const response = await client.customerAction<{ results?: Array<Record<string, unknown>> }>(
+        customerId,
+        ":generateKeywordIdeas",
+        body
+      );
+
+      const ideas = (response.results ?? []).slice(0, limit ?? 50).map((r) => {
+        const m = (r.keywordIdeaMetrics ?? {}) as Record<string, unknown>;
+        return {
+          keyword: r.text,
+          avg_monthly_searches: num(m.avgMonthlySearches),
+          competition: m.competition ?? "UNSPECIFIED",
+          competition_index: num(m.competitionIndex),
+          low_top_of_page_bid: microsToMoney(m.lowTopOfPageBidMicros),
+          high_top_of_page_bid: microsToMoney(m.highTopOfPageBidMicros),
+          average_cpc: microsToMoney(m.averageCpcMicros),
+        };
+      });
+
+      if (format === "table") return { content: [text(formatAsTable(ideas as Array<Record<string, unknown>>))] };
+      if (format === "csv") return { content: [text(formatAsCsv(ideas as Array<Record<string, unknown>>))] };
+      return { content: [text(`${ideas.length} ideia(s) — idioma ${code} (languageConstants/${langId}).\n\n${formatJson(ideas)}`)] };
+    }
+  );
+
+  mcp.registerTool(
+    "list_geo_targets",
+    {
+      description: [
+        "Busca geo target IDs por nome (para set_campaign_locations e generate_keyword_ideas).",
+        "READ OPERATION.",
+        "",
+        "Ex: query='São Paulo', countryCode='BR' → IDs de cidade, estado e região.",
+      ].join("\n"),
+      inputSchema: {
+        customerId: z.string().describe("Customer ID."),
+        query: z.string().describe("Nome (ou parte do nome) da localização."),
+        countryCode: z.string().optional().describe("Filtra por país (ex: 'BR')."),
+        targetType: z.string().optional().describe("Filtra por tipo (ex: 'City', 'State', 'Country')."),
+        limit: z.number().optional().describe("Máximo de resultados. Default: 25."),
+        format: formatSchema,
+      },
+    },
+    async ({ customerId, query, countryCode, targetType, limit, format }) => {
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      if (blocked) return { content: [blocked], isError: true };
+      const client = getClient();
+
+      const filters = [`geo_target_constant.name LIKE '%${query.replace(/'/g, "")}%'`, "geo_target_constant.status = 'ENABLED'"];
+      if (countryCode) filters.push(`geo_target_constant.country_code = '${countryCode.toUpperCase()}'`);
+      if (targetType) filters.push(`geo_target_constant.target_type = '${targetType}'`);
+
+      const results = await client.searchStream(customerId,
+        `SELECT geo_target_constant.id, geo_target_constant.name,
+                geo_target_constant.canonical_name, geo_target_constant.country_code,
+                geo_target_constant.target_type
+         FROM geo_target_constant
+         WHERE ${filters.join(" AND ")}
+         LIMIT ${limit ?? 25}`);
+
+      const rows = results.map((r) => {
+        const g = (r.geoTargetConstant ?? {}) as Record<string, unknown>;
+        return {
+          geo_target_id: g.id,
+          name: g.name,
+          canonical_name: g.canonicalName,
+          country: g.countryCode,
+          type: g.targetType,
+        };
+      });
+
+      if (format === "table") return { content: [text(formatAsTable(rows as Array<Record<string, unknown>>))] };
+      if (format === "csv") return { content: [text(formatAsCsv(rows as Array<Record<string, unknown>>))] };
+      return { content: [text(`${rows.length} localização(ões) para "${query}".\n\n${formatJson(rows)}`)] };
+    }
+  );
+
+  mcp.registerTool(
+    "list_recommendations",
+    {
+      description: [
+        "Lista recomendações do Google Ads para a conta (budget, keywords, lances, RSA, PMax...).",
+        "READ OPERATION.",
+        "",
+        "Cada recomendação traz o impacto estimado (base vs. potencial) e o resourceName",
+        "para usar em apply_recommendation ou dismiss_recommendation.",
+        "",
+        "Tipos comuns: CAMPAIGN_BUDGET, KEYWORD, TARGET_CPA_OPT_IN, TARGET_ROAS_OPT_IN,",
+        "RESPONSIVE_SEARCH_AD, RESPONSIVE_SEARCH_AD_ASSET, USE_BROAD_MATCH_KEYWORD,",
+        "SITELINK_ASSET, CALLOUT_ASSET, IMPROVE_PERFORMANCE_MAX_AD_STRENGTH, PERFORMANCE_MAX_OPT_IN.",
+      ].join("\n"),
+      inputSchema: {
+        customerId: z.string().describe("Customer ID."),
+        types: flexArray(z.string()).optional().describe("Filtra por tipos de recomendação."),
+        campaignId: z.string().optional().describe("Filtra por campanha."),
+        limit: z.number().optional().describe("Máximo de resultados. Default: 50."),
+        format: formatSchema,
+      },
+    },
+    async ({ customerId, types, campaignId, limit, format }) => {
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      if (blocked) return { content: [blocked], isError: true };
+      const client = getClient();
+      const cid = customerId.replace(/-/g, "");
+
+      const filters: string[] = [];
+      const typeList = ensureArray<string>(types);
+      if (typeList.length > 0) filters.push(`recommendation.type IN (${typeList.map((t) => `'${t}'`).join(",")})`);
+      if (campaignId) filters.push(`recommendation.campaign = 'customers/${cid}/campaigns/${campaignId}'`);
+      const where = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
+
+      const results = await client.searchStream(customerId,
+        `SELECT recommendation.resource_name, recommendation.type, recommendation.campaign,
+                recommendation.impact.base_metrics.impressions,
+                recommendation.impact.base_metrics.clicks,
+                recommendation.impact.base_metrics.cost_micros,
+                recommendation.impact.base_metrics.conversions,
+                recommendation.impact.potential_metrics.impressions,
+                recommendation.impact.potential_metrics.clicks,
+                recommendation.impact.potential_metrics.cost_micros,
+                recommendation.impact.potential_metrics.conversions,
+                campaign.name
+         FROM recommendation
+         ${where}
+         LIMIT ${limit ?? 50}`);
+
+      const rows = results.map((r) => {
+        const rec = (r.recommendation ?? {}) as Record<string, unknown>;
+        const impact = (rec.impact ?? {}) as Record<string, unknown>;
+        const base = (impact.baseMetrics ?? {}) as Record<string, unknown>;
+        const pot = (impact.potentialMetrics ?? {}) as Record<string, unknown>;
+        const campaign = (r.campaign ?? {}) as Record<string, unknown>;
+        return {
+          type: rec.type,
+          campaign: campaign.name ?? "(conta)",
+          resource_name: rec.resourceName,
+          base_clicks: num(base.clicks),
+          potential_clicks: num(pot.clicks),
+          base_conversions: num(base.conversions),
+          potential_conversions: num(pot.conversions),
+          base_cost: microsToMoney(base.costMicros),
+          potential_cost: microsToMoney(pot.costMicros),
+        };
+      });
+
+      if (format === "table") return { content: [text(formatAsTable(rows as Array<Record<string, unknown>>))] };
+      if (format === "csv") return { content: [text(formatAsCsv(rows as Array<Record<string, unknown>>))] };
+      return { content: [text(`${rows.length} recomendação(ões).\n\n${formatJson(rows)}`)] };
+    }
+  );
+
+  mcp.registerTool(
+    "apply_recommendation",
+    {
+      description: [
+        "Aplica recomendações do Google Ads.",
+        "WRITE OPERATION — altera a conta imediatamente (não cria nada pausado).",
+        "",
+        "Exige confirm: true. Pegue os resourceNames em list_recommendations.",
+        "Aplica com os valores recomendados pelo Google (sem overrides).",
+      ].join("\n"),
+      inputSchema: {
+        customerId: z.string().describe("Customer ID."),
+        resourceNames: flexArray(z.string()).describe("resourceNames das recomendações (de list_recommendations)."),
+        confirm: z.boolean().describe("Precisa ser true — a mudança é imediata e não fica pausada."),
+      },
+    },
+    async ({ customerId, resourceNames, confirm }) => {
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      if (blocked) return { content: [blocked], isError: true };
+      if (!confirm) {
+        return { content: [text("Cancelado: aplicar recomendação altera a conta na hora. Envie confirm: true.")], isError: true };
+      }
+      const names = ensureArray<string>(resourceNames);
+      if (names.length === 0) return { content: [text("Informe ao menos um resourceName.")], isError: true };
+
+      const client = getClient();
+      const result = await client.customerWriteAction(customerId, "recommendations:apply", {
+        operations: names.map((resourceName) => ({ resourceName })),
+        partialFailure: true,
+      });
+
+      return { content: [text(`${names.length} recomendação(ões) aplicada(s).\n\n${formatJson(result)}`)] };
+    }
+  );
+
+  mcp.registerTool(
+    "dismiss_recommendation",
+    {
+      description: [
+        "Dispensa (esconde) recomendações do Google Ads sem aplicá-las.",
+        "WRITE OPERATION — reversível pela interface do Google Ads.",
+      ].join("\n"),
+      inputSchema: {
+        customerId: z.string().describe("Customer ID."),
+        resourceNames: flexArray(z.string()).describe("resourceNames das recomendações."),
+      },
+    },
+    async ({ customerId, resourceNames }) => {
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      if (blocked) return { content: [blocked], isError: true };
+      const names = ensureArray<string>(resourceNames);
+      if (names.length === 0) return { content: [text("Informe ao menos um resourceName.")], isError: true };
+
+      const client = getClient();
+      const result = await client.customerWriteAction(customerId, "recommendations:dismiss", {
+        operations: names.map((resourceName) => ({ resourceName })),
+        partialFailure: true,
+      });
+
+      return { content: [text(`${names.length} recomendação(ões) dispensada(s).\n\n${formatJson(result)}`)] };
+    }
+  );
+
+  mcp.registerTool(
+    "set_campaign_conversion_goals",
+    {
+      description: [
+        "Define quais categorias de conversão a campanha usa para lances (metas de conversão da campanha).",
+        "WRITE OPERATION.",
+        "",
+        "É o que resolve o caso 'a campanha está otimizando para a conversão errada':",
+        "marque biddable=true só nas categorias que devem guiar o lance (ex: PURCHASE)",
+        "e biddable=false nas demais (ex: PAGE_VIEW, CONTACT).",
+        "",
+        "origin (fonte da conversão): WEBSITE, APP, CALL_FROM_ADS, STORE, GOOGLE_HOSTED, YOUTUBE_HOSTED.",
+      ].join("\n"),
+      inputSchema: {
+        customerId: z.string().describe("Customer ID."),
+        campaignId: z.string().describe("Campaign ID."),
+        goals: z.array(z.object({
+          category: conversionCategorySchema.describe("Categoria de conversão."),
+          origin: z.enum(["WEBSITE", "APP", "CALL_FROM_ADS", "STORE", "GOOGLE_HOSTED", "YOUTUBE_HOSTED", "LOCAL_SERVICES_ADS"]).optional().describe("Origem. Default: WEBSITE."),
+          biddable: z.boolean().describe("True = usada para lances (primária). False = só observação."),
+        })).describe("Metas a configurar."),
+      },
+    },
+    async ({ customerId, campaignId, goals }) => {
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      if (blocked) return { content: [blocked], isError: true };
+      const client = getClient();
+      const cid = customerId.replace(/-/g, "");
+
+      const operations = goals.map((g) => {
+        const category = resolveEnumAlias(g.category, CONVERSION_CATEGORY_ALIASES);
+        const origin = g.origin ?? "WEBSITE";
+        return {
+          update: {
+            resourceName: `customers/${cid}/campaignConversionGoals/${campaignId}~${category}~${origin}`,
+            biddable: g.biddable,
+          },
+          updateMask: "biddable",
+        };
+      });
+
+      const result = await client.mutateCampaignConversionGoals(customerId, operations);
+
+      const summary = goals
+        .map((g) => `${resolveEnumAlias(g.category, CONVERSION_CATEGORY_ALIASES)} (${g.origin ?? "WEBSITE"}): ${g.biddable ? "lance" : "observação"}`)
+        .join("\n");
+      return { content: [text(`Metas de conversão da campanha ${campaignId} atualizadas:\n${summary}\n\n${formatJson(result)}`)] };
+    }
+  );
+
+  mcp.registerTool(
+    "upload_offline_conversion",
+    {
+      description: [
+        "Envia conversões offline (importação por clique) para uma ação de conversão do tipo UPLOAD.",
+        "WRITE OPERATION.",
+        "",
+        "Cada conversão precisa de UM identificador de clique: gclid, gbraid ou wbraid.",
+        "conversionDateTime precisa do fuso: 'yyyy-MM-dd HH:mm:ss+HH:MM' (ex: '2026-09-09 14:30:00-03:00').",
+        "",
+        "A ação de conversão precisa ser do tipo UPLOAD_CLICKS (crie com create_conversion_action type=UPLOAD).",
+        "Use validateOnly: true para testar sem gravar.",
+      ].join("\n"),
+      inputSchema: {
+        customerId: z.string().describe("Customer ID."),
+        conversionActionId: z.string().describe("ID da ação de conversão (tipo UPLOAD_CLICKS)."),
+        conversions: z.array(z.object({
+          gclid: z.string().optional().describe("Google Click ID."),
+          gbraid: z.string().optional().describe("Click ID de app/iOS (web-to-app)."),
+          wbraid: z.string().optional().describe("Click ID de app/iOS (app-to-web)."),
+          conversionDateTime: z.string().describe("Data/hora com fuso: 'yyyy-MM-dd HH:mm:ss+HH:MM'."),
+          conversionValue: z.number().optional().describe("Valor da conversão."),
+          currencyCode: z.string().optional().describe("Moeda (ex: BRL). Default: moeda da conta."),
+          orderId: z.string().optional().describe("ID do pedido (evita duplicidade)."),
+        })).describe("Conversões a enviar."),
+        validateOnly: z.boolean().optional().describe("True = valida sem gravar. Default: false."),
+      },
+    },
+    async ({ customerId, conversionActionId, conversions, validateOnly }) => {
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      if (blocked) return { content: [blocked], isError: true };
+      const client = getClient();
+      const cid = customerId.replace(/-/g, "");
+
+      const missingId = conversions.find((c) => !c.gclid && !c.gbraid && !c.wbraid);
+      if (missingId) {
+        return { content: [text("Cada conversão precisa de gclid, gbraid ou wbraid.")], isError: true };
+      }
+
+      const currency = conversions.some((c) => c.conversionValue !== undefined && !c.currencyCode)
+        ? await client.getAccountCurrency(customerId)
+        : undefined;
+
+      const payload = conversions.map((c) => {
+        const conv: Record<string, unknown> = {
+          conversionAction: `customers/${cid}/conversionActions/${conversionActionId}`,
+          conversionDateTime: c.conversionDateTime,
+        };
+        if (c.gclid) conv.gclid = c.gclid;
+        if (c.gbraid) conv.gbraid = c.gbraid;
+        if (c.wbraid) conv.wbraid = c.wbraid;
+        if (c.conversionValue !== undefined) {
+          conv.conversionValue = c.conversionValue;
+          conv.currencyCode = c.currencyCode ?? currency;
+        }
+        if (c.orderId) conv.orderId = c.orderId;
+        return conv;
+      });
+
+      const result = await client.customerWriteAction<Record<string, unknown>>(customerId, ":uploadClickConversions", {
+        conversions: payload,
+        partialFailure: true,
+        validateOnly: validateOnly ?? false,
+      });
+
+      const partialError = result.partialFailureError as Record<string, unknown> | undefined;
+      const okCount = ((result.results as Array<Record<string, unknown>>) ?? []).filter((r) => Object.keys(r).length > 0).length;
+
+      return { content: [text(
+        `${validateOnly ? "Validação (nada gravado)" : "Upload"} de ${payload.length} conversão(ões) — ${okCount} aceita(s).\n` +
+        (partialError ? `Falhas parciais: ${partialError.message ?? formatJson(partialError)}\n` : "") +
+        `\n${formatJson(result)}`
+      )] };
+    }
+  );
+
+  mcp.registerTool(
+    "get_asset_performance",
+    {
+      description: [
+        "Performance por asset (headline, descrição, imagem, vídeo).",
+        "READ OPERATION.",
+        "",
+        "level='AD' (default): assets de RSA/Display/Demand Gen com métricas reais",
+        "(impressões, cliques, conversões) + performance_label (LOW/GOOD/BEST/LEARNING).",
+        "",
+        "level='PMAX': assets de asset groups PMax. A API não expõe métricas por asset em PMax —",
+        "retorna performance_label e status, que é o sinal usado para trocar criativo.",
+      ].join("\n"),
+      inputSchema: {
+        customerId: z.string().describe("Customer ID."),
+        level: z.enum(["AD", "PMAX"]).optional().describe("AD (com métricas) ou PMAX (labels). Default: AD."),
+        campaignId: z.string().optional().describe("Filtra por campanha."),
+        assetGroupId: z.string().optional().describe("Filtra por asset group (level=PMAX)."),
+        dateRange: dateRangeSchema.describe(DATE_RANGE_DESC),
+        days: z.number().optional().describe(DAYS_DESC),
+        format: formatSchema,
+      },
+    },
+    async ({ customerId, level, campaignId, assetGroupId, dateRange, days, format }) => {
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
+      if (blocked) return { content: [blocked], isError: true };
+      const client = getClient();
+
+      if ((level ?? "AD") === "PMAX") {
+        const filters = ["asset_group_asset.status != 'REMOVED'"];
+        if (assetGroupId) filters.push(`asset_group.id = ${assetGroupId}`);
+        if (campaignId) filters.push(`campaign.id = ${campaignId}`);
+
+        const results = await client.searchStream(customerId,
+          `SELECT campaign.name, asset_group.name, asset_group_asset.field_type,
+                  asset_group_asset.performance_label, asset_group_asset.status,
+                  asset.id, asset.name, asset.text_asset.text, asset.image_asset.full_size.url,
+                  asset.youtube_video_asset.youtube_video_id
+           FROM asset_group_asset
+           WHERE ${filters.join(" AND ")}`);
+
+        const rows = results.map((r) => {
+          const aga = (r.assetGroupAsset ?? {}) as Record<string, unknown>;
+          const asset = (r.asset ?? {}) as Record<string, unknown>;
+          const textAsset = (asset.textAsset ?? {}) as Record<string, unknown>;
+          const imageAsset = (asset.imageAsset ?? {}) as Record<string, unknown>;
+          const videoAsset = (asset.youtubeVideoAsset ?? {}) as Record<string, unknown>;
+          const group = (r.assetGroup ?? {}) as Record<string, unknown>;
+          return {
+            asset_group: group.name,
+            field_type: aga.fieldType,
+            performance: aga.performanceLabel ?? "PENDING",
+            status: aga.status,
+            asset_id: asset.id,
+            content: textAsset.text ?? ((imageAsset.fullSize as Record<string, unknown>)?.url) ?? videoAsset.youtubeVideoId ?? asset.name,
+          };
+        });
+
+        if (format === "table") return { content: [text(formatAsTable(rows as Array<Record<string, unknown>>))] };
+        if (format === "csv") return { content: [text(formatAsCsv(rows as Array<Record<string, unknown>>))] };
+        return { content: [text(`${rows.length} asset(s) PMax (sem métricas — a API só expõe performance_label).\n\n${formatJson(rows)}`)] };
+      }
+
+      const filters = [buildDateClause(dateRange, days)];
+      if (campaignId) filters.push(`campaign.id = ${campaignId}`);
+
+      const results = await client.searchStream(customerId,
+        `SELECT campaign.name, ad_group.name,
+                ad_group_ad_asset_view.field_type, ad_group_ad_asset_view.performance_label,
+                asset.id, asset.text_asset.text, asset.image_asset.full_size.url,
+                metrics.impressions, metrics.clicks, metrics.conversions,
+                metrics.conversions_value, metrics.cost_micros
+         FROM ad_group_ad_asset_view
+         WHERE ${filters.join(" AND ")}
+         ORDER BY metrics.impressions DESC`);
+
+      // Um asset aparece em vários anúncios — agrega por asset + field_type
+      const agg = new Map<string, Record<string, unknown>>();
+      for (const r of results) {
+        const view = (r.adGroupAdAssetView ?? {}) as Record<string, unknown>;
+        const asset = (r.asset ?? {}) as Record<string, unknown>;
+        const metrics = (r.metrics ?? {}) as Record<string, unknown>;
+        const textAsset = (asset.textAsset ?? {}) as Record<string, unknown>;
+        const imageAsset = (asset.imageAsset ?? {}) as Record<string, unknown>;
+        const key = `${asset.id}|${view.fieldType}`;
+        const row = agg.get(key) ?? {
+          field_type: view.fieldType,
+          performance: view.performanceLabel ?? "PENDING",
+          content: textAsset.text ?? ((imageAsset.fullSize as Record<string, unknown>)?.url) ?? asset.id,
+          impressions: 0, clicks: 0, conversions: 0, conversions_value: 0, spend: 0,
+        };
+        row.impressions = num(row.impressions) + num(metrics.impressions);
+        row.clicks = num(row.clicks) + num(metrics.clicks);
+        row.conversions = num(row.conversions) + num(metrics.conversions);
+        row.conversions_value = num(row.conversions_value) + num(metrics.conversionsValue);
+        row.spend = num(row.spend) + microsToMoney(metrics.costMicros);
+        agg.set(key, row);
+      }
+
+      const rows: Array<Record<string, unknown>> = [...agg.values()]
+        .map((r): Record<string, unknown> => ({ ...r, ctr: num(r.impressions) > 0 ? Number((num(r.clicks) / num(r.impressions) * 100).toFixed(2)) : 0 }))
+        .sort((a, b) => num(b.impressions) - num(a.impressions));
+
+      if (format === "table") return { content: [text(formatAsTable(rows as Array<Record<string, unknown>>))] };
+      if (format === "csv") return { content: [text(formatAsCsv(rows as Array<Record<string, unknown>>))] };
+      return { content: [text(`${rows.length} asset(s) com métricas.\n\n${formatJson(rows)}`)] };
     }
   );
 }

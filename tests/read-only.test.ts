@@ -24,12 +24,12 @@ function registeredToolNames(): string[] {
   return [...source.matchAll(/mcp\.registerTool\(\s*["']([^"']+)["']/g)].map((match) => match[1]);
 }
 
-test("all 80 tools are explicitly classified and classifications are disjoint", () => {
+test("all 89 tools are explicitly classified and classifications are disjoint", () => {
   const actual = new Set(registeredToolNames());
   const classified = new Set([...GOOGLE_ADS_READ_TOOL_NAMES, ...GOOGLE_ADS_WRITE_TOOL_NAMES]);
-  assert.equal(actual.size, 80);
-  assert.equal(GOOGLE_ADS_READ_TOOL_NAMES.size, 29);
-  assert.equal(GOOGLE_ADS_WRITE_TOOL_NAMES.size, 51);
+  assert.equal(actual.size, 89);
+  assert.equal(GOOGLE_ADS_READ_TOOL_NAMES.size, 33);
+  assert.equal(GOOGLE_ADS_WRITE_TOOL_NAMES.size, 56);
   assert.deepEqual([...classified].sort(), [...actual].sort());
   assert.equal(
     [...GOOGLE_ADS_READ_TOOL_NAMES].filter((name) => GOOGLE_ADS_WRITE_TOOL_NAMES.has(name as never)).length,

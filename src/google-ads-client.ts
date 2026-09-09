@@ -1,12 +1,12 @@
 /**
  * Cliente para Google Ads API (REST).
- * Versão da API configurável via GOOGLE_ADS_API_VERSION env var (default: v18).
+ * Versão da API configurável via GOOGLE_ADS_API_VERSION env var (default: v25).
  * Auth: OAuth 2.0 com auto-refresh, sem dependências Google.
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
 
-const API_VERSION = process.env.GOOGLE_ADS_API_VERSION ?? "v23";
+const API_VERSION = process.env.GOOGLE_ADS_API_VERSION ?? "v25";
 const API_BASE = `https://googleads.googleapis.com/${API_VERSION}`;
 
 const MAX_RETRIES = 3;
@@ -364,6 +364,42 @@ export class GoogleAdsClient {
 
   async mutateUserLists(customerId: string, operations: MutateOperation[]) {
     return this.mutate(customerId, "userLists", operations);
+  }
+
+  async mutateConversionActions(customerId: string, operations: MutateOperation[]) {
+    return this.mutate(customerId, "conversionActions", operations);
+  }
+
+  async mutateCampaignConversionGoals(customerId: string, operations: MutateOperation[]) {
+    return this.mutate(customerId, "campaignConversionGoals", operations);
+  }
+
+  /**
+   * Call a read-style custom endpoint that is not a `:mutate`.
+   * Ex: `:generateKeywordIdeas` (POST, mas não altera a conta).
+   */
+  async customerAction<T = Record<string, unknown>>(
+    customerId: string,
+    action: string,
+    body: unknown
+  ): Promise<T> {
+    const cid = customerId.replace(/-/g, "");
+    const url = `${API_BASE}/customers/${cid}${action.startsWith(":") ? "" : "/"}${action}`;
+    return this.request<T>("POST", url, body);
+  }
+
+  /**
+   * Call a custom endpoint that MUTATES the account.
+   * Ex: `recommendations:apply`, `:uploadClickConversions`.
+   * Passa pelo mesmo guard de read-only que `mutate`.
+   */
+  async customerWriteAction<T = Record<string, unknown>>(
+    customerId: string,
+    action: string,
+    body: unknown
+  ): Promise<T> {
+    this.assertWriteAllowed();
+    return this.customerAction<T>(customerId, action, body);
   }
 
   /**

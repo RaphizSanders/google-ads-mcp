@@ -11,9 +11,10 @@ import { fileURLToPath } from "node:url";
 // Carrega .env: primeiro cwd (raiz ao rodar do projeto), depois pasta acima de dist/
 const rootByCwd = join(process.cwd(), ".env");
 const rootByDir = join(dirname(fileURLToPath(import.meta.url)), "..", ".env");
-dotenv.config({ path: rootByCwd });
+// quiet: true — em modo stdio qualquer log em stdout corrompe o protocolo JSON-RPC.
+dotenv.config({ path: rootByCwd, quiet: true });
 if (!process.env.GOOGLE_ADS_DEVELOPER_TOKEN) {
-  dotenv.config({ path: rootByDir });
+  dotenv.config({ path: rootByDir, quiet: true });
 }
 
 import type { IncomingMessage, ServerResponse } from "node:http";

@@ -25,11 +25,11 @@ Funciona em modo **local** (stdio) e **remoto** (HTTP/SSE), com suporte a deploy
 | `GOOGLE_ADS_CREDENTIALS_JSON` | Alternativa hospedada | JSON OAuth completo fornecido por secret do ambiente. Mutuamente exclusivo com `GOOGLE_ADS_CREDENTIALS_PATH`; refresh ocorre apenas em memória |
 | `GOOGLE_ADS_DEVELOPER_TOKEN` | Sim | Developer token da Google Ads API |
 | `GOOGLE_ADS_LOGIN_CUSTOMER_ID` | Sim | ID da MCC (Manager account), sem hifens |
-| `GOOGLE_ADS_API_VERSION` | Nao | Versao da API (default: v23) |
+| `GOOGLE_ADS_API_VERSION` | Nao | Versao da API (default: v25 — v21 ja foi desligada, v22/v23 estao proximas do sunset) |
 | `MCP_API_KEY` | Nao | Chave de autenticacao para modo HTTP |
 | `MCP_ALLOWED_HOSTS` | No modo hospedado read-only | Hostnames aceitos, separados por vírgula e sem porta. Ativa proteção contra DNS rebinding |
 | `ALLOWED_CUSTOMER_IDS` | Obrigatório no modo hospedado read-only | Allowlist não vazia de contas específicas. IDs de 10 dígitos separados por vírgula; ausência, vazio ou valor malformado recusam o boot |
-| `GOOGLE_ADS_READ_ONLY` | Nao | Modo somente leitura (`true`/`1`). Remove as 51 tools mutáveis do catálogo e bloqueia mutações no cliente. Ausente mantém compatibilidade com o comportamento atual |
+| `GOOGLE_ADS_READ_ONLY` | Nao | Modo somente leitura (`true`/`1`). Remove as 56 tools mutáveis do catálogo e bloqueia mutações no cliente. Ausente mantém compatibilidade com o comportamento atual |
 | `PORT` | Nao | Se definido, inicia servidor HTTP. Sem `PORT`, usa stdio |
 
 ---
@@ -83,8 +83,8 @@ PORT=3333 GOOGLE_ADS_CREDENTIALS_PATH=./creds.json \
 
 Para integrações analíticas, defina `GOOGLE_ADS_READ_ONLY=true`. Nesse modo:
 
-- `tools/list` publica somente as 29 tools classificadas como leitura;
-- as 51 tools de criação, edição, upload e exclusão não são registradas;
+- `tools/list` publica somente as 33 tools classificadas como leitura;
+- as 56 tools de criação, edição, upload e exclusão não são registradas;
 - chamadas diretas à camada de mutação também são recusadas antes de qualquer acesso à API;
 - uma tool nova e ainda não classificada permanece bloqueada por padrão.
 
@@ -103,7 +103,7 @@ nega o acesso como defesa em profundidade.
 
 ---
 
-## Tools (80 total — atualizado 2026-03-18)
+## Tools (89 total — atualizado 2026-09-09)
 
 ### Descoberta de contas
 
@@ -131,6 +131,7 @@ nega o acesso como defesa em profundidade.
 | `compare_periods` | Compara dois periodos com deltas absolutos e percentuais |
 | `get_change_history` | Historico de alteracoes na conta |
 | `get_asset_group_performance` | Metricas de asset groups (PMax) |
+| `get_asset_performance` | Performance por asset: metricas reais (RSA/Display) ou performance_label (PMax) |
 
 ### Criativos e assets
 
@@ -241,7 +242,20 @@ nega o acesso como defesa em profundidade.
 | Tool | Descricao |
 |------|-----------|
 | `list_conversion_actions` | Lista acoes de conversao configuradas |
-| `create_conversion_action` | Cria acao de conversao (WEBPAGE, UPLOAD, PHONE_CALL) |
+| `create_conversion_action` | Cria acao de conversao (WEBPAGE, UPLOAD, PHONE_CALL, AD_CALL, CLICK_TO_CALL) |
+| `update_conversion_action` | Edita nome, status, categoria, contagem, atribuicao, valor e janelas de lookback |
+| `set_campaign_conversion_goals` | Define quais categorias de conversao guiam o lance da campanha (biddable) |
+| `upload_offline_conversion` | Importa conversoes offline por gclid/gbraid/wbraid |
+
+### Planejamento e recomendacoes
+
+| Tool | Descricao |
+|------|-----------|
+| `generate_keyword_ideas` | Ideias de keywords com volume, concorrencia e faixa de CPC (Keyword Planner) |
+| `list_geo_targets` | Busca geo target IDs por nome (para segmentacao e keyword planner) |
+| `list_recommendations` | Recomendacoes do Google Ads com impacto estimado |
+| `apply_recommendation` | Aplica recomendacoes (exige `confirm: true`) |
+| `dismiss_recommendation` | Dispensa recomendacoes sem aplicar |
 
 ### Labels
 
@@ -295,7 +309,23 @@ nega o acesso como defesa em profundidade.
 
 ---
 
-## PMax Creation — Notas Importantes (API v23)
+## Compatibilidade com a Google Ads API (varredura 2026-09-09)
+
+Enums e campos foram validados contra os protos oficiais da v25.
+
+| Item | Situacao |
+|------|----------|
+| Versao default | `v25`. A v21 ja foi desligada; v22/v23 seguem respondendo mas estao proximas do sunset. Sobrescreva com `GOOGLE_ADS_API_VERSION` se precisar. |
+| `ConversionActionCategory` | `LEAD` foi removido da API e `SIGN_UP` nao existe (o nome real e `SIGNUP`). As tools aceitam os nomes antigos como apelido e traduzem: `LEAD` → `SUBMIT_LEAD_FORM`, `SIGN_UP` → `SIGNUP`. |
+| `ConversionActionType` | `UPLOAD` e `PHONE_CALL` nao existem no enum. Traduzidos para `UPLOAD_CLICKS` e `WEBSITE_CALL`. O tipo e IMUTAVEL apos a criacao. |
+| `AttributionModel` | Os nomes reais tem prefixo: `DATA_DRIVEN` → `GOOGLE_SEARCH_ATTRIBUTION_DATA_DRIVEN`, `LAST_CLICK` → `GOOGLE_ADS_LAST_CLICK`, etc. As tools aceitam os dois formatos. |
+| `data_driven_model_status` | Campo OUTPUT_ONLY — nunca e enviado no mutate (enviar causava erro na criacao). |
+| `contains_eu_political_advertising` | Enviado como nome do enum (`DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING`) em vez do numero 3. |
+| Demais enums | Varredura completa dos 396 enums da v25: nenhum outro valor invalido no projeto. |
+
+---
+
+## PMax Creation — Notas Importantes (API v23+)
 
 A criacao de campanhas Performance Max na API v23 tem particularidades criticas:
 
