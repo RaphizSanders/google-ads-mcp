@@ -66,6 +66,30 @@ test("hosted read-only mode will not start without an allowlist", () => {
   );
 });
 
+test("hosted write mode refuses to start without authentication", () => {
+  /* The dangerous shape: HTTP + mutating tools + no key. checkAuth lets every
+     request through when MCP_API_KEY is empty, so the process must not boot. */
+  const exposed = {
+    port: 3333,
+    readOnly: false,
+    apiKey: "",
+    allowedHosts: ["google-ads-mcp.railway.internal"],
+    allowedCustomerIds: ["1234567890"],
+  };
+  assert.throws(() => assertHostedReadOnlySecurity(exposed), /MCP_API_KEY is required/);
+  assert.throws(
+    () => assertHostedReadOnlySecurity({ ...exposed, apiKey: "k".repeat(32), allowedHosts: [] }),
+    /MCP_ALLOWED_HOSTS is required/,
+  );
+  assert.throws(
+    () => assertHostedReadOnlySecurity({ ...exposed, apiKey: "k".repeat(32), allowedCustomerIds: [] }),
+    /ALLOWED_CUSTOMER_IDS is required/,
+  );
+  assert.doesNotThrow(() =>
+    assertHostedReadOnlySecurity({ ...exposed, apiKey: "k".repeat(32) }),
+  );
+});
+
 test("stdio mode is left alone, so local use is unchanged", () => {
   /* port 0 means stdio; the hosted gate does not apply there. */
   assert.doesNotThrow(() =>

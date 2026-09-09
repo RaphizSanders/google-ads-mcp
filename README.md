@@ -26,9 +26,9 @@ Funciona em modo **local** (stdio) e **remoto** (HTTP/SSE), com suporte a deploy
 | `GOOGLE_ADS_DEVELOPER_TOKEN` | Sim | Developer token da Google Ads API |
 | `GOOGLE_ADS_LOGIN_CUSTOMER_ID` | Sim | ID da MCC (Manager account), sem hifens |
 | `GOOGLE_ADS_API_VERSION` | Nao | Versao da API (default: v25 — v21 ja foi desligada, v22/v23 estao proximas do sunset) |
-| `MCP_API_KEY` | Nao | Chave de autenticacao para modo HTTP |
-| `MCP_ALLOWED_HOSTS` | No modo hospedado read-only | Hostnames aceitos, separados por vírgula e sem porta. Ativa proteção contra DNS rebinding |
-| `ALLOWED_CUSTOMER_IDS` | Obrigatório no modo hospedado read-only | Allowlist não vazia de contas específicas. IDs de 10 dígitos separados por vírgula; ausência, vazio ou valor malformado recusam o boot |
+| `MCP_API_KEY` | Em qualquer modo HTTP | Chave de autenticacao (`Authorization: Bearer`). Obrigatoria sempre que `PORT` estiver definido — sem ela o endpoint aceitaria qualquer requisicao. Nao se aplica ao stdio |
+| `MCP_ALLOWED_HOSTS` | Em qualquer modo HTTP | Hostnames aceitos, separados por vírgula e sem porta. Ativa proteção contra DNS rebinding |
+| `ALLOWED_CUSTOMER_IDS` | Em qualquer modo HTTP | Allowlist não vazia de contas específicas. IDs de 10 dígitos separados por vírgula; ausência, vazio ou valor malformado recusam o boot |
 | `GOOGLE_ADS_READ_ONLY` | Nao | Modo somente leitura (`true`/`1`). Remove as 56 tools mutáveis do catálogo e bloqueia mutações no cliente. Ausente mantém compatibilidade com o comportamento atual |
 | `PORT` | Nao | Se definido, inicia servidor HTTP. Sem `PORT`, usa stdio |
 
@@ -70,8 +70,13 @@ Configure em `~/.claude.json` (ou `~/.cursor/mcp.json`):
 ```bash
 PORT=3333 GOOGLE_ADS_CREDENTIALS_PATH=./creds.json \
   GOOGLE_ADS_DEVELOPER_TOKEN=xxx GOOGLE_ADS_LOGIN_CUSTOMER_ID=123 \
+  ALLOWED_CUSTOMER_IDS=1234567890 MCP_ALLOWED_HOSTS=localhost,127.0.0.1 \
   MCP_API_KEY=sua_chave node dist/index.js
 ```
+
+Expor por HTTP exige `MCP_API_KEY`, `MCP_ALLOWED_HOSTS` e `ALLOWED_CUSTOMER_IDS` — o
+processo recusa iniciar sem os tres, em modo de leitura ou de escrita. O modo stdio
+(uso local no Cursor/Claude Code) nao passa por nenhuma dessas checagens.
 
 ### Deploy no Railway
 

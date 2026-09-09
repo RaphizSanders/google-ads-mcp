@@ -86,6 +86,16 @@ export function parseAllowedCustomerIds(raw: string | undefined): string[] {
   return [...new Set(ids)];
 }
 
+/**
+ * Gate for any HTTP-exposed run (port > 0). stdio (port 0) is untouched: there
+ * the client spawns the process locally and no network surface exists.
+ *
+ * This used to apply only in read-only mode, which left the dangerous shape
+ * unguarded: an HTTP deployment in write mode booted with no MCP_API_KEY, and
+ * checkAuth lets every request through when the key is empty — exposing the
+ * mutating tools to anyone who can reach the URL. The requirement now keys on
+ * exposure, not on mode.
+ */
 export function assertHostedReadOnlySecurity(options: {
   port: number;
   readOnly: boolean;
@@ -96,16 +106,15 @@ export function assertHostedReadOnlySecurity(options: {
      exactly like empty: nobody said which customers. */
   allowedCustomerIds?: string[];
 }): void {
-  if (options.port <= 0 || !options.readOnly) return;
+  if (options.port <= 0) return;
+  const mode = options.readOnly ? "hosted read-only mode" : "hosted write mode";
   if (!options.apiKey) {
-    throw new Error("MCP_API_KEY is required for hosted read-only mode");
+    throw new Error(`MCP_API_KEY is required for ${mode}`);
   }
   if (options.allowedHosts.length === 0) {
-    throw new Error("MCP_ALLOWED_HOSTS is required for hosted read-only mode");
+    throw new Error(`MCP_ALLOWED_HOSTS is required for ${mode}`);
   }
   if ((options.allowedCustomerIds ?? []).length === 0) {
-    throw new Error(
-      "ALLOWED_CUSTOMER_IDS is required for hosted read-only mode",
-    );
+    throw new Error(`ALLOWED_CUSTOMER_IDS is required for ${mode}`);
   }
 }
