@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 
-// A contagem esperada vem do proprio catalogo classificado (dist/read-only.js),
-// entao adicionar uma tool nova nao exige editar um numero magico aqui.
-let expectedReadTools;
-try {
-  ({ GOOGLE_ADS_READ_TOOL_NAMES: expectedReadTools } = await import("../dist/read-only.js"));
-} catch {
-  throw new Error("dist/read-only.js nao encontrado — rode `npm run build` antes do smoke test");
-}
+// A lista esperada vem do proprio catalogo classificado em src/read-only.ts,
+// lido do fonte (nao do build) para o script rodar tambem no workflow de publish,
+// que verifica a imagem publicada sem compilar o projeto.
+import { readFileSync } from "node:fs";
+
+const readOnlySource = readFileSync(new URL("../src/read-only.ts", import.meta.url), "utf8");
+const readBlock = readOnlySource.match(/GOOGLE_ADS_READ_TOOL_NAMES = new Set\(\[([\s\S]*?)\]/);
+if (!readBlock) throw new Error("nao foi possivel ler GOOGLE_ADS_READ_TOOL_NAMES de src/read-only.ts");
+const expectedReadTools = new Set([...readBlock[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]));
+if (expectedReadTools.size === 0) throw new Error("catalogo de leitura vazio em src/read-only.ts");
 
 const base = process.argv[2] ?? "http://127.0.0.1:3333";
 const apiKey = process.argv[3];

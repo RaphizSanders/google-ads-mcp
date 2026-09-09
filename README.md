@@ -131,7 +131,7 @@ nega o acesso como defesa em profundidade.
 | `compare_periods` | Compara dois periodos com deltas absolutos e percentuais |
 | `get_change_history` | Historico de alteracoes na conta |
 | `get_asset_group_performance` | Metricas de asset groups (PMax) |
-| `get_asset_performance` | Performance por asset: metricas reais (RSA/Display) ou performance_label (PMax) |
+| `get_asset_performance` | Performance por asset: `performance_label` + metricas (RSA/Display) ou `primary_status` + metricas (PMax) |
 
 ### Criativos e assets
 
@@ -318,9 +318,11 @@ Enums e campos foram validados contra os protos oficiais da v25.
 | Versao default | `v25`. A v21 ja foi desligada; v22/v23 seguem respondendo mas estao proximas do sunset. Sobrescreva com `GOOGLE_ADS_API_VERSION` se precisar. |
 | `ConversionActionCategory` | `LEAD` foi removido da API e `SIGN_UP` nao existe (o nome real e `SIGNUP`). As tools aceitam os nomes antigos como apelido e traduzem: `LEAD` → `SUBMIT_LEAD_FORM`, `SIGN_UP` → `SIGNUP`. |
 | `ConversionActionType` | `UPLOAD` e `PHONE_CALL` nao existem no enum. Traduzidos para `UPLOAD_CLICKS` e `WEBSITE_CALL`. O tipo e IMUTAVEL apos a criacao. |
-| `AttributionModel` | Os nomes reais tem prefixo: `DATA_DRIVEN` → `GOOGLE_SEARCH_ATTRIBUTION_DATA_DRIVEN`, `LAST_CLICK` → `GOOGLE_ADS_LAST_CLICK`, etc. As tools aceitam os dois formatos. |
+| `AttributionModel` | Os nomes reais tem prefixo: `DATA_DRIVEN` → `GOOGLE_SEARCH_ATTRIBUTION_DATA_DRIVEN`, `LAST_CLICK` → `GOOGLE_ADS_LAST_CLICK`. As tools aceitam os dois formatos. Os modelos baseados em regras (first click, linear, time decay, position based) foram desligados pelo Google em 2023 e nao sao mais oferecidos. |
 | `data_driven_model_status` | Campo OUTPUT_ONLY — nunca e enviado no mutate (enviar causava erro na criacao). |
 | `contains_eu_political_advertising` | Enviado como nome do enum (`DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING`) em vez do numero 3. |
+| `asset_group_asset.performance_label` | Nao existe (o rotulo LOW/GOOD/BEST so existe em `ad_group_ad_asset_view`). Em PMax o sinal equivalente e `primary_status`, e o recurso aceita metricas + `segments.date`. |
+| `recommendation.impact` | Selecionavel como mensagem inteira; as sub-paths (`impact.base_metrics.clicks`) nao existem no metadata de campos. |
 | Demais enums | Varredura completa dos 396 enums da v25: nenhum outro valor invalido no projeto. |
 
 ---

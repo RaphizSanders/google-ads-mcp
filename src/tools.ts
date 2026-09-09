@@ -104,6 +104,8 @@ function ensureArray<T>(val: T[] | string | unknown): T[] {
   if (Array.isArray(val)) return val;
   if (typeof val === "string") {
     try { const parsed = JSON.parse(val); if (Array.isArray(parsed)) return parsed; } catch {}
+    // String simples (nao-JSON) vira um elemento — descartar perderia o valor do usuario
+    return val.trim() ? ([val] as unknown as T[]) : [];
   }
   return [];
 }
@@ -111,8 +113,17 @@ function ensureArray<T>(val: T[] | string | unknown): T[] {
 /** Zod schema that accepts both array and JSON string of array */
 function flexArray<T extends z.ZodTypeAny>(itemSchema: T) {
   return z.union([z.array(itemSchema), z.string().transform((s) => {
-    try { const parsed = JSON.parse(s); return Array.isArray(parsed) ? parsed : []; } catch { return []; }
+    try { const parsed = JSON.parse(s); if (Array.isArray(parsed)) return parsed; } catch {}
+    return s.trim() ? [s] : [];
   })]);
+}
+
+/**
+ * Escapa um valor para uso dentro de uma string literal GAQL.
+ * Preserva apostrofos legitimos (ex: "Sant'Ana") em vez de remove-los.
+ */
+function gaqlLiteral(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }
 
 function checkCustomerAccess(
@@ -170,7 +181,7 @@ const EU_POLITICAL_DECLARATION = "DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING";
 // ── Conversion actions (validado contra a API v25) ───────────────────
 
 /** Categorias válidas de ConversionActionCategory na API atual. */
-const CONVERSION_CATEGORIES = [
+export const CONVERSION_CATEGORIES = [
   "DEFAULT", "PAGE_VIEW", "PURCHASE", "SIGNUP", "DOWNLOAD", "ADD_TO_CART",
   "BEGIN_CHECKOUT", "SUBSCRIBE_PAID", "PHONE_CALL_LEAD", "IMPORTED_LEAD",
   "SUBMIT_LEAD_FORM", "BOOK_APPOINTMENT", "REQUEST_QUOTE", "GET_DIRECTIONS",
@@ -179,47 +190,46 @@ const CONVERSION_CATEGORIES = [
 ] as const;
 
 /** Nomes antigos/amigáveis que a API não aceita mais — traduzidos antes do mutate. */
-const CONVERSION_CATEGORY_ALIASES: Record<string, string> = {
+export const CONVERSION_CATEGORY_ALIASES: Record<string, string> = {
   LEAD: "SUBMIT_LEAD_FORM", // LEAD foi removido da API
   SIGN_UP: "SIGNUP",        // a API escreve sem underscore
 };
 
 /** Tipos de conversão criáveis via API + apelidos amigáveis. */
-const CONVERSION_TYPE_ALIASES: Record<string, string> = {
+export const CONVERSION_TYPE_ALIASES: Record<string, string> = {
   UPLOAD: "UPLOAD_CLICKS",   // UPLOAD não existe no enum
   PHONE_CALL: "WEBSITE_CALL", // chamadas a partir do número no site
 };
 
-/** Modelos de atribuição: nomes amigáveis → nomes reais do enum AttributionModel. */
-const ATTRIBUTION_MODEL_ALIASES: Record<string, string> = {
+/**
+ * Modelos de atribuição: nomes amigáveis → nomes reais do enum AttributionModel.
+ * Só DATA_DRIVEN e LAST_CLICK sao settable: o Google desligou os modelos baseados
+ * em regras (first click, linear, time decay, position based) em 2023 — o enum
+ * ainda os lista, mas a API recusa grava-los.
+ */
+export const ATTRIBUTION_MODEL_ALIASES: Record<string, string> = {
   DATA_DRIVEN: "GOOGLE_SEARCH_ATTRIBUTION_DATA_DRIVEN",
   LAST_CLICK: "GOOGLE_ADS_LAST_CLICK",
-  FIRST_CLICK: "GOOGLE_SEARCH_ATTRIBUTION_FIRST_CLICK",
-  LINEAR: "GOOGLE_SEARCH_ATTRIBUTION_LINEAR",
-  TIME_DECAY: "GOOGLE_SEARCH_ATTRIBUTION_TIME_DECAY",
-  POSITION_BASED: "GOOGLE_SEARCH_ATTRIBUTION_POSITION_BASED",
 };
 
-const conversionCategorySchema = z.enum([
+export const conversionCategorySchema = z.enum([
   ...CONVERSION_CATEGORIES,
   "LEAD",
   "SIGN_UP",
 ]);
 
-const conversionTypeSchema = z.enum([
+export const conversionTypeSchema = z.enum([
   "WEBPAGE", "UPLOAD", "UPLOAD_CLICKS", "UPLOAD_CALLS",
   "PHONE_CALL", "WEBSITE_CALL", "AD_CALL", "CLICK_TO_CALL",
 ]);
 
-const attributionModelSchema = z.enum([
-  "DATA_DRIVEN", "LAST_CLICK", "FIRST_CLICK", "LINEAR", "TIME_DECAY", "POSITION_BASED",
+export const attributionModelSchema = z.enum([
+  "DATA_DRIVEN", "LAST_CLICK",
   "GOOGLE_SEARCH_ATTRIBUTION_DATA_DRIVEN", "GOOGLE_ADS_LAST_CLICK",
-  "GOOGLE_SEARCH_ATTRIBUTION_FIRST_CLICK", "GOOGLE_SEARCH_ATTRIBUTION_LINEAR",
-  "GOOGLE_SEARCH_ATTRIBUTION_TIME_DECAY", "GOOGLE_SEARCH_ATTRIBUTION_POSITION_BASED",
 ]);
 
 /** Resolve apelido → valor aceito pela API. */
-function resolveEnumAlias(value: string, aliases: Record<string, string>): string {
+export function resolveEnumAlias(value: string, aliases: Record<string, string>): string {
   return aliases[value] ?? value;
 }
 
@@ -3075,7 +3085,8 @@ export function registerGoogleAdsTools(
         "Categorias (API atual): " + CONVERSION_CATEGORIES.join(", ") + ".",
         "Apelidos aceitos: LEAD → SUBMIT_LEAD_FORM, SIGN_UP → SIGNUP.",
         "",
-        "Attribution model: DATA_DRIVEN (recomendado), LAST_CLICK, FIRST_CLICK, LINEAR, TIME_DECAY, POSITION_BASED.",
+        "Attribution model: DATA_DRIVEN (padrao do Google) ou LAST_CLICK. Os modelos baseados",
+        "em regras (first click, linear, time decay, position based) foram desligados em 2023.",
         "Counting: ONE_PER_CLICK (leads) ou MANY_PER_CLICK (compras).",
         "",
         "O tipo é IMUTÁVEL depois de criado — use update_conversion_action para o resto.",
@@ -3213,12 +3224,18 @@ export function registerGoogleAdsTools(
         mask.push("include_in_conversions_metric");
       }
       if (valueSetting !== undefined) {
-        updateData.valueSettings = {
-          defaultValue: valueSetting.defaultValue ?? 0,
-          alwaysUseDefaultValue: valueSetting.alwaysUseDefaultValue ?? false,
-          defaultCurrencyCode: await client.getAccountCurrency(customerId),
-        };
-        mask.push("value_settings");
+        // Mascarar "value_settings" inteiro zeraria os sub-campos nao informados
+        const valueSettings: Record<string, unknown> = {};
+        if (valueSetting.defaultValue !== undefined) {
+          valueSettings.defaultValue = valueSetting.defaultValue;
+          valueSettings.defaultCurrencyCode = await client.getAccountCurrency(customerId);
+          mask.push("value_settings.default_value", "value_settings.default_currency_code");
+        }
+        if (valueSetting.alwaysUseDefaultValue !== undefined) {
+          valueSettings.alwaysUseDefaultValue = valueSetting.alwaysUseDefaultValue;
+          mask.push("value_settings.always_use_default_value");
+        }
+        if (Object.keys(valueSettings).length > 0) updateData.valueSettings = valueSettings;
       }
       if (viewThroughLookbackWindowDays !== undefined) {
         updateData.viewThroughLookbackWindowDays = String(viewThroughLookbackWindowDays);
@@ -3726,7 +3743,7 @@ export function registerGoogleAdsTools(
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
-      const nameFilter = query ? `AND user_list.name LIKE '%${query}%'` : "";
+      const nameFilter = query ? `AND user_list.name LIKE '%${gaqlLiteral(query)}%'` : "";
 
       const results = await client.searchStream(customerId,
         `SELECT user_list.id, user_list.name, user_list.type, user_list.status,
@@ -4039,7 +4056,7 @@ export function registerGoogleAdsTools(
       const langRows = await client.searchStream(customerId,
         `SELECT language_constant.id, language_constant.code, language_constant.name
          FROM language_constant
-         WHERE language_constant.code = '${code}'
+         WHERE language_constant.code = '${gaqlLiteral(code)}'
          LIMIT 1`);
       const langId = ((langRows[0]?.languageConstant as Record<string, unknown>)?.id) as string | undefined;
       if (!langId) {
@@ -4052,6 +4069,8 @@ export function registerGoogleAdsTools(
         geoTargetConstants: (geoIds.length > 0 ? geoIds : ["2076"]).map((id) => `geoTargetConstants/${id}`),
         keywordPlanNetwork: network ?? "GOOGLE_SEARCH",
         includeAdultKeywords: includeAdultKeywords ?? false,
+        // sem isso a API nao devolve average_cpc_micros e a coluna sai sempre zerada
+        historicalMetricsOptions: { includeAverageCpc: true },
         pageSize: Math.min(limit ?? 50, 1000),
       };
 
@@ -4111,9 +4130,9 @@ export function registerGoogleAdsTools(
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
 
-      const filters = [`geo_target_constant.name LIKE '%${query.replace(/'/g, "")}%'`, "geo_target_constant.status = 'ENABLED'"];
-      if (countryCode) filters.push(`geo_target_constant.country_code = '${countryCode.toUpperCase()}'`);
-      if (targetType) filters.push(`geo_target_constant.target_type = '${targetType}'`);
+      const filters = [`geo_target_constant.name LIKE '%${gaqlLiteral(query)}%'`, "geo_target_constant.status = 'ENABLED'"];
+      if (countryCode) filters.push(`geo_target_constant.country_code = '${gaqlLiteral(countryCode.toUpperCase())}'`);
+      if (targetType) filters.push(`geo_target_constant.target_type = '${gaqlLiteral(targetType)}'`);
 
       const results = await client.searchStream(customerId,
         `SELECT geo_target_constant.id, geo_target_constant.name,
@@ -4170,20 +4189,15 @@ export function registerGoogleAdsTools(
 
       const filters: string[] = [];
       const typeList = ensureArray<string>(types);
-      if (typeList.length > 0) filters.push(`recommendation.type IN (${typeList.map((t) => `'${t}'`).join(",")})`);
-      if (campaignId) filters.push(`recommendation.campaign = 'customers/${cid}/campaigns/${campaignId}'`);
+      if (typeList.length > 0) filters.push(`recommendation.type IN (${typeList.map((t) => `'${gaqlLiteral(t)}'`).join(",")})`);
+      if (campaignId) filters.push(`recommendation.campaign = 'customers/${cid}/campaigns/${gaqlLiteral(campaignId)}'`);
       const where = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
 
       const results = await client.searchStream(customerId,
+        // recommendation.impact e selecionavel como mensagem inteira; as sub-paths
+        // (impact.base_metrics.clicks) nao existem no metadata de campos da API.
         `SELECT recommendation.resource_name, recommendation.type, recommendation.campaign,
-                recommendation.impact.base_metrics.impressions,
-                recommendation.impact.base_metrics.clicks,
-                recommendation.impact.base_metrics.cost_micros,
-                recommendation.impact.base_metrics.conversions,
-                recommendation.impact.potential_metrics.impressions,
-                recommendation.impact.potential_metrics.clicks,
-                recommendation.impact.potential_metrics.cost_micros,
-                recommendation.impact.potential_metrics.conversions,
+                recommendation.impact,
                 campaign.name
          FROM recommendation
          ${where}
@@ -4240,12 +4254,26 @@ export function registerGoogleAdsTools(
       if (names.length === 0) return { content: [text("Informe ao menos um resourceName.")], isError: true };
 
       const client = getClient();
-      const result = await client.customerWriteAction(customerId, "recommendations:apply", {
+      const result = await client.customerWriteAction<{
+        results?: Array<Record<string, unknown>>;
+        partialFailureError?: Record<string, unknown>;
+      }>(customerId, "recommendations:apply", {
         operations: names.map((resourceName) => ({ resourceName })),
         partialFailure: true,
       });
 
-      return { content: [text(`${names.length} recomendação(ões) aplicada(s).\n\n${formatJson(result)}`)] };
+      // partialFailure: true faz a API responder 200 mesmo com operacoes recusadas
+      const applied = (result.results ?? []).filter((r) => Object.keys(r).length > 0).length;
+      const partialError = result.partialFailureError;
+
+      return {
+        content: [text(
+          `${applied}/${names.length} recomendação(ões) aplicada(s).\n` +
+          (partialError ? `Falhas: ${partialError.message ?? formatJson(partialError)}\n` : "") +
+          `\n${formatJson(result)}`
+        )],
+        isError: applied < names.length,
+      };
     }
   );
 
@@ -4268,12 +4296,25 @@ export function registerGoogleAdsTools(
       if (names.length === 0) return { content: [text("Informe ao menos um resourceName.")], isError: true };
 
       const client = getClient();
-      const result = await client.customerWriteAction(customerId, "recommendations:dismiss", {
+      const result = await client.customerWriteAction<{
+        results?: Array<Record<string, unknown>>;
+        partialFailureError?: Record<string, unknown>;
+      }>(customerId, "recommendations:dismiss", {
         operations: names.map((resourceName) => ({ resourceName })),
         partialFailure: true,
       });
 
-      return { content: [text(`${names.length} recomendação(ões) dispensada(s).\n\n${formatJson(result)}`)] };
+      const dismissed = (result.results ?? []).filter((r) => Object.keys(r).length > 0).length;
+      const partialError = result.partialFailureError;
+
+      return {
+        content: [text(
+          `${dismissed}/${names.length} recomendação(ões) dispensada(s).\n` +
+          (partialError ? `Falhas: ${partialError.message ?? formatJson(partialError)}\n` : "") +
+          `\n${formatJson(result)}`
+        )],
+        isError: dismissed < names.length,
+      };
     }
   );
 
@@ -4394,12 +4435,21 @@ export function registerGoogleAdsTools(
 
       const partialError = result.partialFailureError as Record<string, unknown> | undefined;
       const okCount = ((result.results as Array<Record<string, unknown>>) ?? []).filter((r) => Object.keys(r).length > 0).length;
+      const dryRun = validateOnly ?? false;
 
-      return { content: [text(
-        `${validateOnly ? "Validação (nada gravado)" : "Upload"} de ${payload.length} conversão(ões) — ${okCount} aceita(s).\n` +
-        (partialError ? `Falhas parciais: ${partialError.message ?? formatJson(partialError)}\n` : "") +
-        `\n${formatJson(result)}`
-      )] };
+      // Em validateOnly a API nao devolve results — a ausencia de erro e o sinal de sucesso
+      const header = dryRun
+        ? `Validação de ${payload.length} conversão(ões), nada gravado — ${partialError ? "com erros" : "todas válidas"}.`
+        : `Upload de ${payload.length} conversão(ões) — ${okCount} aceita(s).`;
+
+      return {
+        content: [text(
+          `${header}\n` +
+          (partialError ? `Falhas parciais: ${partialError.message ?? formatJson(partialError)}\n` : "") +
+          `\n${formatJson(result)}`
+        )],
+        isError: Boolean(partialError) || (!dryRun && okCount === 0),
+      };
     }
   );
 
@@ -4413,12 +4463,13 @@ export function registerGoogleAdsTools(
         "level='AD' (default): assets de RSA/Display/Demand Gen com métricas reais",
         "(impressões, cliques, conversões) + performance_label (LOW/GOOD/BEST/LEARNING).",
         "",
-        "level='PMAX': assets de asset groups PMax. A API não expõe métricas por asset em PMax —",
-        "retorna performance_label e status, que é o sinal usado para trocar criativo.",
+        "level='PMAX': assets de asset groups PMax, com métricas no período + primary_status",
+        "(o status de veiculação/política do link). PMax não tem performance_label: esse rótulo",
+        "só existe para assets de anúncio. Assets sem impressões no período podem não aparecer.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
-        level: z.enum(["AD", "PMAX"]).optional().describe("AD (com métricas) ou PMAX (labels). Default: AD."),
+        level: z.enum(["AD", "PMAX"]).optional().describe("AD (assets de anúncio) ou PMAX (assets de asset group). Default: AD."),
         campaignId: z.string().optional().describe("Filtra por campanha."),
         assetGroupId: z.string().optional().describe("Filtra por asset group (level=PMAX)."),
         dateRange: dateRangeSchema.describe(DATE_RANGE_DESC),
@@ -4432,21 +4483,28 @@ export function registerGoogleAdsTools(
       const client = getClient();
 
       if ((level ?? "AD") === "PMAX") {
-        const filters = ["asset_group_asset.status != 'REMOVED'"];
+        // asset_group_asset NAO tem performance_label (esse campo so existe em
+        // ad_group_ad_asset_view); o sinal equivalente aqui e primary_status.
+        const filters = ["asset_group_asset.status != 'REMOVED'", buildDateClause(dateRange, days)];
         if (assetGroupId) filters.push(`asset_group.id = ${assetGroupId}`);
         if (campaignId) filters.push(`campaign.id = ${campaignId}`);
 
         const results = await client.searchStream(customerId,
           `SELECT campaign.name, asset_group.name, asset_group_asset.field_type,
-                  asset_group_asset.performance_label, asset_group_asset.status,
+                  asset_group_asset.primary_status, asset_group_asset.primary_status_reasons,
+                  asset_group_asset.status,
                   asset.id, asset.name, asset.text_asset.text, asset.image_asset.full_size.url,
-                  asset.youtube_video_asset.youtube_video_id
+                  asset.youtube_video_asset.youtube_video_id,
+                  metrics.impressions, metrics.clicks, metrics.conversions,
+                  metrics.conversions_value, metrics.cost_micros
            FROM asset_group_asset
-           WHERE ${filters.join(" AND ")}`);
+           WHERE ${filters.join(" AND ")}
+           ORDER BY metrics.impressions DESC`);
 
         const rows = results.map((r) => {
           const aga = (r.assetGroupAsset ?? {}) as Record<string, unknown>;
           const asset = (r.asset ?? {}) as Record<string, unknown>;
+          const metrics = (r.metrics ?? {}) as Record<string, unknown>;
           const textAsset = (asset.textAsset ?? {}) as Record<string, unknown>;
           const imageAsset = (asset.imageAsset ?? {}) as Record<string, unknown>;
           const videoAsset = (asset.youtubeVideoAsset ?? {}) as Record<string, unknown>;
@@ -4454,16 +4512,22 @@ export function registerGoogleAdsTools(
           return {
             asset_group: group.name,
             field_type: aga.fieldType,
-            performance: aga.performanceLabel ?? "PENDING",
+            primary_status: aga.primaryStatus,
+            primary_status_reasons: aga.primaryStatusReasons,
             status: aga.status,
             asset_id: asset.id,
             content: textAsset.text ?? ((imageAsset.fullSize as Record<string, unknown>)?.url) ?? videoAsset.youtubeVideoId ?? asset.name,
+            impressions: num(metrics.impressions),
+            clicks: num(metrics.clicks),
+            conversions: num(metrics.conversions),
+            conversions_value: num(metrics.conversionsValue),
+            spend: microsToMoney(metrics.costMicros),
           };
         });
 
         if (format === "table") return { content: [text(formatAsTable(rows as Array<Record<string, unknown>>))] };
         if (format === "csv") return { content: [text(formatAsCsv(rows as Array<Record<string, unknown>>))] };
-        return { content: [text(`${rows.length} asset(s) PMax (sem métricas — a API só expõe performance_label).\n\n${formatJson(rows)}`)] };
+        return { content: [text(`${rows.length} asset(s) PMax no período (primary_status + métricas).\n\n${formatJson(rows)}`)] };
       }
 
       const filters = [buildDateClause(dateRange, days)];
