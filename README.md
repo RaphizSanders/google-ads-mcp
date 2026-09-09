@@ -180,7 +180,7 @@ buscar aqui. Por isso uma allowlist vazia mantém o significado original de "sem
 | `update_ad_group` | Edita nome, status, CPC de ad group |
 | `create_ad` | Cria RSA (Responsive Search Ad) com headlines e descriptions |
 | `create_responsive_display_ad` | Cria ad responsivo de Display com imagens |
-| `create_video_ad` | Cria ad de video (YouTube) |
+| `create_video_ad` | Cria responsive video ad (YouTube) em ad group VIDEO_RESPONSIVE. Exige headline, description, callToAction, businessName e logoAssetId (asset IMAGE 1:1); reaproveita o asset do video se ja existir |
 | `update_ad` | Edita headlines, descriptions, final URL de um RSA existente |
 | `update_ad_status` | Pausar ou ativar anuncio |
 
@@ -207,7 +207,7 @@ buscar aqui. Por isso uma allowlist vazia mantém o significado original de "sem
 
 | Tool | Descricao |
 |------|-----------|
-| `set_campaign_locations` | Segmentacao geografica (pais, estado, cidade) |
+| `set_campaign_locations` | Segmentacao geografica (pais, estado, cidade). Por padrao adiciona a existente; `replace=true` substitui (remove antes os criterios de LOCATION da mesma polaridade) |
 | `set_campaign_languages` | Segmentacao por idioma |
 | `update_ad_group_targeting` | Adiciona audiencia a ad group |
 | `add_placement` | Adiciona placement (site, app, canal YouTube) |

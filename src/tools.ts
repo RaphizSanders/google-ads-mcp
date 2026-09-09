@@ -170,29 +170,72 @@ function checkCustomerAccess(
   return null;
 }
 
-/** Map dimension name to GAQL case_value key */
-function dimensionToCaseKey(dimension: string): string {
-  const map: Record<string, string> = {
-    PRODUCT_BRAND: "productBrand",
-    PRODUCT_CATEGORY_LEVEL1: "productCategory",
-    PRODUCT_CATEGORY_LEVEL2: "productCategory",
-    PRODUCT_CATEGORY_LEVEL3: "productCategory",
-    PRODUCT_CATEGORY_LEVEL4: "productCategory",
-    PRODUCT_CATEGORY_LEVEL5: "productCategory",
-    PRODUCT_TYPE_LEVEL1: "productType",
-    PRODUCT_TYPE_LEVEL2: "productType",
-    PRODUCT_TYPE_LEVEL3: "productType",
-    PRODUCT_TYPE_LEVEL4: "productType",
-    PRODUCT_TYPE_LEVEL5: "productType",
-    PRODUCT_ITEM_ID: "productItemId",
-    PRODUCT_CHANNEL: "productChannel",
-    PRODUCT_CUSTOM_ATTRIBUTE0: "productCustomAttribute",
-    PRODUCT_CUSTOM_ATTRIBUTE1: "productCustomAttribute",
-    PRODUCT_CUSTOM_ATTRIBUTE2: "productCustomAttribute",
-    PRODUCT_CUSTOM_ATTRIBUTE3: "productCustomAttribute",
-    PRODUCT_CUSTOM_ATTRIBUTE4: "productCustomAttribute",
-  };
-  return map[dimension] ?? "productBrand";
+/**
+ * Dimensões de listing group na v25 (oneof ListingGroupFilterDimension).
+ * `valueField` diz em qual campo o valor entra; `fixed` são os campos que a API
+ * exige junto — e que continuam valendo no nó "everything else", que vai sem
+ * valor mas com o mesmo level/index dos irmãos.
+ */
+const LISTING_GROUP_DIMENSIONS: Record<string, {
+  key: string;
+  valueField: "value" | "categoryId" | "channel";
+  fixed?: Record<string, string>;
+}> = {
+  PRODUCT_BRAND: { key: "productBrand", valueField: "value" },
+  PRODUCT_ITEM_ID: { key: "productItemId", valueField: "value" },
+  PRODUCT_CHANNEL: { key: "productChannel", valueField: "channel" },
+  PRODUCT_CATEGORY_LEVEL1: { key: "productCategory", valueField: "categoryId", fixed: { level: "LEVEL1" } },
+  PRODUCT_CATEGORY_LEVEL2: { key: "productCategory", valueField: "categoryId", fixed: { level: "LEVEL2" } },
+  PRODUCT_CATEGORY_LEVEL3: { key: "productCategory", valueField: "categoryId", fixed: { level: "LEVEL3" } },
+  PRODUCT_CATEGORY_LEVEL4: { key: "productCategory", valueField: "categoryId", fixed: { level: "LEVEL4" } },
+  PRODUCT_CATEGORY_LEVEL5: { key: "productCategory", valueField: "categoryId", fixed: { level: "LEVEL5" } },
+  PRODUCT_TYPE_LEVEL1: { key: "productType", valueField: "value", fixed: { level: "LEVEL1" } },
+  PRODUCT_TYPE_LEVEL2: { key: "productType", valueField: "value", fixed: { level: "LEVEL2" } },
+  PRODUCT_TYPE_LEVEL3: { key: "productType", valueField: "value", fixed: { level: "LEVEL3" } },
+  PRODUCT_TYPE_LEVEL4: { key: "productType", valueField: "value", fixed: { level: "LEVEL4" } },
+  PRODUCT_TYPE_LEVEL5: { key: "productType", valueField: "value", fixed: { level: "LEVEL5" } },
+  PRODUCT_CUSTOM_ATTRIBUTE0: { key: "productCustomAttribute", valueField: "value", fixed: { index: "INDEX0" } },
+  PRODUCT_CUSTOM_ATTRIBUTE1: { key: "productCustomAttribute", valueField: "value", fixed: { index: "INDEX1" } },
+  PRODUCT_CUSTOM_ATTRIBUTE2: { key: "productCustomAttribute", valueField: "value", fixed: { index: "INDEX2" } },
+  PRODUCT_CUSTOM_ATTRIBUTE3: { key: "productCustomAttribute", valueField: "value", fixed: { index: "INDEX3" } },
+  PRODUCT_CUSTOM_ATTRIBUTE4: { key: "productCustomAttribute", valueField: "value", fixed: { index: "INDEX4" } },
+};
+
+/**
+ * Monta o case_value (ListingGroupFilterDimension) da v25.
+ * value === undefined → nó "everything else": mesma dimensão dos irmãos,
+ * com level/index e sem valor. Nó sem case_value a API lê como raiz
+ * ("Each Listing Group tree must have a single root").
+ */
+function buildListingGroupCaseValue(dimension: string, value?: string): Record<string, unknown> {
+  const spec = LISTING_GROUP_DIMENSIONS[dimension];
+  if (!spec) {
+    throw new Error(
+      `Dimensão de listing group inválida: "${dimension}". Válidas: ${Object.keys(LISTING_GROUP_DIMENSIONS).join(", ")}.`
+    );
+  }
+  const dim: Record<string, unknown> = { ...(spec.fixed ?? {}) };
+  if (value !== undefined) {
+    if (spec.valueField === "categoryId") {
+      // categoryId é int64 (ID do product_category_constant), não o nome da categoria.
+      const id = value.trim();
+      if (!/^\d+$/.test(id)) {
+        throw new Error(
+          `${dimension} exige o categoryId numérico (SELECT product_category_constant.category_id FROM product_category_constant), recebido "${value}".`
+        );
+      }
+      dim.categoryId = id;
+    } else if (spec.valueField === "channel") {
+      const channel = value.trim().toUpperCase();
+      if (channel !== "ONLINE" && channel !== "LOCAL") {
+        throw new Error(`PRODUCT_CHANNEL aceita apenas ONLINE ou LOCAL, recebido "${value}".`);
+      }
+      dim.channel = channel;
+    } else {
+      dim.value = value;
+    }
+  }
+  return { [spec.key]: dim };
 }
 
 /** Declaração obrigatória de propaganda política na UE (enum EuPoliticalAdvertisingStatus). */
@@ -1372,7 +1415,7 @@ export function registerGoogleAdsTools(
             targetContentNetwork: z.boolean().optional(),
           })
           .optional()
-          .describe("Network targeting. Default: Google Search only."),
+          .describe("Network targeting. Default depends on channelType: SEARCH = Google Search only; DISPLAY = Display Network only; PERFORMANCE_MAX/VIDEO/DEMAND_GEN = omitted (API default). Pass explicitly to override."),
       },
     },
     async ({ customerId, name, channelType, dailyBudgetMicros, biddingStrategy, targetCpaMicros, targetRoas, networkSettings }) => {
@@ -1380,6 +1423,22 @@ export function registerGoogleAdsTools(
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
+
+      // SHOPPING exige shoppingSetting.merchantId (+ feedLabel), que esta tool não coleta.
+      // Recusa ANTES da Step 1 para não deixar budget órfão quando o mutate falhar.
+      if (channelType === "SHOPPING") {
+        return {
+          content: [
+            text(
+              "create_campaign não cria campanhas SHOPPING: a API exige shoppingSetting.merchantId " +
+                "(e feedLabel), que esta tool não recebe.\n" +
+                "Use create_shopping_campaign — ela já trata merchantId, feedLabel e campaignPriority.\n" +
+                "Use list_merchant_centers para descobrir os Merchant Center vinculados à conta."
+            ),
+          ],
+          isError: true,
+        };
+      }
 
       // Step 1: Create budget
       const budgetResult = await client.mutateCampaignBudgets(customerId, [
@@ -1400,17 +1459,22 @@ export function registerGoogleAdsTools(
       }
 
       // Step 2: Create campaign
+      // networkSettings precisa ser coerente com o canal. O default antigo (só
+      // Google Search) ia para todos: em DISPLAY nascia uma campanha sem rede onde
+      // entregar, e PERFORMANCE_MAX/VIDEO/DEMAND_GEN não aceitam restrição de rede
+      // no create — para esses o campo é omitido, como fazem as tools irmãs.
+      const defaultNetworkSettings: Record<string, Record<string, boolean> | undefined> = {
+        SEARCH: { targetGoogleSearch: true, targetSearchNetwork: false, targetContentNetwork: false },
+        DISPLAY: { targetContentNetwork: true, targetGoogleSearch: false, targetSearchNetwork: false },
+      };
+      const effectiveNetworkSettings = networkSettings ?? defaultNetworkSettings[channelType];
       const campaignData: Record<string, unknown> = {
         name,
         status: "PAUSED",
         advertisingChannelType: channelType,
         campaignBudget: budgetResourceName,
         containsEuPoliticalAdvertising: EU_POLITICAL_DECLARATION,
-        networkSettings: networkSettings ?? {
-          targetGoogleSearch: true,
-          targetSearchNetwork: false,
-          targetContentNetwork: false,
-        },
+        ...(effectiveNetworkSettings ? { networkSettings: effectiveNetworkSettings } : {}),
       };
 
       // Bidding strategy
@@ -1550,6 +1614,12 @@ export function registerGoogleAdsTools(
       description: [
         "Create an ad group within a campaign.",
         "WRITE OPERATION — created PAUSED by default.",
+        "",
+        "The ad group type is DERIVED from the campaign's advertising_channel_type:",
+        "SEARCH = SEARCH_STANDARD, DISPLAY = DISPLAY_STANDARD,",
+        "SHOPPING = SHOPPING_PRODUCT_ADS, VIDEO = VIDEO_RESPONSIVE.",
+        "Other channels (e.g. DEMAND_GEN) are created without an explicit type.",
+        "PERFORMANCE_MAX campaigns do NOT use ad groups — use create_asset_group.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
@@ -1559,27 +1629,81 @@ export function registerGoogleAdsTools(
           .number()
           .optional()
           .describe("Default CPC bid in MICROS. Only for MANUAL_CPC campaigns."),
+        type: z
+          .enum([
+            "SEARCH_STANDARD",
+            "SEARCH_DYNAMIC_ADS",
+            "DISPLAY_STANDARD",
+            "SHOPPING_PRODUCT_ADS",
+            "VIDEO_RESPONSIVE",
+            "VIDEO_BUMPER",
+            "VIDEO_TRUE_VIEW_IN_STREAM",
+            "VIDEO_TRUE_VIEW_IN_DISPLAY",
+            "VIDEO_NON_SKIPPABLE_IN_STREAM",
+            "VIDEO_EFFICIENT_REACH",
+          ])
+          .optional()
+          .describe("OPTIONAL override. Default: derived from the campaign's channel type."),
       },
     },
-    async ({ customerId, campaignId, name, cpcBidMicros }) => {
+    async ({ customerId, campaignId, name, cpcBidMicros, type }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
 
+      // O type do ad group precisa casar com o canal da campanha — SEARCH_STANDARD dentro
+      // de campanha DISPLAY/VIDEO/SHOPPING é recusado pela API. Consulta o canal antes.
+      const campRows = await client.searchStream(customerId,
+        `SELECT campaign.id, campaign.advertising_channel_type FROM campaign WHERE campaign.id = ${campaignId}`);
+      const camp = (campRows[0]?.campaign ?? {}) as Record<string, unknown>;
+      const channel = camp.advertisingChannelType as string | undefined;
+      if (!channel) {
+        return {
+          content: [text(`Campanha ${campaignId} não encontrada na conta ${customerId}.`)],
+          isError: true,
+        };
+      }
+      if (channel === "PERFORMANCE_MAX") {
+        return {
+          content: [text("Campanhas PERFORMANCE_MAX não têm ad groups — use create_asset_group.")],
+          isError: true,
+        };
+      }
+
+      // Canais sem mapeamento fixo (ex.: DEMAND_GEN) ficam SEM `type`: a API atribui o padrão
+      // do canal. Enviar um type errado é pior do que omitir.
+      const AD_GROUP_TYPE_BY_CHANNEL: Record<string, string> = {
+        SEARCH: "SEARCH_STANDARD",
+        DISPLAY: "DISPLAY_STANDARD",
+        SHOPPING: "SHOPPING_PRODUCT_ADS",
+        VIDEO: "VIDEO_RESPONSIVE",
+      };
+      const adGroupType: string | undefined = type ?? AD_GROUP_TYPE_BY_CHANNEL[channel];
+
       const adGroupData: Record<string, unknown> = {
         name,
         campaign: `customers/${cid}/campaigns/${campaignId}`,
         status: "PAUSED",
-        type: "SEARCH_STANDARD",
       };
+      if (adGroupType) {
+        adGroupData.type = adGroupType;
+      }
 
       if (cpcBidMicros) {
         adGroupData.cpcBidMicros = String(cpcBidMicros);
       }
 
       const result = await client.mutateAdGroups(customerId, [{ create: adGroupData }]);
-      return { content: [text(`Ad group created (PAUSED): ${name}\n\n${formatJson(result)}`)] };
+      return {
+        content: [
+          text(
+            `Ad group created (PAUSED): ${name}\n` +
+              `- Campaign channel: ${channel}\n` +
+              `- Ad group type: ${adGroupType ?? "(default do canal)"}\n\n${formatJson(result)}`
+          ),
+        ],
+      };
     }
   );
 
@@ -2371,20 +2495,29 @@ export function registerGoogleAdsTools(
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
 
+      const strategy = biddingStrategy ?? "MAXIMIZE_CONVERSIONS";
+      // Valida ANTES de criar o orçamento: TARGET_CPA sem targetCpaMicros não casaria
+      // com nenhum ramo, a campanha subiria sem estratégia de lance, a API rejeitaria
+      // e o budget já criado ficaria órfão na conta.
+      if (strategy === "TARGET_CPA" && !targetCpaMicros) {
+        return { content: [text("TARGET_CPA exige targetCpaMicros (ex: 50000000 = R$50 por conversão).")], isError: true };
+      }
+
       const budgetResult = await client.mutateCampaignBudgets(customerId, [
         { create: { name: `Budget — ${name}`, amountMicros: String(dailyBudgetMicros), deliveryMethod: "STANDARD", explicitlyShared: false } },
       ]);
       const budgetResource = ((budgetResult as Record<string, unknown>).results as Array<Record<string, unknown>>)?.[0]?.resourceName as string;
 
-      const strategy = biddingStrategy ?? "MAXIMIZE_CONVERSIONS";
       const campaignData: Record<string, unknown> = {
         name, status: "PAUSED", advertisingChannelType: "DISPLAY", campaignBudget: budgetResource, containsEuPoliticalAdvertising: EU_POLITICAL_DECLARATION,
         networkSettings: { targetContentNetwork: true, targetGoogleSearch: false, targetSearchNetwork: false },
       };
-      if (strategy === "MAXIMIZE_CONVERSIONS") campaignData.maximizeConversions = {};
-      else if (strategy === "MAXIMIZE_CONVERSION_VALUE") campaignData.maximizeConversionValue = {};
-      else if (strategy === "TARGET_CPA" && targetCpaMicros) campaignData.maximizeConversions = { targetCpaMicros: String(targetCpaMicros) };
+      if (strategy === "MAXIMIZE_CONVERSION_VALUE") campaignData.maximizeConversionValue = {};
+      else if (strategy === "TARGET_CPA") campaignData.maximizeConversions = { targetCpaMicros: String(targetCpaMicros) };
       else if (strategy === "MANUAL_CPC") campaignData.manualCpc = { enhancedCpcEnabled: true };
+      // else final: MAXIMIZE_CONVERSIONS (default) e qualquer valor novo do enum —
+      // garante que campaignData nunca sai sem estratégia de lance.
+      else campaignData.maximizeConversions = {};
 
       const result = await client.mutateCampaigns(customerId, [{ create: campaignData }]);
       const resource = ((result as Record<string, unknown>).results as Array<Record<string, unknown>>)?.[0]?.resourceName as string;
@@ -2498,38 +2631,72 @@ export function registerGoogleAdsTools(
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
-        adGroupId: z.string().describe("Ad group ID."),
-        youtubeVideoId: z.string().describe("YouTube video ID."),
+        adGroupId: z.string().describe("Ad group ID (tipo VIDEO_RESPONSIVE, em campanha Video action)."),
+        youtubeVideoId: z.string().describe("YouTube video ID. Reaproveita o asset se o vídeo já existir na conta; senão cria."),
         finalUrl: z.string().describe("Landing page URL."),
-        headline: z.string().optional().describe("Ad headline (for in-feed/discovery)."),
-        description: z.string().optional().describe("Ad description."),
-        callToAction: z.string().optional().describe("CTA text (e.g. 'Saiba mais', 'Comprar agora'). Max 10 chars."),
+        headline: z.string().optional().describe("Headline (max 15 chars). Obrigatório na prática: a API rejeita o anúncio sem ele."),
+        description: z.string().optional().describe("Description (max 70 chars). Obrigatório na prática."),
+        callToAction: z.string().optional().describe("CTA text (e.g. 'Saiba mais', 'Comprar agora'). Max 10 chars. Obrigatório na prática."),
+        logoAssetId: z.string().optional().describe("ID de um asset IMAGE quadrado (1:1, ex.: 1200x1200) já na conta, usado como logo — a API exige ao menos um. Ache com get_image_assets."),
+        businessName: z.string().optional().describe("Nome da marca/anunciante exibido no anúncio (max 25 chars). Obrigatório na prática: a API exige business_name no responsive video ad."),
       },
     },
-    async ({ customerId, adGroupId, youtubeVideoId, finalUrl, headline, description, callToAction }) => {
+    async ({ customerId, adGroupId, youtubeVideoId, finalUrl, headline, description, callToAction, logoAssetId, businessName }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
 
+      // VideoResponsiveAdInfo (v25) só tem coleções — videos[], headlines[],
+      // longHeadlines[], descriptions[], callToActions[], logoImages[] — e a API
+      // exige ao menos um item em cada, além de ad.name. O schema mantém os
+      // campos opcionais para não mudar o contrato; a exigência fica explícita aqui.
+      const faltando = [!headline && "headline", !description && "description", !callToAction && "callToAction", !logoAssetId && "logoAssetId", !businessName && "businessName"].filter(Boolean);
+      if (faltando.length > 0) {
+        return { content: [text(`Video responsive ad exige ${faltando.join(", ")} (a API rejeita o anúncio sem eles).`)], isError: true };
+      }
+
+      // videos[].asset é um resource name de asset YOUTUBE_VIDEO — a API não aceita
+      // o id do YouTube direto. Reaproveita o asset se o vídeo já existir na conta;
+      // senão cria. Sem id temporário em campo aninhado, cujo suporte não é
+      // documentado.
+      const found = await client.searchStream(customerId,
+        `SELECT asset.resource_name FROM asset WHERE asset.type = 'YOUTUBE_VIDEO' AND asset.youtube_video_asset.youtube_video_id = '${gaqlLiteral(youtubeVideoId)}' LIMIT 1`);
+      let videoAsset = (found[0]?.asset as Record<string, unknown> | undefined)?.resourceName as string | undefined;
+      if (!videoAsset) {
+        const assetResult = await client.mutateAssets(customerId, [{ create: { type: "YOUTUBE_VIDEO", youtubeVideoAsset: { youtubeVideoId } } }]);
+        videoAsset = ((assetResult as Record<string, unknown>).results as Array<Record<string, unknown>>)?.[0]?.resourceName as string | undefined;
+      }
+      if (!videoAsset) {
+        return { content: [text(`Error: não foi possível obter o asset do vídeo ${youtubeVideoId}.`)], isError: true };
+      }
+
       const videoAdInfo: Record<string, unknown> = {
-        video: { youtubeVideoId },
+        videos: [{ asset: videoAsset }],
+        headlines: [{ text: headline }],
+        longHeadlines: [{ text: headline }],
+        descriptions: [{ text: description }],
+        callToActions: [{ text: callToAction }],
+        // A API exige ao menos um logo (asset IMAGE 1:1) no responsive video ad.
+        logoImages: [{ asset: `customers/${cid}/assets/${logoAssetId}` }],
+        // business_name é Required na v25 (nome da marca, max 25 chars) — sem ele a
+        // API devolve REQUIRED no nível do video_responsive_ad, sem apontar o campo.
+        businessName: { text: businessName },
       };
-      if (headline) videoAdInfo.headline = { text: headline };
-      if (description) videoAdInfo.description1 = { text: description };
-      if (callToAction) videoAdInfo.callToAction = { text: callToAction };
 
       const adData: Record<string, unknown> = {
         adGroup: `customers/${cid}/adGroups/${adGroupId}`,
         status: "PAUSED",
         ad: {
+          // ad.name é obrigatório para responsive video ad.
+          name: `Video ${youtubeVideoId} — ${headline}`,
           finalUrls: [finalUrl],
           videoResponsiveAd: videoAdInfo,
         },
       };
 
       const result = await client.mutateAdGroupAds(customerId, [{ create: adData }]);
-      return { content: [text(`Video ad created (PAUSED) with video ${youtubeVideoId}.\n\n${formatJson(result)}`)] };
+      return { content: [text(`Video ad created (PAUSED) with video ${youtubeVideoId} (asset ${videoAsset}).\n\n${formatJson(result)}`)] };
     }
   );
 
@@ -2561,12 +2728,19 @@ export function registerGoogleAdsTools(
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
 
+      const strategy = biddingStrategy ?? "MAXIMIZE_CONVERSION_VALUE";
+      // Valida ANTES de criar o orçamento: TARGET_ROAS sem targetRoas não casaria
+      // com nenhum ramo, a campanha subiria sem estratégia de lance, a API rejeitaria
+      // e o budget já criado ficaria órfão na conta.
+      if (strategy === "TARGET_ROAS" && !targetRoas) {
+        return { content: [text("TARGET_ROAS exige targetRoas (ex: 5.0 = 500%).")], isError: true };
+      }
+
       const budgetResult = await client.mutateCampaignBudgets(customerId, [
         { create: { name: `Budget — ${name}`, amountMicros: String(dailyBudgetMicros), deliveryMethod: "STANDARD", explicitlyShared: false } },
       ]);
       const budgetResource = ((budgetResult as Record<string, unknown>).results as Array<Record<string, unknown>>)?.[0]?.resourceName as string;
 
-      const strategy = biddingStrategy ?? "MAXIMIZE_CONVERSION_VALUE";
       const campaignData: Record<string, unknown> = {
         name, status: "PAUSED", advertisingChannelType: "SHOPPING", campaignBudget: budgetResource, containsEuPoliticalAdvertising: EU_POLITICAL_DECLARATION,
         shoppingSetting: {
@@ -2576,10 +2750,12 @@ export function registerGoogleAdsTools(
         },
         networkSettings: { targetGoogleSearch: true, targetSearchNetwork: true, targetContentNetwork: false },
       };
-      if (strategy === "MAXIMIZE_CONVERSION_VALUE") campaignData.maximizeConversionValue = targetRoas ? { targetRoas } : {};
-      else if (strategy === "MAXIMIZE_CONVERSIONS") campaignData.maximizeConversions = {};
+      if (strategy === "MAXIMIZE_CONVERSIONS") campaignData.maximizeConversions = {};
       else if (strategy === "MANUAL_CPC") campaignData.manualCpc = { enhancedCpcEnabled: true };
-      else if (strategy === "TARGET_ROAS" && targetRoas) campaignData.maximizeConversionValue = { targetRoas };
+      else if (strategy === "TARGET_ROAS") campaignData.maximizeConversionValue = { targetRoas };
+      // else final: MAXIMIZE_CONVERSION_VALUE (default) e qualquer valor novo do enum —
+      // garante que campaignData nunca sai sem estratégia de lance.
+      else campaignData.maximizeConversionValue = targetRoas ? { targetRoas } : {};
 
       const result = await client.mutateCampaigns(customerId, [{ create: campaignData }]);
       const resource = ((result as Record<string, unknown>).results as Array<Record<string, unknown>>)?.[0]?.resourceName as string;
@@ -2612,18 +2788,27 @@ export function registerGoogleAdsTools(
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
 
+      const strategy = biddingStrategy ?? "MAXIMIZE_CONVERSIONS";
+      // Valida ANTES de criar o orçamento: TARGET_CPA sem targetCpaMicros não casaria
+      // com nenhum ramo, a campanha subiria sem estratégia de lance, a API rejeitaria
+      // e o budget já criado ficaria órfão na conta.
+      if (strategy === "TARGET_CPA" && !targetCpaMicros) {
+        return { content: [text("TARGET_CPA exige targetCpaMicros (ex: 50000000 = R$50 por conversão).")], isError: true };
+      }
+
       const budgetResult = await client.mutateCampaignBudgets(customerId, [
         { create: { name: `Budget — ${name}`, amountMicros: String(dailyBudgetMicros), deliveryMethod: "STANDARD", explicitlyShared: false } },
       ]);
       const budgetResource = ((budgetResult as Record<string, unknown>).results as Array<Record<string, unknown>>)?.[0]?.resourceName as string;
 
-      const strategy = biddingStrategy ?? "MAXIMIZE_CONVERSIONS";
       const campaignData: Record<string, unknown> = {
         name, status: "PAUSED", advertisingChannelType: "DEMAND_GEN", campaignBudget: budgetResource, containsEuPoliticalAdvertising: EU_POLITICAL_DECLARATION,
       };
-      if (strategy === "MAXIMIZE_CONVERSIONS") campaignData.maximizeConversions = targetCpaMicros ? { targetCpaMicros: String(targetCpaMicros) } : {};
-      else if (strategy === "MAXIMIZE_CONVERSION_VALUE") campaignData.maximizeConversionValue = {};
-      else if (strategy === "TARGET_CPA" && targetCpaMicros) campaignData.maximizeConversions = { targetCpaMicros: String(targetCpaMicros) };
+      if (strategy === "MAXIMIZE_CONVERSION_VALUE") campaignData.maximizeConversionValue = {};
+      else if (strategy === "TARGET_CPA") campaignData.maximizeConversions = { targetCpaMicros: String(targetCpaMicros) };
+      // else final: MAXIMIZE_CONVERSIONS (default) e qualquer valor novo do enum —
+      // garante que campaignData nunca sai sem estratégia de lance.
+      else campaignData.maximizeConversions = targetCpaMicros ? { targetCpaMicros: String(targetCpaMicros) } : {};
 
       const result = await client.mutateCampaigns(customerId, [{ create: campaignData }]);
       const resource = ((result as Record<string, unknown>).results as Array<Record<string, unknown>>)?.[0]?.resourceName as string;
@@ -3321,23 +3506,50 @@ export function registerGoogleAdsTools(
       const cid = customerId.replace(/-/g, "");
       const agResource = `customers/${cid}/assetGroups/${assetGroupId}`;
 
-      const existing = await client.searchStream(customerId,
-        `SELECT asset_group_listing_group_filter.resource_name FROM asset_group_listing_group_filter WHERE asset_group.id = ${assetGroupId}`);
-      if (existing.length > 0) {
-        const removeOps = existing.map(r => ({ remove: (r.assetGroupListingGroupFilter as Record<string, unknown>)?.resourceName as string }));
-        await client.mutateAssetGroupListingGroupFilters(customerId, removeOps as unknown as import("./google-ads-client.js").MutateOperation[]);
+      // Valida tudo ANTES de tocar na conta: buildListingGroupCaseValue lança em
+      // dimensão desconhecida ou valor inválido, e irmãos sob a mesma SUBDIVISION
+      // precisam compartilhar a dimensão. Se isso falhasse depois do remove, a
+      // árvore antiga já teria sido apagada.
+      if (filters.length === 0) {
+        return { content: [text("Error: filters vazio — informe ao menos um filtro.")], isError: true };
+      }
+      const dimension = filters[0].dimension;
+      let caseValues: Array<Record<string, unknown>>;
+      let otherCaseValue: Record<string, unknown>;
+      try {
+        if (filters.some(f => f.dimension !== dimension)) {
+          throw new Error(`Todos os filtros precisam usar a mesma dimensão sob uma SUBDIVISION (recebido: ${[...new Set(filters.map(f => f.dimension))].join(", ")}).`);
+        }
+        caseValues = filters.map(f => buildListingGroupCaseValue(f.dimension, f.value));
+        otherCaseValue = buildListingGroupCaseValue(dimension);
+      } catch (err) {
+        return { content: [text(`Filtro inválido: ${(err as Error).message}`)], isError: true };
       }
 
-      const rootResult = await client.mutateAssetGroupListingGroupFilters(customerId,
-        [{ create: { assetGroup: agResource, type: "SUBDIVISION", listingSource: "SHOPPING" } }] as unknown as import("./google-ads-client.js").MutateOperation[]);
-      const rootResource = ((rootResult as Record<string, unknown>).results as Array<Record<string, unknown>>)?.[0]?.resourceName as string;
+      const existing = await client.searchStream(customerId,
+        `SELECT asset_group_listing_group_filter.resource_name FROM asset_group_listing_group_filter WHERE asset_group.id = ${assetGroupId}`);
+      const removeOps = existing.map(r => ({ remove: (r.assetGroupListingGroupFilter as Record<string, unknown>)?.resourceName as string }));
 
-      const childOps: Array<Record<string, unknown>> = filters.map(f => ({
-        create: { assetGroup: agResource, parentListingGroupFilter: rootResource, type: f.included === false ? "UNIT_EXCLUDED" : "UNIT_INCLUDED", listingSource: "SHOPPING", caseValue: { [dimensionToCaseKey(f.dimension)]: { value: f.value } } },
-      }));
-      childOps.push({ create: { assetGroup: agResource, parentListingGroupFilter: rootResource, type: "UNIT_INCLUDED", listingSource: "SHOPPING" } });
+      // Uma única requisição: a API valida a árvore ao fim de CADA request, então
+      // raiz criada sem filhos, ou remove sem a árvore nova, deixariam estado
+      // inválido no meio do caminho. A raiz usa id temporário (-1) e os filhos
+      // apontam para ele, como nos exemplos de PMax retail do Google.
+      const rootTemp = `customers/${cid}/assetGroupListingGroupFilters/${assetGroupId}~-1`;
+      // "Everything else": se algum filtro é de inclusão, o resto fica de fora
+      // (só o listado veicula); se todos são exclusões, o resto entra.
+      const othersType = filters.some(f => f.included !== false) ? "UNIT_EXCLUDED" : "UNIT_INCLUDED";
+      const ops: Array<Record<string, unknown>> = [
+        ...removeOps,
+        { create: { resourceName: rootTemp, assetGroup: agResource, type: "SUBDIVISION", listingSource: "SHOPPING" } },
+        ...filters.map((f, i) => ({
+          create: { assetGroup: agResource, parentListingGroupFilter: rootTemp, type: f.included === false ? "UNIT_EXCLUDED" : "UNIT_INCLUDED", listingSource: "SHOPPING", caseValue: caseValues[i] },
+        })),
+        // Mesma dimensão dos irmãos, sem valor. Sem caseValue a API lê o nó como
+        // segunda raiz ("Each Listing Group tree must have a single root").
+        { create: { assetGroup: agResource, parentListingGroupFilter: rootTemp, type: othersType, listingSource: "SHOPPING", caseValue: otherCaseValue } },
+      ];
 
-      const childResult = await client.mutateAssetGroupListingGroupFilters(customerId, childOps as unknown as import("./google-ads-client.js").MutateOperation[]);
+      const childResult = await client.mutateAssetGroupListingGroupFilters(customerId, ops as unknown as import("./google-ads-client.js").MutateOperation[]);
       return { content: [text(`Listing group filters set for asset group ${assetGroupId}:\n${filters.map(f => `${f.included === false ? "EXCLUDE" : "INCLUDE"} ${f.dimension} = "${f.value}"`).join("\n")}\n\n${formatJson(childResult)}`)] };
     }
   );
@@ -3346,8 +3558,14 @@ export function registerGoogleAdsTools(
     "set_campaign_locations",
     {
       description: [
-        "Set geographic targeting for a campaign.",
+        "Add geographic targeting to a campaign.",
         "WRITE OPERATION.",
+        "",
+        "Por padrão ADICIONA (replace=false): o resultado é a UNIÃO com a segmentação",
+        "geográfica que a campanha já tinha — não substitui nada.",
+        "Use replace=true para substituir de verdade: remove antes os critérios de",
+        "LOCATION existentes da mesma polaridade (os positivos, ou as exclusões quando",
+        "negative=true) e preserva idioma, público, dispositivo e demais critérios.",
         "",
         "Common IDs: Brazil=2076, São Paulo state=20106, São Paulo city=1001773, Portugal=2620, USA=2840.",
         "Find IDs: run_gaql SELECT geo_target_constant.id, geo_target_constant.name FROM geo_target_constant WHERE geo_target_constant.name LIKE '%São Paulo%'",
@@ -3357,17 +3575,50 @@ export function registerGoogleAdsTools(
         campaignId: z.string().describe("Campaign ID."),
         locationIds: flexArray(z.string()).describe("geo_target_constant IDs."),
         negative: z.boolean().optional().describe("True=exclude. Default: false."),
+        replace: z.boolean().optional().describe("True=substitui a segmentação geográfica atual (remove só critérios de LOCATION da mesma polaridade). Default: false (adiciona)."),
       },
     },
-    async ({ customerId, campaignId, locationIds: rawLocationIds, negative }) => {
+    async ({ customerId, campaignId, locationIds: rawLocationIds, negative, replace }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
       const locationIds = ensureArray<string>(rawLocationIds);
-      const ops = locationIds.map(locId => ({ create: { campaign: `customers/${cid}/campaigns/${campaignId}`, location: { geoTargetConstant: `geoTargetConstants/${locId}` }, negative: negative ?? false } }));
+      const isNegative = negative ?? false;
+      if (locationIds.length === 0) {
+        return { content: [text("Error: locationIds vazio — informe ao menos um geo_target_constant ID.")], isError: true };
+      }
+
+      let removedCount = 0;
+      if (replace) {
+        // campaignId entra cru na GAQL: exigir numérico impede que um valor manipulado
+        // amplie o WHERE e faça o remove alcançar critérios de outras campanhas.
+        if (!/^\d+$/.test(campaignId)) {
+          return { content: [text("Error: campaignId inválido — use apenas o ID numérico da campanha.")], isError: true };
+        }
+        const existing = await client.searchStream(customerId,
+          `SELECT campaign_criterion.resource_name, campaign_criterion.type, campaign_criterion.negative
+           FROM campaign_criterion
+           WHERE campaign.id = ${campaignId}
+             AND campaign_criterion.type = 'LOCATION'
+             AND campaign_criterion.status != 'REMOVED'`);
+        const removeOps = existing
+          .map(r => r.campaignCriterion as Record<string, unknown> | undefined)
+          // Dupla checagem do type no cliente + negative=false vem OMITIDO no JSON da
+          // API (default de proto3), então undefined tem que valer false.
+          .filter((cc): cc is Record<string, unknown> =>
+            !!cc && cc.type === "LOCATION" && ((cc.negative as boolean) ?? false) === isNegative && !!cc.resourceName)
+          .map(cc => ({ remove: cc.resourceName as string }));
+        if (removeOps.length > 0) {
+          await client.mutateCampaignCriteria(customerId, removeOps as unknown as import("./google-ads-client.js").MutateOperation[]);
+          removedCount = removeOps.length;
+        }
+      }
+
+      const ops = locationIds.map(locId => ({ create: { campaign: `customers/${cid}/campaigns/${campaignId}`, location: { geoTargetConstant: `geoTargetConstants/${locId}` }, negative: isNegative } }));
       const result = await client.mutateCampaignCriteria(customerId, ops as unknown as import("./google-ads-client.js").MutateOperation[]);
-      return { content: [text(`${negative ? "Excluded" : "Targeted"} ${locationIds.length} location(s) for campaign ${campaignId}.\n\n${formatJson(result)}`)] };
+      const mode = replace ? `substituindo (${removedCount} critério(s) de LOCATION removido(s))` : "adicionando à segmentação existente";
+      return { content: [text(`${isNegative ? "Excluded" : "Targeted"} ${locationIds.length} location(s) for campaign ${campaignId} — ${mode}.\n\n${formatJson(result)}`)] };
     }
   );
 
@@ -3555,8 +3806,11 @@ export function registerGoogleAdsTools(
       if (finalUrl) { adUpdate.finalUrls = [finalUrl]; updateFields.push("final_urls"); }
       if (headlines) { adUpdate.responsiveSearchAd = { ...(adUpdate.responsiveSearchAd as Record<string, unknown> ?? {}), headlines: headlines.map(h => ({ text: h })) }; updateFields.push("responsive_search_ad.headlines"); }
       if (descriptions) { adUpdate.responsiveSearchAd = { ...(adUpdate.responsiveSearchAd as Record<string, unknown> ?? {}), descriptions: descriptions.map(d => ({ text: d })) }; updateFields.push("responsive_search_ad.descriptions"); }
-      if (path1) { adUpdate.path1 = path1; updateFields.push("path1"); }
-      if (path2) { adUpdate.path2 = path2; updateFields.push("path2"); }
+      // path1/path2 pertencem a ResponsiveSearchAdInfo, não à mensagem Ad (v25):
+      // o objeto e o updateMask precisam usar o caminho aninhado responsive_search_ad.*
+      // ("" é valor válido e limpa o path, por isso o teste é !== undefined)
+      if (path1 !== undefined) { adUpdate.responsiveSearchAd = { ...(adUpdate.responsiveSearchAd as Record<string, unknown> ?? {}), path1 }; updateFields.push("responsive_search_ad.path1"); }
+      if (path2 !== undefined) { adUpdate.responsiveSearchAd = { ...(adUpdate.responsiveSearchAd as Record<string, unknown> ?? {}), path2 }; updateFields.push("responsive_search_ad.path2"); }
       if (updateFields.length === 0) return { content: [text("Error: provide at least one field.")], isError: true };
       const result = await client.mutate(customerId, "ads", [{ update: adUpdate, updateMask: updateFields.join(",") }]);
       return { content: [text(`Ad ${adId} updated: ${updateFields.join(", ")}.\n\n${formatJson(result)}`)] };
@@ -3631,7 +3885,8 @@ export function registerGoogleAdsTools(
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
       const priceOfferings = items.map(i => ({ header: i.header, description: i.description, price: { amountMicros: String(Math.round(i.priceAmount * 1_000_000)), currencyCode: i.currencyCode ?? "BRL" }, finalUrl: i.finalUrl, ...(i.unit && { unit: i.unit }) }));
-      const assetResult = await client.mutateAssets(customerId, [{ create: { type: "PRICE", priceAsset: { type: priceType, priceOfferings } } }]);
+      // PriceAsset da v25 exige languageCode (BCP 47) além de type/priceOfferings.
+      const assetResult = await client.mutateAssets(customerId, [{ create: { type: "PRICE", priceAsset: { type: priceType, languageCode: "pt-BR", priceOfferings } } }]);
       const assetResource = ((assetResult as Record<string, unknown>).results as Array<Record<string, unknown>>)?.[0]?.resourceName as string;
       await client.mutateCampaignAssets(customerId, [{ create: { campaign: `customers/${cid}/campaigns/${campaignId}`, asset: assetResource, fieldType: "PRICE" } }] as unknown as import("./google-ads-client.js").MutateOperation[]);
       return { content: [text(`Price extension (${priceType}) with ${items.length} items. Linked to campaign ${campaignId}.`)] };
@@ -3641,14 +3896,14 @@ export function registerGoogleAdsTools(
   mcp.registerTool(
     "create_promotion_extension",
     {
-      description: "Create promotion extension. WRITE OPERATION. Occasions: BLACK_FRIDAY, CHRISTMAS, CARNIVAL, NONE.",
+      description: "Create promotion extension. WRITE OPERATION. Requires percentOff or moneyAmountOff. Occasions (optional): BLACK_FRIDAY, CHRISTMAS, CARNIVAL, NEW_YEARS... — omit for none.",
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
         campaignId: z.string().describe("Campaign ID."),
         promotionTarget: z.string().describe("What's promoted (e.g. 'Frete Grátis')."),
         percentOff: z.number().optional().describe("Percent off (e.g. 20)."),
         moneyAmountOff: z.number().optional().describe("Money off in currency."),
-        occasion: z.string().optional().describe("Default: NONE."),
+        occasion: z.string().optional().describe("PromotionExtensionOccasion (e.g. BLACK_FRIDAY, CHRISTMAS, CARNIVAL). Omit for no occasion — NONE is not a valid value."),
         finalUrl: z.string().describe("Landing page."),
       },
     },
@@ -3657,7 +3912,11 @@ export function registerGoogleAdsTools(
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
-      const promoData: Record<string, unknown> = { promotionTarget, discountModifier: "NONE", occasion: occasion ?? "NONE", redemptionStartDate: new Date().toISOString().split("T")[0], redemptionEndDate: new Date(Date.now() + 90*24*60*60*1000).toISOString().split("T")[0] };
+      // v25: discountModifier só aceita UP_TO e PromotionExtensionOccasion não tem NONE —
+      // ambos precisam ser OMITIDOS quando não informados (a API rejeita o enum "NONE").
+      const promoData: Record<string, unknown> = { promotionTarget, languageCode: "pt-BR", redemptionStartDate: new Date().toISOString().split("T")[0], redemptionEndDate: new Date(Date.now() + 90*24*60*60*1000).toISOString().split("T")[0] };
+      const occasionCode = occasion?.trim().toUpperCase();
+      if (occasionCode && occasionCode !== "NONE" && occasionCode !== "UNSPECIFIED" && occasionCode !== "UNKNOWN") promoData.occasion = occasionCode;
       if (percentOff) promoData.percentOff = percentOff * 10000;
       if (moneyAmountOff) promoData.moneyAmountOff = { amountMicros: String(Math.round(moneyAmountOff * 1_000_000)), currencyCode: "BRL" };
       const assetResult = await client.mutateAssets(customerId, [{ create: { type: "PROMOTION", promotionAsset: promoData, finalUrls: [finalUrl] } }]);
