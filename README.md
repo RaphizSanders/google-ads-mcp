@@ -28,7 +28,7 @@ Funciona em modo **local** (stdio) e **remoto** (HTTP/SSE), com suporte a deploy
 | `GOOGLE_ADS_API_VERSION` | Nao | Versao da API (default: v25 — v21 ja foi desligada, v22/v23 estao proximas do sunset) |
 | `MCP_API_KEY` | Em qualquer modo HTTP | Chave de autenticacao (`Authorization: Bearer`). Obrigatoria sempre que `PORT` estiver definido — sem ela o endpoint aceitaria qualquer requisicao. Nao se aplica ao stdio |
 | `MCP_ALLOWED_HOSTS` | Em qualquer modo HTTP | Hostnames aceitos, separados por vírgula e sem porta. Ativa proteção contra DNS rebinding |
-| `ALLOWED_CUSTOMER_IDS` | Em qualquer modo HTTP | Allowlist não vazia de contas específicas. IDs de 10 dígitos separados por vírgula; ausência, vazio ou valor malformado recusam o boot. **Em stdio é opcional**: ausente significa "sem filtro", e todas as contas da MCC ficam acessíveis — é o que permite `list_accounts` funcionar como descoberta |
+| `ALLOWED_CUSTOMER_IDS` | Em qualquer modo HTTP | Escopo de contas. **`*`** = toda conta alcancavel pelo MCC do login (agencia/gestor com um MCC so). Ou uma lista nao vazia de IDs de 10 digitos separados por virgula (um cliente por servico). Ausencia ou vazio derruba o boot — vazio e engano de configuracao, nao curinga; e `*` nao se mistura com IDs. Em stdio segue opcional. |
 | `GOOGLE_ADS_READ_ONLY` | Nao | Modo somente leitura (`true`/`1`). Remove as 56 tools mutáveis do catálogo e bloqueia mutações no cliente. Ausente mantém compatibilidade com o comportamento atual |
 | `GOOGLE_ADS_DRY_RUN` | Nao | Dry-run (`true`/`1`). Envia `validateOnly=true` nos endpoints `:mutate` e nos uploads de conversão: a API valida o payload inteiro e devolve os mesmos erros de uma gravação real, sem alterar a conta. `apply_recommendation`/`dismiss_recommendation` não aceitam `validateOnly` e são **recusados** em dry-run (fail-closed). Tools encadeadas (orçamento→campanha, asset→vínculo) validam só o primeiro passo — a API não devolve `results` em `validateOnly`, então o passo seguinte falha com mensagem de "resource ausente", não por defeito de payload. Desligado por padrão |
 | `PORT` | Nao | Se definido, inicia servidor HTTP. Sem `PORT`, usa stdio |
@@ -426,7 +426,7 @@ create_remarketing_list (URL /cart, excluir /thank-you, 30 dias)
 - **Tudo PAUSED por padrao**: Todas as tools de criacao criam objetos pausados.
 - **Budgets em MICROS**: R$1,00 = 1.000.000 micros. Descricoes explicitas.
 - **`MCP_API_KEY`**: Protege o endpoint HTTP.
-- **`ALLOWED_CUSTOMER_IDS`**: Restringe quais contas o agente pode acessar. Obrigatoria sob HTTP; opcional em stdio.
+- **`ALLOWED_CUSTOMER_IDS`**: Escopo de contas. Obrigatoria sob HTTP (ausente/vazia derruba o boot), opcional em stdio. Use `*` para servir todo o MCC (agencia) ou a lista de IDs para isolar um cliente por servico.
 - **`GOOGLE_ADS_DRY_RUN`**: Valida payloads de escrita contra a API sem gravar (`validateOnly`).
 - **Delete com confirmacao**: `confirm: true` obrigatorio para remocao.
 - **OAuth auto-refresh**: Token renova automaticamente, persiste no arquivo.

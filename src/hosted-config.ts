@@ -60,12 +60,19 @@ export function parseAllowedHosts(raw: string | undefined): string[] {
  * Ids are stored normalised without hyphens because Google writes them both
  * ways and a mismatch here would silently deny instead of silently allow.
  */
+/** Curinga EXPLICITO: o serviço atende toda conta alcançável pelo MCC do login.
+ *  Diferente de vazio — vazio é engano de configuração e continua derrubando o
+ *  boot; "*" é o operador declarando o escopo (agência/gestor com um MCC só). */
+export const ALLOW_ALL_CUSTOMERS = "*";
+
 export function parseAllowedCustomerIds(raw: string | undefined): string[] {
   if (raw === undefined || raw.trim() === "") {
     throw new Error(
-      "ALLOWED_CUSTOMER_IDS is required: an empty allowlist is not a wildcard",
+      "ALLOWED_CUSTOMER_IDS is required: an empty allowlist is not a wildcard "
+        + `(use ${ALLOW_ALL_CUSTOMERS} to serve every account under the login MCC)`,
     );
   }
+  if (raw.trim() === ALLOW_ALL_CUSTOMERS) return [ALLOW_ALL_CUSTOMERS];
   const ids = raw
     .split(",")
     .map((id) => id.trim())
@@ -73,7 +80,13 @@ export function parseAllowedCustomerIds(raw: string | undefined): string[] {
     .map((id) => id.replace(/-/g, ""));
   if (ids.length === 0) {
     throw new Error(
-      "ALLOWED_CUSTOMER_IDS is required: an empty allowlist is not a wildcard",
+      "ALLOWED_CUSTOMER_IDS is required: an empty allowlist is not a wildcard "
+        + `(use ${ALLOW_ALL_CUSTOMERS} to serve every account under the login MCC)`,
+    );
+  }
+  if (ids.includes(ALLOW_ALL_CUSTOMERS)) {
+    throw new Error(
+      `ALLOWED_CUSTOMER_IDS: ${ALLOW_ALL_CUSTOMERS} means every account and cannot be mixed with ids`,
     );
   }
   for (const id of ids) {
