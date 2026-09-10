@@ -173,6 +173,9 @@ function checkCustomerAccess(
       text: "Access denied: no customer allowlist is configured.",
     };
   }
+  // Curinga explícito: serve todo o MCC (modo agência). Só chega aqui quando o
+  // operador escreveu "*", nunca por omissão.
+  if (allowedIds.includes("*")) return null;
   const cid = customerId.replace(/-/g, "");
   if (!allowedIds.some((allowedId) => allowedId.replace(/-/g, "") === cid)) {
     return {
@@ -317,7 +320,10 @@ export function registerGoogleAdsTools(
   allowedCustomerIds: string[],
   hosted = false
 ): void {
-  const allowedCustomerIdSet = new Set(allowedCustomerIds.map((id) => id.replace(/-/g, "")));
+  const allowAllCustomers = allowedCustomerIds.includes("*");
+  const allowedCustomerIdSet = new Set(
+    allowedCustomerIds.filter((id) => id !== "*").map((id) => id.replace(/-/g, ""))
+  );
 
   // ── Discovery ──────────────────────────────────────────────────────
 
@@ -352,9 +358,11 @@ export function registerGoogleAdsTools(
            precisely what you come here to find — so an empty set means
            "no filter". */
         .filter((account) =>
-          allowedCustomerIdSet.size === 0
-            ? !hosted
-            : allowedCustomerIdSet.has(String(account.customer_id ?? "").replace(/-/g, ""))
+          allowAllCustomers
+            ? true
+            : allowedCustomerIdSet.size === 0
+              ? !hosted
+              : allowedCustomerIdSet.has(String(account.customer_id ?? "").replace(/-/g, ""))
         );
       return {
         content: [text(`${accounts.length} conta(s) encontrada(s).\n\n${formatJson(accounts)}`)],
