@@ -4,7 +4,7 @@
  * Auth: OAuth 2.0 com auto-refresh, sem dependências Google.
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 
 const API_VERSION = process.env.GOOGLE_ADS_API_VERSION ?? "v25";
 const API_BASE = `https://googleads.googleapis.com/${API_VERSION}`;
@@ -98,12 +98,28 @@ export class GoogleAdsClient {
     this.credentials.token = data.access_token;
     this.credentials.expiry = new Date(Date.now() + data.expires_in * 1000).toISOString();
 
-    // Persist refreshed token
+    // Persist refreshed token.
+    //
+    // Escrita ATOMICA: grava num temporario no MESMO diretorio e renomeia.
+    // writeFileSync direto trunca o arquivo antes de gravar, e esse arquivo e
+    // compartilhado por varios processos — dois MCCs, e Claude Code e Codex ao
+    // mesmo tempo — que expiram juntos e portanto renovam juntos. Um leitor que
+    // caisse na janela do truncamento leria JSON vazio; pior, uma gravacao
+    // interrompida ali levaria o refresh_token junto, exigindo reautenticar na
+    // mao. rename(2) e atomico no POSIX: quem le ve o arquivo antigo inteiro ou
+    // o novo inteiro, nunca um pedaco.
     if (this.credentialsPath) {
+      const tmp = `${this.credentialsPath}.tmp-${process.pid}-${Date.now()}`;
       try {
-        writeFileSync(this.credentialsPath, JSON.stringify(this.credentials, null, 2));
+        writeFileSync(tmp, JSON.stringify(this.credentials, null, 2), { mode: 0o600 });
+        renameSync(tmp, this.credentialsPath);
       } catch {
         // Non-fatal: token will be refreshed again next time
+        try {
+          unlinkSync(tmp);
+        } catch {
+          // temporario ja saiu (ou nunca chegou a existir)
+        }
       }
     }
   }
