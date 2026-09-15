@@ -200,3 +200,67 @@ test("curinga libera qualquer conta; allowlist normal segue negando", async () =
   const negado = await infoEstrito.handler({ customerId: "5505259145" } as never);
   assert.match(textoDe(negado), /Access denied/, "fora da allowlist deve negar");
 });
+
+/**
+ * O arquivo OAuth do Google Ads e COMPARTILHADO: os dois MCCs usam o mesmo, e
+ * Claude Code e Codex podem estar rodando ao mesmo tempo. Como todos expiram
+ * juntos, renovam juntos. Uma gravacao in-place (writeFileSync) trunca o
+ * arquivo antes de escrever — um leitor nessa janela leria JSON vazio, e uma
+ * interrupcao ali levaria o refresh_token junto. Este teste fixa a escrita
+ * atomica: sob leitura concorrente, nunca se ve um arquivo parcial.
+ */
+test("gravacao do token OAuth e atomica sob leitura concorrente", async () => {
+  const { mkdtempSync, writeFileSync, readFileSync, renameSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+
+  const dir = mkdtempSync(join(tmpdir(), "gads-oauth-"));
+  const alvo = join(dir, "token.json");
+  const cred = {
+    token: "a".repeat(200),
+    refresh_token: "r".repeat(200),
+    token_uri: "https://oauth2.googleapis.com/token",
+    client_id: "cid",
+    client_secret: "sec",
+  };
+  writeFileSync(alvo, JSON.stringify(cred, null, 2));
+
+  // replica exatamente o caminho de gravacao do client
+  const gravaAtomico = (n: number) => {
+    const tmp = `${alvo}.tmp-${process.pid}-${n}`;
+    writeFileSync(tmp, JSON.stringify({ ...cred, token: `t${n}`.padEnd(200, "x") }, null, 2), { mode: 0o600 });
+    renameSync(tmp, alvo);
+  };
+
+  let parciais = 0;
+  let leituras = 0;
+  let parar = false;
+  const leitor = (async () => {
+    while (!parar) {
+      try {
+        const bruto = readFileSync(alvo, "utf8");
+        leituras += 1;
+        const d = JSON.parse(bruto) as { refresh_token?: string };
+        // o refresh_token nunca pode sumir: perde-lo exige reautenticar na mao
+        if (d.refresh_token !== cred.refresh_token) parciais += 1;
+      } catch {
+        parciais += 1; // JSON truncado ou arquivo ausente
+      }
+      await new Promise((r) => setImmediate(r));
+    }
+  })();
+
+  for (let i = 0; i < 300; i += 1) {
+    gravaAtomico(i);
+    if (i % 25 === 0) await new Promise((r) => setImmediate(r));
+  }
+  parar = true;
+  await leitor;
+
+  assert.ok(leituras > 0, "o leitor precisa ter lido alguma vez");
+  assert.equal(parciais, 0, `leitor viu ${parciais} estado(s) parcial(is) em ${leituras} leituras`);
+  // nenhum temporario pode ficar para tras
+  const { readdirSync } = await import("node:fs");
+  assert.deepEqual(readdirSync(dir).filter((f) => f.includes(".tmp-")), []);
+  rmSync(dir, { recursive: true, force: true });
+});
