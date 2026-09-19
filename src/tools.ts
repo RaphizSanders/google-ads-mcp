@@ -155,6 +155,104 @@ function gaqlLiteral(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }
 
+// ── Imagens em campanhas de Pesquisa (AD_IMAGE) ─────────────────────
+
+/** O Google aceita até 20 imagens por campanha de Pesquisa. */
+const MAX_CAMPAIGN_IMAGES_PER_CALL = 20;
+
+/**
+ * Normaliza a referência de uma imagem para customers/{cid}/assets/{id}.
+ * Aceita o resource name completo ou só o ID numérico. Resource name de outra
+ * conta é recusado aqui, antes de qualquer chamada à API.
+ */
+function parseImageAssetRef(
+  ref: string,
+  cid: string
+): { assetId: string; resourceName: string } | { error: string } {
+  const value = ref.trim();
+  if (/^\d+$/.test(value)) {
+    return { assetId: value, resourceName: `customers/${cid}/assets/${value}` };
+  }
+  const match = /^customers\/([\d-]+)\/assets\/(\d+)$/.exec(value);
+  if (!match) {
+    return {
+      error: `"${ref}" não é uma referência de asset válida (esperado customers/{customerId}/assets/{assetId} ou o ID numérico).`,
+    };
+  }
+  const owner = match[1].replace(/-/g, "");
+  if (owner !== cid) {
+    return { error: `${value} pertence à conta ${owner}, não à conta ${cid}.` };
+  }
+  return { assetId: match[2], resourceName: `customers/${cid}/assets/${match[2]}` };
+}
+
+/**
+ * Vínculos AD_IMAGE de uma campanha, em qualquer status, por asset id.
+ * Filtra por campaign_asset.campaign (atributo) e não por campaign.id: em
+ * FROM campaign_asset, campaign é recurso de segmentação, e segmento no WHERE
+ * precisa estar no SELECT — senão a API recusa a query.
+ */
+async function fetchCampaignImageLinks(
+  client: GoogleAdsClient,
+  customerId: string,
+  campaignResource: string
+): Promise<Map<string, { status: string; resourceName: string }>> {
+  const rows = await client.searchStream(customerId,
+    `SELECT campaign_asset.asset, campaign_asset.status, campaign_asset.resource_name
+     FROM campaign_asset
+     WHERE campaign_asset.campaign = '${campaignResource}'
+       AND campaign_asset.field_type = 'AD_IMAGE'`);
+  const links = new Map<string, { status: string; resourceName: string }>();
+  for (const row of rows) {
+    const link = (row.campaignAsset ?? {}) as Record<string, unknown>;
+    const id = String(link.asset ?? "").split("/").pop() ?? "";
+    links.set(id, { status: String(link.status ?? ""), resourceName: String(link.resourceName ?? "") });
+  }
+  return links;
+}
+
+/** Rótulo de proporção pelas regras de imagem em Pesquisa (1:1 e 1.91:1). */
+function imageAspectLabel(width: number, height: number): string {
+  if (!width || !height) return "desconhecida";
+  const ratio = width / height;
+  if (Math.abs(ratio - 1) <= 0.01) return "1:1 (quadrada)";
+  if (Math.abs(ratio - 1.91) <= 0.02) return "1.91:1 (paisagem)";
+  return `${ratio.toFixed(2)}:1 (fora de 1:1 e 1.91:1)`;
+}
+
+/**
+ * Distribui o partialFailureError da API pelas operações recusadas. Cada erro
+ * traz location.fieldPathElements com { fieldName: "operations", index }.
+ */
+function partialFailureByOperation(
+  partialError: unknown,
+  operationCount: number
+): { byIndex: Map<number, string[]>; unattributed: string[] } {
+  const byIndex = new Map<number, string[]>();
+  const unattributed: string[] = [];
+  if (!partialError || typeof partialError !== "object") return { byIndex, unattributed };
+  const failure = partialError as Record<string, unknown>;
+  let sawDetail = false;
+  for (const detail of (failure.details as Array<Record<string, unknown>>) ?? []) {
+    for (const err of (detail.errors as Array<Record<string, unknown>>) ?? []) {
+      sawDetail = true;
+      const codes = Object.entries((err.errorCode as Record<string, unknown>) ?? {}).map(([k, v]) => `${k}.${v}`);
+      const message = `${String(err.message ?? "erro sem mensagem")}${codes.length ? ` [${codes.join(", ")}]` : ""}`;
+      const path = ((err.location as Record<string, unknown>)?.fieldPathElements as Array<Record<string, unknown>>) ?? [];
+      const op = path.find((el) => el.fieldName === "operations");
+      let index = op && op.index !== undefined ? Number(op.index) : NaN;
+      if (Number.isNaN(index) && operationCount === 1) index = 0;
+      if (Number.isInteger(index) && index >= 0 && index < operationCount) {
+        byIndex.set(index, [...(byIndex.get(index) ?? []), message]);
+      } else {
+        unattributed.push(message);
+      }
+    }
+  }
+  if (!sawDetail) unattributed.push(String(failure.message ?? formatJson(failure)));
+  return { byIndex, unattributed };
+}
+
 function checkCustomerAccess(
   customerId: string,
   allowedIds: string[],
@@ -2051,6 +2149,8 @@ export function registerGoogleAdsTools(
         "Upload an image (base64) to the account's asset library.",
         "WRITE OPERATION — creates a reusable image asset.",
         "Returns the asset resource_name to use in asset groups or ads.",
+        "Para usar a imagem numa campanha de Pesquisa: link_campaign_image_assets,",
+        "depois confirme com list_campaign_image_assets.",
         "",
         "Supported formats: JPG, PNG, GIF. Max 5MB.",
         "Recommended sizes: 1200x628 (landscape), 1200x1200 (square), 1200x1200 (logo).",
@@ -2118,6 +2218,399 @@ export function registerGoogleAdsTools(
       return {
         content: [text(`Video asset linked: ${youtubeVideoId}\nResource: ${resourceName}\n\n${formatJson(result)}`)],
       };
+    }
+  );
+
+  // ── Imagens em campanhas de Pesquisa (AD_IMAGE) ────────────────────
+
+  mcp.registerTool(
+    "link_campaign_image_assets",
+    {
+      description: [
+        "Vincula imagens JÁ EXISTENTES na biblioteca a uma campanha de Pesquisa, como recurso de imagem (AD_IMAGE).",
+        "WRITE OPERATION — cria só os vínculos; não altera campanha, orçamento, lances nem segmentação.",
+        "",
+        "Fluxo: upload_image_asset (sobe a imagem) → link_campaign_image_assets (vincula)",
+        "→ list_campaign_image_assets (confirma status e análise).",
+        "",
+        "Antes de gravar, confere que a campanha existe nesta conta e é SEARCH, e que cada",
+        "imagem existe nesta conta e é do tipo IMAGE. Vínculo que já existe não é recriado;",
+        "vínculo PAUSADO fica pausado (não é reativado). Retorna criados, já existentes e erros.",
+        "Com GOOGLE_ADS_DRY_RUN=true a API só valida (validateOnly) e nada é gravado.",
+        "",
+        "Regras do Google: ao menos uma imagem quadrada 1:1 (mín. 300x300); paisagem 1.91:1",
+        "opcional (mín. 600x314); até 20 imagens por campanha. A imagem passa por análise antes de veicular.",
+      ].join("\n"),
+      inputSchema: {
+        customerId: z.string().describe("Customer ID."),
+        campaignId: z.string().describe("ID numérico da campanha de Pesquisa."),
+        assetResourceNames: flexArray(z.string()).describe(
+          "Imagens a vincular: resource names (customers/{customerId}/assets/{assetId}) ou os IDs numéricos. Máx. 20."
+        ),
+      },
+    },
+    async ({ customerId, campaignId, assetResourceNames }) => {
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
+      if (blocked) return { content: [blocked], isError: true };
+      const cid = customerId.replace(/-/g, "");
+      if (!/^\d+$/.test(cid)) {
+        return { content: [text(`customerId inválido: "${customerId}". Nada foi gravado.`)], isError: true };
+      }
+      if (!/^\d+$/.test(campaignId)) {
+        return { content: [text(`campaignId deve ser numérico, recebido "${campaignId}". Nada foi gravado.`)], isError: true };
+      }
+
+      const refs = ensureArray<string>(assetResourceNames).map(String).filter((ref) => ref.trim());
+      if (refs.length === 0) {
+        return { content: [text("Informe ao menos uma imagem em assetResourceNames. Nada foi gravado.")], isError: true };
+      }
+
+      // 1. Formato e conta de cada referência — antes de qualquer chamada à API
+      const invalid: string[] = [];
+      const wanted = new Map<string, string>(); // assetId → resource name (repetidos viram um só)
+      for (const ref of refs) {
+        const parsed = parseImageAssetRef(ref, cid);
+        if ("error" in parsed) invalid.push(parsed.error);
+        else wanted.set(parsed.assetId, parsed.resourceName);
+      }
+      if (invalid.length > 0) {
+        return { content: [text(`Nada foi gravado — referência(s) inválida(s):\n- ${invalid.join("\n- ")}`)], isError: true };
+      }
+      if (wanted.size > MAX_CAMPAIGN_IMAGES_PER_CALL) {
+        return {
+          content: [text(
+            `No máximo ${MAX_CAMPAIGN_IMAGES_PER_CALL} imagens por chamada (o Google aceita até 20 por campanha). ` +
+            `Recebidas ${wanted.size}. Nada foi gravado.`
+          )],
+          isError: true,
+        };
+      }
+
+      const client = getClient();
+
+      // 2. Campanha: existe nesta conta e é de Pesquisa
+      const campaignRows = await client.searchStream(customerId,
+        `SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type
+         FROM campaign
+         WHERE campaign.id = ${campaignId}`);
+      const campaign = campaignRows[0]?.campaign as Record<string, unknown> | undefined;
+      if (!campaign) {
+        return { content: [text(`Campanha ${campaignId} não encontrada na conta ${cid}. Nada foi gravado.`)], isError: true };
+      }
+      const campaignInfo = {
+        id: String(campaign.id ?? campaignId),
+        name: campaign.name,
+        channel: campaign.advertisingChannelType,
+        status: campaign.status,
+      };
+      if (campaign.advertisingChannelType !== "SEARCH") {
+        return {
+          content: [text(
+            `Campanha ${campaignId} ("${campaign.name}") é ${campaign.advertisingChannelType}, não SEARCH. ` +
+            "Esta tool vincula imagem só em campanha de Pesquisa. Nada foi gravado."
+          )],
+          isError: true,
+        };
+      }
+      if (campaign.status === "REMOVED") {
+        return { content: [text(`Campanha ${campaignId} ("${campaign.name}") está removida. Nada foi gravado.`)], isError: true };
+      }
+
+      // 3. Imagens: existem nesta conta e são do tipo IMAGE
+      const assetIds = [...wanted.keys()];
+      const assetRows = await client.searchStream(customerId,
+        `SELECT asset.id, asset.name, asset.type,
+                asset.image_asset.full_size.width_pixels, asset.image_asset.full_size.height_pixels
+         FROM asset
+         WHERE asset.id IN (${assetIds.join(", ")})`);
+      const assets = new Map<string, Record<string, unknown>>();
+      for (const row of assetRows) {
+        const asset = (row.asset ?? {}) as Record<string, unknown>;
+        assets.set(String(asset.id), asset);
+      }
+      const rejected: string[] = [];
+      for (const id of assetIds) {
+        const asset = assets.get(id);
+        if (!asset) rejected.push(`asset ${id} não existe na conta ${cid}`);
+        else if (asset.type !== "IMAGE") rejected.push(`asset ${id} ("${asset.name ?? ""}") é do tipo ${asset.type}, não IMAGE`);
+      }
+      if (rejected.length > 0) {
+        return { content: [text(`Nada foi gravado:\n- ${rejected.join("\n- ")}`)], isError: true };
+      }
+      const describe = (id: string) => {
+        const asset = assets.get(id) ?? {};
+        const full = (((asset.imageAsset as Record<string, unknown>) ?? {}).fullSize ?? {}) as Record<string, unknown>;
+        const width = num(full.widthPixels);
+        const height = num(full.heightPixels);
+        return {
+          asset_id: id,
+          asset_name: asset.name,
+          dimensions: width && height ? `${width}x${height}` : undefined,
+          aspect: imageAspectLabel(width, height),
+        };
+      };
+
+      // 4. Vínculos que já existem, em qualquer status: nada é recriado nem reativado
+      const campaignResource = `customers/${cid}/campaigns/${campaignId}`;
+      const existing = await fetchCampaignImageLinks(client, customerId, campaignResource);
+
+      const alreadyLinked: Array<Record<string, unknown>> = [];
+      const toCreate: Array<{ id: string; resourceName: string; previouslyRemoved: boolean }> = [];
+      for (const id of assetIds) {
+        const link = existing.get(id);
+        if (link && link.status !== "REMOVED") {
+          alreadyLinked.push({
+            ...describe(id),
+            link_status: link.status,
+            link_resource_name: link.resourceName,
+            note: link.status === "PAUSED" ? "vínculo pausado — mantido pausado, não foi reativado" : "já vinculada",
+          });
+        } else {
+          toCreate.push({ id, resourceName: wanted.get(id)!, previouslyRemoved: Boolean(link) });
+        }
+      }
+
+      const dryRun = client.isDryRun;
+      const campaignLine = `Campanha ${campaignInfo.id} ("${campaignInfo.name}", SEARCH)`;
+      const nextStep = dryRun
+        ? "Dry-run: para gravar de verdade, rode de novo sem GOOGLE_ADS_DRY_RUN."
+        : "Confirme com list_campaign_image_assets (status do vínculo e análise da imagem).";
+
+      if (toCreate.length === 0) {
+        return {
+          content: [text(
+            `${campaignLine}: nada a fazer — as ${alreadyLinked.length} imagem(ns) já estavam vinculadas. ` +
+            "Nenhuma escrita foi enviada.\n\n" +
+            formatJson({ campaign: campaignInfo, dry_run: dryRun, created: [], already_linked: alreadyLinked, errors: [] })
+          )],
+        };
+      }
+
+      let response: Record<string, unknown>;
+      try {
+        response = await client.mutateCampaignAssets(
+          customerId,
+          toCreate.map((item) => ({
+            create: { campaign: campaignResource, asset: item.resourceName, fieldType: "AD_IMAGE", status: "ENABLED" },
+          })),
+          { partialFailure: true }
+        );
+      } catch (err) {
+        const message = (err as Error).message;
+        // Erro de transporte (conexão caída, 5xx sem corpo) pode acontecer DEPOIS de a
+        // API gravar. Em vez de afirmar "nada foi criado", confere a conta.
+        let afterError: Map<string, { status: string; resourceName: string }> | null = null;
+        if (!dryRun) {
+          try {
+            afterError = await fetchCampaignImageLinks(client, customerId, campaignResource);
+          } catch {
+            afterError = null;
+          }
+        }
+        if (!dryRun && afterError === null) {
+          return {
+            content: [text(
+              `${campaignLine}: a requisição falhou e não foi possível conferir a conta depois — ` +
+              "o resultado é INCERTO. Confira com list_campaign_image_assets antes de repetir.\n" +
+              `Erro: ${message}\n\n` +
+              formatJson({
+                campaign: campaignInfo,
+                dry_run: dryRun,
+                created: [],
+                already_linked: alreadyLinked,
+                errors: toCreate.map((item) => ({ ...describe(item.id), error: `resultado incerto: ${message}` })),
+              })
+            )],
+            isError: true,
+          };
+        }
+        const confirmedAfterError = toCreate.filter((item) => afterError?.get(item.id)?.status === "ENABLED");
+        const stillMissing = toCreate.filter((item) => !confirmedAfterError.includes(item));
+        return {
+          content: [text(
+            `${campaignLine}: a requisição falhou${dryRun ? " (dry-run, nada gravado)" : "; estado conferido na conta depois do erro"}.\n` +
+            `Erro: ${message}\n\n` +
+            formatJson({
+              campaign: campaignInfo,
+              dry_run: dryRun,
+              [dryRun ? "validated" : "created"]: confirmedAfterError.map((item) => ({
+                ...describe(item.id),
+                link_resource_name: afterError?.get(item.id)?.resourceName,
+                note: "gravado apesar do erro (confirmado na conta)",
+              })),
+              already_linked: alreadyLinked,
+              errors: stillMissing.map((item) => ({ ...describe(item.id), error: message })),
+            })
+          )],
+          isError: true,
+        };
+      }
+
+      const results = (response.results as Array<Record<string, unknown>>) ?? [];
+      const { byIndex, unattributed } = partialFailureByOperation(response.partialFailureError, toCreate.length);
+      const created: Array<Record<string, unknown>> = [];
+      const errors: Array<Record<string, unknown>> = [];
+      toCreate.forEach((item, index) => {
+        const opErrors = byIndex.get(index);
+        if (opErrors) {
+          errors.push({ ...describe(item.id), error: opErrors.join("; ") });
+          return;
+        }
+        const linkResource = results[index]?.resourceName as string | undefined;
+        if (dryRun ? unattributed.length > 0 : !linkResource) {
+          // Sem confirmação: em gravação real falta o resourceName; em dry-run há
+          // erro que a API não atribuiu a nenhuma operação
+          errors.push({
+            ...describe(item.id),
+            error: dryRun ? "validação não confirmada (a API devolveu erro sem indicar a operação)" : "a API não confirmou o vínculo",
+          });
+          return;
+        }
+        created.push({
+          ...describe(item.id),
+          ...(linkResource ? { link_resource_name: linkResource } : {}),
+          ...(item.previouslyRemoved
+            ? {
+                note: dryRun
+                  ? "havia um vínculo removido; seria criado de novo (nada gravado)"
+                  : "havia um vínculo removido para esta imagem; foi criado de novo",
+              }
+            : {}),
+        });
+      });
+      for (const message of unattributed) errors.push({ error: message });
+
+      const counts = `Já vinculadas: ${alreadyLinked.length} | Com erro: ${errors.length}`;
+      const header = dryRun
+        ? `${campaignLine} — DRY-RUN (validateOnly): nada foi gravado.\nValidadas pela API: ${created.length} | ${counts}`
+        : `${campaignLine}\nVínculos criados: ${created.length} | ${counts}`;
+
+      return {
+        content: [text(
+          `${header}\n\n` +
+          formatJson({
+            campaign: campaignInfo,
+            dry_run: dryRun,
+            [dryRun ? "validated" : "created"]: created,
+            already_linked: alreadyLinked,
+            errors,
+          }) +
+          `\n\n${nextStep}`
+        )],
+        isError: errors.length > 0,
+      };
+    }
+  );
+
+  mcp.registerTool(
+    "list_campaign_image_assets",
+    {
+      description: [
+        "Lista as imagens vinculadas a campanhas de Pesquisa (recursos de imagem, AD_IMAGE).",
+        "READ OPERATION.",
+        "",
+        "Por imagem: ID, nome, URL, dimensões e proporção, status do vínculo (ENABLED/PAUSED),",
+        "primary_status do vínculo com os motivos (ex.: PENDING + ASSET_UNDER_REVIEW) e a",
+        "situação de análise/política da imagem, com os tópicos de política quando houver.",
+        "",
+        "Use para confirmar o resultado de link_campaign_image_assets. get_image_assets lista a",
+        "biblioteca da conta; esta tool mostra o que está vinculado em cada campanha.",
+      ].join("\n"),
+      inputSchema: {
+        customerId: z.string().describe("Customer ID."),
+        campaignId: z.string().optional().describe("Filtra por campanha. Sem ele, lista todas as campanhas da conta."),
+        includeRemoved: z.boolean().optional().describe("Inclui vínculos removidos. Default: false."),
+        format: formatSchema,
+      },
+    },
+    async ({ customerId, campaignId, includeRemoved, format }) => {
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
+      if (blocked) return { content: [blocked], isError: true };
+      if (campaignId !== undefined && !/^\d+$/.test(campaignId)) {
+        return { content: [text(`campaignId deve ser numérico, recebido "${campaignId}".`)], isError: true };
+      }
+      const client = getClient();
+
+      const filters = ["campaign_asset.field_type = 'AD_IMAGE'"];
+      if (!includeRemoved) filters.push("campaign_asset.status != 'REMOVED'");
+      if (campaignId) filters.push(`campaign.id = ${campaignId}`);
+
+      const results = await client.searchStream(customerId,
+        `SELECT campaign.id, campaign.name,
+                asset.id, asset.name,
+                asset.image_asset.full_size.url,
+                asset.image_asset.full_size.width_pixels, asset.image_asset.full_size.height_pixels,
+                asset.image_asset.file_size, asset.image_asset.mime_type,
+                asset.policy_summary.review_status, asset.policy_summary.approval_status,
+                asset.policy_summary.policy_topic_entries,
+                asset.field_type_policy_summaries,
+                campaign_asset.resource_name, campaign_asset.status, campaign_asset.source,
+                campaign_asset.primary_status, campaign_asset.primary_status_reasons
+         FROM campaign_asset
+         WHERE ${filters.join(" AND ")}`);
+
+      const rows = results.map((r) => {
+        const camp = (r.campaign ?? {}) as Record<string, unknown>;
+        const asset = (r.asset ?? {}) as Record<string, unknown>;
+        const link = (r.campaignAsset ?? {}) as Record<string, unknown>;
+        const image = (asset.imageAsset ?? {}) as Record<string, unknown>;
+        const full = (image.fullSize ?? {}) as Record<string, unknown>;
+        const width = num(full.widthPixels);
+        const height = num(full.heightPixels);
+        // Análise do uso como AD_IMAGE quando a API devolve; senão, a do asset
+        const fieldPolicy = ((asset.fieldTypePolicySummaries as Array<Record<string, unknown>>) ?? [])
+          .find((summary) => summary.assetFieldType === "AD_IMAGE")?.policySummaryInfo as Record<string, unknown> | undefined;
+        const policy = (fieldPolicy ?? asset.policySummary ?? {}) as Record<string, unknown>;
+        const topics = ((policy.policyTopicEntries as Array<Record<string, unknown>>) ?? [])
+          .map((entry) => `${entry.topic ?? "?"} (${entry.type ?? "?"})`);
+        return {
+          campaign_id: String(camp.id ?? ""),
+          campaign_name: camp.name,
+          asset_id: String(asset.id ?? ""),
+          asset_name: asset.name,
+          url: full.url,
+          dimensions: width && height ? `${width}x${height}` : undefined,
+          aspect: imageAspectLabel(width, height),
+          file_size: image.fileSize !== undefined ? num(image.fileSize) : undefined,
+          mime_type: image.mimeType,
+          link_status: link.status,
+          primary_status: link.primaryStatus,
+          primary_status_reasons: (link.primaryStatusReasons as string[]) ?? [],
+          review_status: policy.reviewStatus,
+          approval_status: policy.approvalStatus,
+          policy_topics: topics,
+          policy_scope: fieldPolicy ? "AD_IMAGE" : "asset",
+          source: link.source,
+          link_resource_name: link.resourceName,
+        };
+      }).sort((a, b) => a.campaign_id.localeCompare(b.campaign_id) || a.asset_id.localeCompare(b.asset_id));
+
+      if (format === "table") return { content: [text(formatAsTable(rows as Array<Record<string, unknown>>))] };
+      if (format === "csv") return { content: [text(formatAsCsv(rows as Array<Record<string, unknown>>))] };
+
+      if (rows.length === 0) {
+        return { content: [text(
+          `Nenhuma imagem vinculada ${campaignId ? `à campanha ${campaignId}` : "a campanhas desta conta"}.`
+        )] };
+      }
+
+      const byCampaign = new Map<string, typeof rows>();
+      for (const row of rows) byCampaign.set(row.campaign_id, [...(byCampaign.get(row.campaign_id) ?? []), row]);
+      const summary = [...byCampaign.entries()].map(([id, list]) => {
+        const statusCounts = new Map<string, number>();
+        for (const row of list) {
+          const key = String(row.primary_status ?? "?");
+          statusCounts.set(key, (statusCounts.get(key) ?? 0) + 1);
+        }
+        const statuses = [...statusCounts.entries()].map(([k, v]) => `${k} ${v}`).join(", ");
+        const enabled = list.filter((row) => row.link_status === "ENABLED");
+        const squareWarning = enabled.some((row) => row.aspect.startsWith("1:1"))
+          ? ""
+          : " — ATENÇÃO: nenhuma imagem quadrada 1:1 habilitada (o Google exige ao menos uma)";
+        return `Campanha ${id} ("${list[0].campaign_name}"): ${list.length} imagem(ns) — ${statuses}${squareWarning}`;
+      });
+
+      return { content: [text(`${rows.length} vínculo(s) de imagem.\n${summary.join("\n")}\n\n${formatJson(rows)}`)] };
     }
   );
 
@@ -3065,8 +3558,13 @@ export function registerGoogleAdsTools(
     async ({ customerId, campaignId, limit }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
+      if (campaignId !== undefined && !/^\d+$/.test(campaignId)) {
+        return { content: [text(`campaignId deve ser numérico, recebido "${campaignId}".`)], isError: true };
+      }
       const client = getClient();
-      const campaignFilter = campaignId ? `AND campaign.id = ${campaignId}` : "";
+      // campaign é segmentação em FROM campaign_asset: filtrar pelo atributo, não por campaign.id
+      const cid = customerId.replace(/-/g, "");
+      const campaignFilter = campaignId ? `AND campaign_asset.campaign = 'customers/${cid}/campaigns/${campaignId}'` : "";
 
       const results = await client.searchStream(
         customerId,

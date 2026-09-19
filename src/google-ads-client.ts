@@ -327,6 +327,12 @@ export class GoogleAdsClient {
 
   // ── Mutations (WRITE) ────────────────────────────────────────────────
 
+  /** Dry-run ligado? As tools usam isso para relatar "validado, nada gravado"
+      em vez de ler um parâmetro próprio que pode divergir da env. */
+  get isDryRun(): boolean {
+    return this.dryRun;
+  }
+
   private assertWriteAllowed(): void {
     if (this.readOnly) {
       throw new Error("Google Ads MCP is running in read-only mode; mutation blocked.");
@@ -337,13 +343,17 @@ export class GoogleAdsClient {
   async mutate(
     customerId: string,
     resource: string,
-    operations: MutateOperation[]
+    operations: MutateOperation[],
+    options: { partialFailure?: boolean } = {}
   ): Promise<Record<string, unknown>> {
     this.assertWriteAllowed();
     const cid = customerId.replace(/-/g, "");
     const url = `${API_BASE}/customers/${cid}/${resource}:mutate`;
     return this.request<Record<string, unknown>>("POST", url, {
       operations,
+      // partialFailure: as operações válidas são aplicadas e as recusadas voltam
+      // em partialFailureError, com o índice de cada uma
+      ...(options.partialFailure ? { partialFailure: true } : {}),
       ...(this.dryRun ? { validateOnly: true } : {}),
     });
   }
@@ -380,8 +390,12 @@ export class GoogleAdsClient {
     return this.mutate(customerId, "campaignAssetSets", operations);
   }
 
-  async mutateCampaignAssets(customerId: string, operations: MutateOperation[]) {
-    return this.mutate(customerId, "campaignAssets", operations);
+  async mutateCampaignAssets(
+    customerId: string,
+    operations: MutateOperation[],
+    options?: { partialFailure?: boolean }
+  ) {
+    return this.mutate(customerId, "campaignAssets", operations, options);
   }
 
   async mutateAssetGroups(customerId: string, operations: MutateOperation[]) {

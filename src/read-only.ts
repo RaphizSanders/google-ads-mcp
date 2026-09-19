@@ -40,6 +40,7 @@ export const GOOGLE_ADS_READ_TOOL_NAMES = new Set([
   "list_geo_targets",
   "list_recommendations",
   "get_asset_performance",
+  "list_campaign_image_assets",
 ] as const);
 
 export const GOOGLE_ADS_WRITE_TOOL_NAMES = new Set([
@@ -99,6 +100,7 @@ export const GOOGLE_ADS_WRITE_TOOL_NAMES = new Set([
   "dismiss_recommendation",
   "set_campaign_conversion_goals",
   "upload_offline_conversion",
+  "link_campaign_image_assets",
 ] as const);
 
 /* Booleano de env com rejeição de valor ambíguo. O nome entra na mensagem: o

@@ -29,7 +29,7 @@ Funciona em modo **local** (stdio) e **remoto** (HTTP/SSE), com suporte a deploy
 | `MCP_API_KEY` | Em qualquer modo HTTP | Chave de autenticacao (`Authorization: Bearer`). Obrigatoria sempre que `PORT` estiver definido — sem ela o endpoint aceitaria qualquer requisicao. Nao se aplica ao stdio |
 | `MCP_ALLOWED_HOSTS` | Em qualquer modo HTTP | Hostnames aceitos, separados por vírgula e sem porta. Ativa proteção contra DNS rebinding |
 | `ALLOWED_CUSTOMER_IDS` | Em qualquer modo HTTP | Escopo de contas. **`*`** = toda conta alcancavel pelo MCC do login (agencia/gestor com um MCC so). Ou uma lista nao vazia de IDs de 10 digitos separados por virgula (um cliente por servico). Ausencia ou vazio derruba o boot — vazio e engano de configuracao, nao curinga; e `*` nao se mistura com IDs. Em stdio segue opcional. |
-| `GOOGLE_ADS_READ_ONLY` | Nao | Modo somente leitura (`true`/`1`). Remove as 56 tools mutáveis do catálogo e bloqueia mutações no cliente. Ausente mantém compatibilidade com o comportamento atual |
+| `GOOGLE_ADS_READ_ONLY` | Nao | Modo somente leitura (`true`/`1`). Remove as 57 tools mutáveis do catálogo e bloqueia mutações no cliente. Ausente mantém compatibilidade com o comportamento atual |
 | `GOOGLE_ADS_DRY_RUN` | Nao | Dry-run (`true`/`1`). Envia `validateOnly=true` nos endpoints `:mutate` e nos uploads de conversão: a API valida o payload inteiro e devolve os mesmos erros de uma gravação real, sem alterar a conta. `apply_recommendation`/`dismiss_recommendation` não aceitam `validateOnly` e são **recusados** em dry-run (fail-closed). Tools encadeadas (orçamento→campanha, asset→vínculo) validam só o primeiro passo — a API não devolve `results` em `validateOnly`, então o passo seguinte falha com mensagem de "resource ausente", não por defeito de payload. Desligado por padrão |
 | `PORT` | Nao | Se definido, inicia servidor HTTP. Sem `PORT`, usa stdio |
 
@@ -89,8 +89,8 @@ processo recusa iniciar sem os tres, em modo de leitura ou de escrita. O modo st
 
 Para integrações analíticas, defina `GOOGLE_ADS_READ_ONLY=true`. Nesse modo:
 
-- `tools/list` publica somente as 33 tools classificadas como leitura;
-- as 56 tools de criação, edição, upload e exclusão não são registradas;
+- `tools/list` publica somente as 34 tools classificadas como leitura;
+- as 57 tools de criação, edição, upload e exclusão não são registradas;
 - chamadas diretas à camada de mutação também são recusadas antes de qualquer acesso à API;
 - uma tool nova e ainda não classificada permanece bloqueada por padrão.
 
@@ -115,7 +115,7 @@ buscar aqui. Por isso uma allowlist vazia mantém o significado original de "sem
 
 ---
 
-## Tools (89 total — atualizado 2026-09-09)
+## Tools (91 total — atualizado 2026-09-18)
 
 ### Descoberta de contas
 
@@ -153,6 +153,8 @@ buscar aqui. Por isso uma allowlist vazia mantém o significado original de "sem
 | `get_image_assets` | Lista imagens da biblioteca de assets |
 | `get_video_assets` | Lista videos da biblioteca |
 | `upload_image_asset` | Upload de imagem (base64) para biblioteca |
+| `link_campaign_image_assets` | Vincula imagens da biblioteca a uma campanha de Pesquisa como recurso de imagem (`AD_IMAGE`). Valida conta, campanha SEARCH e asset IMAGE; nao duplica nem reativa vinculo pausado |
+| `list_campaign_image_assets` | Imagens vinculadas por campanha: URL, dimensoes/proporcao, status do vinculo, `primary_status` com motivos e situacao de analise/politica |
 | `upload_video_asset` | Linkar video do YouTube como asset |
 
 ### GAQL (Query Language)
@@ -364,6 +366,20 @@ create_campaign (SEARCH) → create_ad_group → create_ad (RSA) → create_keyw
 → set_campaign_locations → set_campaign_languages
 → create_sitelink_extension → create_callout_extension
 ```
+
+### Imagens em campanha de Pesquisa
+
+```
+upload_image_asset (sobe cada imagem; guarde o resource name)
+→ link_campaign_image_assets (campaignId + assetResourceNames)
+→ list_campaign_image_assets (confirma vinculo e analise)
+```
+
+- **O que o vinculo faz:** cria um `campaignAsset` com `fieldType: AD_IMAGE` e `status: ENABLED`. Nao mexe em campanha, orcamento, lances nem segmentacao.
+- **Validacoes antes de gravar:** a campanha existe na conta e e `SEARCH`; cada imagem existe na conta e e do tipo `IMAGE`; resource name de outra conta e recusado sem chamar a API.
+- **Idempotente:** imagem ja vinculada nao e recriada; vinculo `PAUSED` continua pausado (a tool nunca reativa). O retorno separa criados, ja existentes e erros por imagem.
+- **Testar em producao sem gravar:** rode com `GOOGLE_ADS_DRY_RUN=true` — a API valida o vinculo (`validateOnly`) e nada e gravado.
+- **Regras do Google:** ao menos uma imagem quadrada 1:1 (min. 300x300); paisagem 1.91:1 opcional (min. 600x314); ate 20 imagens por campanha; a conta precisa ser elegivel a imagens em Pesquisa. Vinculo novo fica `PENDING` / `ASSET_UNDER_REVIEW` e so veicula depois de aprovado — `list_campaign_image_assets` mostra isso e avisa quando falta imagem quadrada.
 
 ### Performance Max (E-commerce)
 
