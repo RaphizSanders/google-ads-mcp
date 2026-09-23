@@ -1059,6 +1059,14 @@ export function registerGoogleAdsTools(
         "Bidding strategies: MAXIMIZE_CONVERSIONS, MAXIMIZE_CONVERSION_VALUE, TARGET_CPA, TARGET_ROAS,",
         "TARGET_SPEND (Maximizar cliques — a certa para conta sem histórico de conversão), MANUAL_CPC.",
         "Orçamento e campanha são criados numa única operação atômica: ou os dois, ou nenhum.",
+        "",
+        "Orçamento: budgetType DAILY (padrão, dailyBudgetMicros) ou TOTAL (orçamento total do período, totalAmountMicros —",
+        "exige startDateTime e endDateTime; SEARCH/PERFORMANCE_MAX até 90 dias, DEMAND_GEN até 1 ano; não vale em DISPLAY).",
+        "O tipo de orçamento NÃO muda depois de criada a campanha. Com TOTAL, só estas estratégias: SEARCH — todas acima;",
+        "PERFORMANCE_MAX — MAXIMIZE_CONVERSIONS, MAXIMIZE_CONVERSION_VALUE, TARGET_CPA, TARGET_ROAS; DEMAND_GEN — todas acima.",
+        "Datas (fuso da conta): startDateTime / endDateTime em YYYY-MM-DD ou YYYY-MM-DD HH:mm:ss; só a data = 00:00:00 no",
+        "início e 23:59:59 no fim. Começar hoje: startDateTime com a data de hoje (só a data). Dia anterior a hoje é recusado.",
+        "Valem também com orçamento diário (campanha com data para acabar).",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
@@ -1068,7 +1076,24 @@ export function registerGoogleAdsTools(
           .describe("Campaign type/channel."),
         dailyBudgetMicros: z
           .number()
-          .describe("Daily budget in MICROS. Example: 100000000 = R$100/day."),
+          .optional()
+          .describe("Orçamento DIÁRIO em MICROS (obrigatório com budgetType DAILY, o padrão). 100000000 = R$100/dia."),
+        budgetType: z
+          .enum(["DAILY", "TOTAL"])
+          .optional()
+          .describe("DAILY (padrão) ou TOTAL (orçamento total do período, CUSTOM_PERIOD). Não muda depois de criada."),
+        totalAmountMicros: z
+          .number()
+          .optional()
+          .describe("budgetType TOTAL: valor total da campanha em MICROS. 3000000000 = R$3.000 no período."),
+        startDateTime: z
+          .string()
+          .optional()
+          .describe("Início (fuso da conta): YYYY-MM-DD ou YYYY-MM-DD HH:mm:ss. Obrigatório com TOTAL."),
+        endDateTime: z
+          .string()
+          .optional()
+          .describe("Fim (fuso da conta): YYYY-MM-DD (= 23:59:59) ou YYYY-MM-DD HH:mm:ss. Obrigatório com TOTAL."),
         biddingStrategy: z
           .enum([
             "MAXIMIZE_CONVERSIONS",
@@ -1106,7 +1131,10 @@ export function registerGoogleAdsTools(
           .describe("Só SEARCH: cria a campanha com AI Max ligado. Ajustes finos depois com set_ai_max_settings."),
       },
     },
-    async ({ customerId, name, channelType, dailyBudgetMicros, biddingStrategy, targetCpaMicros, targetRoas, networkSettings, enableAiMax, cpcBidCeilingMicros }) => {
+    async ({
+      customerId, name, channelType, dailyBudgetMicros, biddingStrategy, targetCpaMicros, targetRoas, networkSettings, enableAiMax,
+      cpcBidCeilingMicros, budgetType, totalAmountMicros, startDateTime, endDateTime,
+    }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
@@ -1173,6 +1201,66 @@ export function registerGoogleAdsTools(
         }
       }
 
+      // Orçamento diário ou total (CUSTOM_PERIOD) e datas da campanha. O tipo do orçamento
+      // não muda depois de criada a campanha, então tudo é conferido antes de enviar:
+      // canal, estratégia permitida com orçamento total, início/fim e duração máxima.
+      // Regras de data/orçamento total ficam no módulo do lote bidding (import local à tool).
+      const { beforeAccountToday, checkTotalBudgetFlight, dateTimeMs, parseAdsDateTime, readAccountInfo } = await import("./tools/bidding.js");
+      const budgetKind = budgetType ?? "DAILY";
+      const flightProblems: string[] = [];
+      const flightWarnings: string[] = [];
+      if (budgetKind === "DAILY") {
+        if (dailyBudgetMicros === undefined) {
+          flightProblems.push("dailyBudgetMicros é obrigatório com orçamento diário (ou use budgetType TOTAL com totalAmountMicros)");
+        } else if (!isPositiveMicros(dailyBudgetMicros)) {
+          flightProblems.push(`dailyBudgetMicros deve ser inteiro positivo em micros (recebido ${dailyBudgetMicros})`);
+        }
+        if (totalAmountMicros !== undefined) flightProblems.push("totalAmountMicros só vale com budgetType TOTAL");
+      } else {
+        if (totalAmountMicros === undefined) flightProblems.push("budgetType TOTAL exige totalAmountMicros");
+        else if (!isPositiveMicros(totalAmountMicros)) flightProblems.push(`totalAmountMicros deve ser inteiro positivo em micros (recebido ${totalAmountMicros})`);
+        if (dailyBudgetMicros !== undefined) flightProblems.push("com budgetType TOTAL informe só totalAmountMicros (dailyBudgetMicros é do orçamento diário)");
+      }
+      const startParsed = startDateTime !== undefined ? parseAdsDateTime(startDateTime, "startOfDay") : undefined;
+      const endParsed = endDateTime !== undefined ? parseAdsDateTime(endDateTime, "endOfDay") : undefined;
+      for (const parsed of [startParsed, endParsed]) if (parsed && "error" in parsed) flightProblems.push(parsed.error);
+      const startValue = startParsed && "value" in startParsed ? startParsed.value : undefined;
+      const endValue = endParsed && "value" in endParsed ? endParsed.value : undefined;
+      if (startValue && endValue && dateTimeMs(endValue) <= dateTimeMs(startValue)) {
+        flightProblems.push(`endDateTime (${endValue}) precisa ser depois de startDateTime (${startValue})`);
+      }
+      if (budgetKind === "TOTAL") {
+        const flight = checkTotalBudgetFlight(channelType, strategy, startValue, endValue);
+        flightProblems.push(...flight.errors);
+        flightWarnings.push(...flight.warnings);
+      }
+      if (flightProblems.length > 0) {
+        return { content: [text(`Nada foi criado:\n- ${flightProblems.join("\n- ")}`)], isError: true };
+      }
+      if (startValue || endValue) {
+        // As datas são no fuso da conta; a API recusa data no passado (CANNOT_SET_DATE_TO_PAST).
+        // Só o dia conta: "hoje" (00:00:00, granularidade diária do proto) é começar hoje.
+        const account = await readAccountInfo(client, customerId);
+        const past = ([["startDateTime", startValue], ["endDateTime", endValue]] as const)
+          .filter(([, value]) => value && beforeAccountToday(value, account.now))
+          .map(([label, value]) => `${label} ${value}`);
+        if (past.length > 0) {
+          const startIsPast = startValue !== undefined && beforeAccountToday(startValue, account.now);
+          const hint = !startIsPast
+            ? "Use hoje ou uma data futura para o fim."
+            : budgetKind === "TOTAL"
+              ? `Orçamento total exige início: use a data de hoje (${account.now.slice(0, 10)}, só a data = começa hoje) ou uma data futura.`
+              : `Use a data de hoje (${account.now.slice(0, 10)}, só a data = começa hoje) ou uma data futura — ou omita startDateTime ` +
+                "para a campanha começar quando for ativada.";
+          return {
+            content: [text(
+              `Nada foi criado: ${past.join(" e ")} já passou — dia anterior a hoje (agora na conta: ${account.now}, ${account.timeZone}). ${hint}`
+            )],
+            isError: true,
+          };
+        }
+      }
+
       // Orçamento e campanha vão num único googleAds:mutate, com ID temporário para o
       // orçamento: se a campanha for recusada, o orçamento não fica órfão, e em
       // validateOnly/dry-run a API valida os dois de uma vez.
@@ -1196,6 +1284,8 @@ export function registerGoogleAdsTools(
         containsEuPoliticalAdvertising: EU_POLITICAL_DECLARATION,
         ...(effectiveNetworkSettings ? { networkSettings: effectiveNetworkSettings } : {}),
         ...(enableAiMax ? { aiMaxSetting: { enableAiMax: true } } : {}),
+        ...(startValue ? { startDateTime: startValue } : {}),
+        ...(endValue ? { endDateTime: endValue } : {}),
       };
 
       // Bidding strategy (alvos já validados antes do orçamento)
@@ -1228,7 +1318,11 @@ export function registerGoogleAdsTools(
               create: {
                 resourceName: budgetTmp,
                 name: `Budget — ${name}`,
-                amountMicros: String(dailyBudgetMicros),
+                // Orçamento total: period CUSTOM_PERIOD + total_amount_micros, nunca compartilhado
+                // (docs "Create campaign budgets"); o diário segue como antes.
+                ...(budgetKind === "TOTAL"
+                  ? { period: "CUSTOM_PERIOD", totalAmountMicros: String(totalAmountMicros) }
+                  : { amountMicros: String(dailyBudgetMicros) }),
                 deliveryMethod: "STANDARD",
                 explicitlyShared: false,
               },
@@ -1262,6 +1356,13 @@ export function registerGoogleAdsTools(
       if (strategy === "MANUAL_CPC") {
         warnings.push("CPC manual: o lance real é o de cada grupo/palavra-chave — informe cpcBidMicros no create_ad_group.");
       }
+      warnings.push(...flightWarnings);
+      const budgetLine = budgetKind === "TOTAL"
+        ? `- Budget: R$ ${(Number(totalAmountMicros) / 1_000_000).toFixed(2)} no total (CUSTOM_PERIOD — o tipo não muda depois)\n`
+        : `- Budget: R$ ${(Number(dailyBudgetMicros) / 1_000_000).toFixed(2)}/day\n`;
+      const datesLine = startValue || endValue
+        ? `- Datas (fuso da conta): ${startValue ?? "ao ativar"} → ${endValue ?? "sem fim"}\n`
+        : "";
 
       return {
         content: [
@@ -1269,7 +1370,8 @@ export function registerGoogleAdsTools(
             (dryRun ? `DRY-RUN (validateOnly): orçamento e campanha validados pela API — nada foi criado.\n` : `Campaign created (PAUSED):\n`) +
               `- Name: ${name}\n` +
               `- Type: ${channelType}\n` +
-              `- Budget: R$ ${(dailyBudgetMicros / 1_000_000).toFixed(2)}/day\n` +
+              budgetLine +
+              datesLine +
               `- Bidding: ${strategy}${strategy === "TARGET_SPEND" && cpcBidCeilingMicros ? ` (teto ${money(cpcBidCeilingMicros)})` : ""}\n` +
               (enableAiMax ? `- AI Max: ligado (ajustes finos com set_ai_max_settings)\n` : "") +
               (campaignResourceName ? `- Resource: ${campaignResourceName}\n` : "") +
@@ -1299,6 +1401,11 @@ export function registerGoogleAdsTools(
         "",
         "networkSettings: targetGoogleSearch, targetSearchNetwork (parceiros de pesquisa),",
         "targetContentNetwork (expansão para Display).",
+        "",
+        "Datas (fuso da conta): startDateTime (não muda depois que a campanha começou; a data de hoje = começa hoje),",
+        "endDateTime (só a data = até 23:59:59) e clearEndDateTime (campanha sem fim — não vale com orçamento total).",
+        "Dia anterior a hoje é recusado.",
+        "Com orçamento total (CUSTOM_PERIOD) a duração continua limitada (Pesquisa/PMax/Shopping 90 dias).",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
@@ -1325,11 +1432,16 @@ export function registerGoogleAdsTools(
           })
           .optional()
           .describe("Redes. Só as chaves informadas mudam."),
+        startDateTime: z.string().optional().describe(
+          "Novo início (fuso da conta): YYYY-MM-DD ou YYYY-MM-DD HH:mm:ss. A API não muda o início de campanha que já começou."
+        ),
+        endDateTime: z.string().optional().describe("Novo fim (fuso da conta): YYYY-MM-DD (= 23:59:59) ou YYYY-MM-DD HH:mm:ss."),
+        clearEndDateTime: z.boolean().optional().describe("true remove a data de fim (campanha sem fim). Não vale com orçamento total."),
       },
     },
     async ({
       customerId, campaignId, name, status, biddingStrategy, cpcBidCeilingMicros, targetCpaMicros, targetRoas,
-      targetImpressionShareLocation, locationFractionMicros, networkSettings,
+      targetImpressionShareLocation, locationFractionMicros, networkSettings, startDateTime, endDateTime, clearEndDateTime,
     }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
@@ -1347,6 +1459,12 @@ export function registerGoogleAdsTools(
       if (locationFractionMicros !== undefined && !(Number.isInteger(locationFractionMicros) && locationFractionMicros > 0 && locationFractionMicros <= 1_000_000)) {
         problems.push(`locationFractionMicros deve ficar entre 1 e 1000000 (recebido ${locationFractionMicros})`);
       }
+      // Regras de data/orçamento total ficam no módulo do lote bidding (import local à tool).
+      const { beforeAccountToday, checkTotalBudgetFlight, dateTimeMs, parseAdsDateTime, readAccountInfo } = await import("./tools/bidding.js");
+      const startParsed = startDateTime !== undefined ? parseAdsDateTime(startDateTime, "startOfDay") : undefined;
+      const endParsed = endDateTime !== undefined ? parseAdsDateTime(endDateTime, "endOfDay") : undefined;
+      for (const parsed of [startParsed, endParsed]) if (parsed && "error" in parsed) problems.push(parsed.error);
+      if (clearEndDateTime && endDateTime !== undefined) problems.push("use endDateTime OU clearEndDateTime, não os dois");
       if (problems.length > 0) {
         return { content: [text(`Nada foi alterado:\n- ${problems.join("\n- ")}`)], isError: true };
       }
@@ -1354,6 +1472,8 @@ export function registerGoogleAdsTools(
       const client = getClient();
       const rows = await client.searchStream(customerId,
         `SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type,
+                campaign.start_date_time, campaign.end_date_time,
+                campaign_budget.period, campaign_budget.total_amount_micros,
                 campaign.bidding_strategy_type, campaign.bidding_strategy,
                 campaign.target_spend.cpc_bid_ceiling_micros,
                 campaign.maximize_conversions.target_cpa_micros,
@@ -1501,6 +1621,61 @@ export function registerGoogleAdsTools(
           changes.push({ setting: key, before: Boolean(currentNetwork[key]), after: value });
         }
         if (Object.keys(networkUpdate).length > 0) update.networkSettings = networkUpdate;
+      }
+
+      // Datas da campanha (start_date_time / end_date_time, v23+). Só o que muda vai no updateMask;
+      // limpar o fim = caminho no updateMask sem valor no objeto (o proto manda "clear this field").
+      const newStart = startParsed && "value" in startParsed ? startParsed.value : undefined;
+      const newEnd = endParsed && "value" in endParsed ? endParsed.value : undefined;
+      const currentStart = String(campaign.startDateTime ?? "");
+      const currentEnd = String(campaign.endDateTime ?? "");
+      const totalBudget = (rows[0]?.campaignBudget as Record<string, unknown> | undefined)?.period === "CUSTOM_PERIOD";
+      const wantsStart = newStart !== undefined && newStart !== currentStart;
+      const wantsEnd = newEnd !== undefined && newEnd !== currentEnd;
+      const wantsClear = clearEndDateTime === true && currentEnd !== "";
+      if (wantsStart || wantsEnd || wantsClear) {
+        const account = await readAccountInfo(client, customerId);
+        const nowMs = dateTimeMs(account.now);
+        const dateProblems: string[] = [];
+        if (wantsStart) {
+          if (currentStart && dateTimeMs(currentStart) <= nowMs) {
+            dateProblems.push(`a campanha já começou (${currentStart}): a API não muda o início (CANNOT_MODIFY_START_DATE_IF_ALREADY_STARTED)`);
+          } else if (beforeAccountToday(newStart!, account.now)) {
+            // Só o dia conta: a data de hoje (00:00:00, granularidade diária) é "começa hoje".
+            dateProblems.push(`startDateTime ${newStart} já passou — dia anterior a hoje (CANNOT_SET_DATE_TO_PAST); use hoje ou uma data futura`);
+          }
+        }
+        if (wantsEnd && beforeAccountToday(newEnd!, account.now)) {
+          dateProblems.push(`endDateTime ${newEnd} já passou — dia anterior a hoje (CANNOT_SET_DATE_TO_PAST)`);
+        }
+        if (wantsClear && totalBudget) {
+          dateProblems.push("a campanha tem orçamento total (CUSTOM_PERIOD) e precisa de data de fim (END_DATE_TIME_REQUIRED_FOR_TOTAL_BUDGET)");
+        }
+        const effectiveStart = wantsStart ? newStart! : currentStart;
+        const effectiveEnd = wantsClear ? "" : wantsEnd ? newEnd! : currentEnd;
+        if (effectiveStart && effectiveEnd && dateTimeMs(effectiveEnd) <= dateTimeMs(effectiveStart)) {
+          dateProblems.push(`o fim (${effectiveEnd}) precisa ser depois do início (${effectiveStart})`);
+        }
+        if (totalBudget && !wantsClear) {
+          const flight = checkTotalBudgetFlight(String(campaign.advertisingChannelType ?? ""), undefined, effectiveStart || undefined, effectiveEnd || undefined);
+          dateProblems.push(...flight.errors);
+          warnings.push(...flight.warnings);
+        }
+        if (dateProblems.length > 0) {
+          return {
+            content: [text(`Campanha ${campaignId} ("${campaign.name}"): nada foi alterado (agora na conta: ${account.now}, ${account.timeZone}):\n- ${dateProblems.join("\n- ")}`)],
+            isError: true,
+          };
+        }
+        if (wantsStart) {
+          update.startDateTime = newStart; mask.push("start_date_time"); changes.push({ setting: "startDateTime", before: currentStart || null, after: newStart });
+        }
+        if (wantsEnd) {
+          update.endDateTime = newEnd; mask.push("end_date_time"); changes.push({ setting: "endDateTime", before: currentEnd || null, after: newEnd });
+        }
+        if (wantsClear) {
+          mask.push("end_date_time"); changes.push({ setting: "endDateTime", before: currentEnd, after: null });
+        }
       }
 
       const campaignLine = `Campanha ${campaignId} ("${campaign.name}")`;
@@ -1798,6 +1973,9 @@ export function registerGoogleAdsTools(
         "Lances (micros): cpcBidMicros (CPC do grupo — é o lance real em CPC manual e o padrão das",
         "palavras-chave sem lance próprio), cpmBidMicros (Display/Vídeo em CPM manual),",
         "targetCpaMicros (CPA alvo do grupo em estratégias de conversão).",
+        "targetRoas (ROAS alvo do grupo, 4.5 = 450%): só vale com TARGET_ROAS ou Maximizar valor COM ROAS alvo, e nunca",
+        "com estratégia de portfólio (a API recusa). clearTargetCpa / clearTargetRoas removem o alvo próprio do grupo",
+        "(volta a valer o da campanha). A resposta traz os alvos efetivos e a origem (effective_*_source).",
         "disableSearchTermMatching (AI Max): true desliga a correspondência de termos neste grupo.",
       ].join("\n"),
       inputSchema: {
@@ -1808,12 +1986,18 @@ export function registerGoogleAdsTools(
         cpcBidMicros: z.number().optional().describe("CPC do grupo em micros. 2500000 = R$2,50."),
         cpmBidMicros: z.number().optional().describe("CPM do grupo em micros (Display/Vídeo)."),
         targetCpaMicros: z.number().optional().describe("CPA alvo do grupo em micros."),
+        targetRoas: z.number().optional().describe("ROAS alvo do grupo (override) em decimal: 4.5 = 450%. De 0.01 a 1000."),
+        clearTargetCpa: z.boolean().optional().describe("true remove o CPA alvo próprio do grupo."),
+        clearTargetRoas: z.boolean().optional().describe("true remove o ROAS alvo próprio do grupo."),
         disableSearchTermMatching: z.boolean().optional().describe(
           "AI Max: true desliga a correspondência de termos neste grupo; false religa."
         ),
       },
     },
-    async ({ customerId, adGroupId, name, status, cpcBidMicros, cpmBidMicros, targetCpaMicros, disableSearchTermMatching }) => {
+    async ({
+      customerId, adGroupId, name, status, cpcBidMicros, cpmBidMicros, targetCpaMicros, targetRoas, clearTargetCpa, clearTargetRoas,
+      disableSearchTermMatching,
+    }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       if (!/^\d+$/.test(adGroupId)) {
@@ -1822,10 +2006,17 @@ export function registerGoogleAdsTools(
       const problems = ([["cpcBidMicros", cpcBidMicros], ["cpmBidMicros", cpmBidMicros], ["targetCpaMicros", targetCpaMicros]] as const)
         .filter(([, value]) => value !== undefined && !isPositiveMicros(value))
         .map(([label, value]) => `${label} deve ser inteiro positivo em micros (recebido ${value})`);
+      // TargetRoas.target_roas: "Value must be between 0.01 and 1000.0, inclusive" (common/bidding.proto)
+      if (targetRoas !== undefined && !(targetRoas >= 0.01 && targetRoas <= 1000)) {
+        problems.push(`targetRoas deve ficar entre 0.01 e 1000 (recebido ${targetRoas}; 4.5 = 450%)`);
+      }
+      if (clearTargetCpa && targetCpaMicros !== undefined) problems.push("use targetCpaMicros OU clearTargetCpa, não os dois");
+      if (clearTargetRoas && targetRoas !== undefined) problems.push("use targetRoas OU clearTargetRoas, não os dois");
       if (problems.length > 0) {
         return { content: [text(`Nada foi alterado:\n- ${problems.join("\n- ")}`)], isError: true };
       }
-      if ([name, status, cpcBidMicros, cpmBidMicros, targetCpaMicros, disableSearchTermMatching].every((value) => value === undefined)) {
+      if ([name, status, cpcBidMicros, cpmBidMicros, targetCpaMicros, targetRoas, clearTargetCpa || undefined, clearTargetRoas || undefined, disableSearchTermMatching]
+        .every((value) => value === undefined)) {
         return { content: [text("Error: provide at least one field.")], isError: true };
       }
 
@@ -1833,17 +2024,32 @@ export function registerGoogleAdsTools(
       const cid = customerId.replace(/-/g, "");
       const rows = await client.searchStream(customerId,
         `SELECT ad_group.id, ad_group.name, ad_group.status,
-                ad_group.cpc_bid_micros, ad_group.cpm_bid_micros, ad_group.target_cpa_micros,
+                ad_group.cpc_bid_micros, ad_group.cpm_bid_micros, ad_group.target_cpa_micros, ad_group.target_roas,
+                ad_group.effective_target_cpa_micros, ad_group.effective_target_cpa_source,
+                ad_group.effective_target_roas, ad_group.effective_target_roas_source,
                 ad_group.ai_max_ad_group_setting.disable_search_term_matching,
-                campaign.id, campaign.bidding_strategy_type,
-                campaign.maximize_conversions.target_cpa_micros
+                campaign.id, campaign.bidding_strategy_type, campaign.bidding_strategy,
+                campaign.maximize_conversions.target_cpa_micros,
+                campaign.maximize_conversion_value.target_roas
          FROM ad_group
          WHERE ad_group.id = ${adGroupId}`);
       const adGroup = rows[0]?.adGroup as Record<string, unknown> | undefined;
       if (!adGroup) {
         return { content: [text(`Grupo de anúncios ${adGroupId} não encontrado na conta ${cid}. Nada foi alterado.`)], isError: true };
       }
-      const strategy = String((rows[0]?.campaign as Record<string, unknown> | undefined)?.biddingStrategyType ?? "");
+      const campaignRow = (rows[0]?.campaign ?? {}) as Record<string, unknown>;
+      const strategy = String(campaignRow.biddingStrategyType ?? "");
+      const portfolio = typeof campaignRow.biddingStrategy === "string" && campaignRow.biddingStrategy !== "";
+      // "If the campaign is using a portfolio bidding strategy, this field cannot be set" (ad_group.proto, target_roas)
+      if (targetRoas !== undefined && portfolio) {
+        return {
+          content: [text(
+            `A campanha do grupo ${adGroupId} usa estratégia de portfólio (${campaignRow.biddingStrategy}): a API não aceita ROAS alvo por grupo. ` +
+            "Mude o alvo no portfólio (update_bidding_strategy) ou passe a campanha para estratégia padrão. Nada foi alterado."
+          )],
+          isError: true,
+        };
+      }
       const currentDisable = Boolean((adGroup.aiMaxAdGroupSetting as Record<string, unknown> | undefined)?.disableSearchTermMatching);
 
       const update: Record<string, unknown> = { resourceName: `customers/${cid}/adGroups/${adGroupId}` };
@@ -1861,6 +2067,16 @@ export function registerGoogleAdsTools(
       set("cpcBidMicros", "cpc_bid_micros", cpcBidMicros, adGroup.cpcBidMicros, cpcBidMicros !== undefined ? String(cpcBidMicros) : undefined);
       set("cpmBidMicros", "cpm_bid_micros", cpmBidMicros, adGroup.cpmBidMicros, cpmBidMicros !== undefined ? String(cpmBidMicros) : undefined);
       set("targetCpaMicros", "target_cpa_micros", targetCpaMicros, adGroup.targetCpaMicros, targetCpaMicros !== undefined ? String(targetCpaMicros) : undefined);
+      set("targetRoas", "target_roas", targetRoas, adGroup.targetRoas);
+      // Limpar o override: caminho no updateMask sem valor no objeto (docs "Ad group level target overrides").
+      if (clearTargetCpa && num(adGroup.targetCpaMicros) > 0) {
+        fields.push("target_cpa_micros");
+        changes.push({ setting: "targetCpaMicros", before: adGroup.targetCpaMicros, after: null });
+      }
+      if (clearTargetRoas && num(adGroup.targetRoas) > 0) {
+        fields.push("target_roas");
+        changes.push({ setting: "targetRoas", before: adGroup.targetRoas, after: null });
+      }
       if (disableSearchTermMatching !== undefined && disableSearchTermMatching !== currentDisable) {
         update.aiMaxAdGroupSetting = { disableSearchTermMatching };
         fields.push("ai_max_ad_group_setting.disable_search_term_matching");
@@ -1884,16 +2100,48 @@ export function registerGoogleAdsTools(
             : `A campanha usa ${strategy}: o CPA alvo do grupo só vale em Maximizar conversões com CPA alvo.`
         );
       }
+      // Pelo proto, o ROAS alvo do grupo só vale em TargetRoas ou MaximizeConversionValue COM ROAS alvo na campanha
+      const campaignTargetRoas = num((campaignRow.maximizeConversionValue as Record<string, unknown> | undefined)?.targetRoas);
+      if (targetRoas !== undefined && strategy && strategy !== "TARGET_ROAS" && !(strategy === "MAXIMIZE_CONVERSION_VALUE" && campaignTargetRoas > 0)) {
+        warnings.push(
+          strategy === "MAXIMIZE_CONVERSION_VALUE"
+            ? "A campanha usa Maximizar valor SEM ROAS alvo: o ROAS alvo do grupo é ignorado. Defina targetRoas na campanha (update_campaign)."
+            : `A campanha usa ${strategy}: o ROAS alvo do grupo só vale em TARGET_ROAS ou Maximizar valor com ROAS alvo.`
+        );
+      }
+      // Alvos efetivos ANTES da mudança (read-only na API): mostram de onde vem o alvo que vale hoje.
+      const effectiveBefore = {
+        target_cpa: num(adGroup.effectiveTargetCpaMicros) > 0 ? money(adGroup.effectiveTargetCpaMicros) : null,
+        target_cpa_source: adGroup.effectiveTargetCpaSource ?? null,
+        target_roas: num(adGroup.effectiveTargetRoas) > 0 ? round2(num(adGroup.effectiveTargetRoas)) : null,
+        target_roas_source: adGroup.effectiveTargetRoasSource ?? null,
+      };
 
       if (fields.length === 0) {
-        return { content: [text(`Grupo ${adGroupId}: nada a mudar — os valores pedidos já estão aplicados. Nenhuma escrita foi enviada.`)] };
+        return {
+          content: [text(
+            `Grupo ${adGroupId}: nada a mudar — os valores pedidos já estão aplicados. Nenhuma escrita foi enviada.\n\n` +
+            formatJson({ effective_targets: effectiveBefore })
+          )],
+        };
       }
-      const result = await client.mutateAdGroups(customerId, [{ update, updateMask: fields.join(",") }]);
+      let result: Record<string, unknown>;
+      try {
+        result = await client.mutateAdGroups(customerId, [{ update, updateMask: fields.join(",") }]);
+      } catch (err) {
+        return {
+          content: [text(
+            `Grupo ${adGroupId}: a API não aceitou a alteração. Nada foi alterado.\nErro: ${(err as Error).message}\n\n` +
+            formatJson({ attempted: changes, update_mask: fields })
+          )],
+          isError: true,
+        };
+      }
       const dryRun = client.isDryRun;
       return {
         content: [text(
           (dryRun ? `Grupo ${adGroupId} — DRY-RUN (validateOnly): validado, nada foi gravado.` : `Ad group ${adGroupId} updated.`) +
-          `\n\n${formatJson({ changes, warnings, update_mask: fields, result })}`
+          `\n\n${formatJson({ changes, warnings, update_mask: fields, effective_targets_before: effectiveBefore, result })}`
         )],
       };
     }
@@ -3939,14 +4187,38 @@ export function registerGoogleAdsTools(
       if (!confirm) return { content: [text("Error: set confirm: true to proceed.")], isError: true };
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
+      if (!/^\d+$/.test(campaignId)) {
+        return { content: [text(`campaignId deve ser numérico, recebido "${campaignId}". Nada foi removido.`)], isError: true };
+      }
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
 
-      const result = await client.mutateCampaigns(customerId, [
-        { remove: `customers/${cid}/campaigns/${campaignId}` },
-      ]);
-
-      return { content: [text(`Campaign ${campaignId} REMOVED.\n\n${formatJson(result)}`)] };
+      // Lê antes de remover: confirma que a campanha é desta conta, mostra o que sai e não
+      // reenvia remoção de campanha já removida.
+      const rows = await client.searchStream(customerId,
+        `SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type, campaign.bidding_strategy_type
+         FROM campaign
+         WHERE campaign.id = ${campaignId}`);
+      const campaign = rows[0]?.campaign as Record<string, unknown> | undefined;
+      if (!campaign) {
+        return { content: [text(`Campanha ${campaignId} não encontrada na conta ${cid}. Nada foi removido.`)], isError: true };
+      }
+      const label = `Campanha ${campaignId} ("${campaign.name}", ${campaign.advertisingChannelType})`;
+      if (campaign.status === "REMOVED") {
+        return { content: [text(`${label} já está removida. Nenhuma escrita foi enviada.`)] };
+      }
+      let result: Record<string, unknown>;
+      try {
+        result = await client.mutateCampaigns(customerId, [{ remove: `customers/${cid}/campaigns/${campaignId}` }]);
+      } catch (err) {
+        return { content: [text(`${label}: a API recusou a remoção. Nada foi removido.\nErro: ${(err as Error).message}`)], isError: true };
+      }
+      if (client.isDryRun) {
+        return { content: [text(`${label} — DRY-RUN (validateOnly): remoção validada, nada foi removido (status segue ${campaign.status}).`)] };
+      }
+      return {
+        content: [text(`${label} REMOVED (status antes: ${campaign.status}). Não dá para desfazer pela API.\n\n${formatJson(result)}`)],
+      };
     }
   );
 
@@ -3964,14 +4236,35 @@ export function registerGoogleAdsTools(
       if (!confirm) return { content: [text("Error: set confirm: true.")], isError: true };
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
+      if (!/^\d+$/.test(adGroupId)) {
+        return { content: [text(`adGroupId deve ser numérico, recebido "${adGroupId}". Nada foi removido.`)], isError: true };
+      }
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
 
-      const result = await client.mutateAdGroups(customerId, [
-        { remove: `customers/${cid}/adGroups/${adGroupId}` },
-      ]);
-
-      return { content: [text(`Ad group ${adGroupId} REMOVED.\n\n${formatJson(result)}`)] };
+      const rows = await client.searchStream(customerId,
+        `SELECT ad_group.id, ad_group.name, ad_group.status, campaign.id, campaign.name
+         FROM ad_group
+         WHERE ad_group.id = ${adGroupId}`);
+      const adGroup = rows[0]?.adGroup as Record<string, unknown> | undefined;
+      if (!adGroup) {
+        return { content: [text(`Grupo de anúncios ${adGroupId} não encontrado na conta ${cid}. Nada foi removido.`)], isError: true };
+      }
+      const campaign = (rows[0]?.campaign ?? {}) as Record<string, unknown>;
+      const label = `Grupo ${adGroupId} ("${adGroup.name}", campanha ${campaign.id} "${campaign.name}")`;
+      if (adGroup.status === "REMOVED") {
+        return { content: [text(`${label} já está removido. Nenhuma escrita foi enviada.`)] };
+      }
+      let result: Record<string, unknown>;
+      try {
+        result = await client.mutateAdGroups(customerId, [{ remove: `customers/${cid}/adGroups/${adGroupId}` }]);
+      } catch (err) {
+        return { content: [text(`${label}: a API recusou a remoção. Nada foi removido.\nErro: ${(err as Error).message}`)], isError: true };
+      }
+      if (client.isDryRun) {
+        return { content: [text(`${label} — DRY-RUN (validateOnly): remoção validada, nada foi removido (status segue ${adGroup.status}).`)] };
+      }
+      return { content: [text(`${label} REMOVED (status antes: ${adGroup.status}).\n\n${formatJson(result)}`)] };
     }
   );
 
