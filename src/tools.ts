@@ -3736,28 +3736,26 @@ export function registerGoogleAdsTools(
   mcp.registerTool(
     "list_audience_segments",
     {
-      description: "List available audience segments (custom, in-market, affinity) for targeting.",
+      description: [
+        "Lista segmentos de público. Sem type lista os Audiences (FROM audience), como antes.",
+        "Com type busca também USER_LIST, AFFINITY, IN_MARKET, LIFE_EVENT, DETAILED_DEMOGRAPHIC, CUSTOM e COMBINED",
+        "— o mesmo que search_audience_segments (lote audiences). Somente leitura.",
+      ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
-        query: z.string().optional().describe("Search by name (substring match)."),
-        limit: z.number().optional().describe("Max results. Default: 50."),
+        query: z.string().optional().describe("Trecho do nome (LIKE)."),
+        limit: z.number().optional().describe("Máximo de resultados (1–1000). Default: 50."),
+        type: z.enum(["AUDIENCE", "USER_LIST", "AFFINITY", "IN_MARKET", "LIFE_EVENT", "DETAILED_DEMOGRAPHIC", "CUSTOM", "COMBINED"])
+          .optional().describe("Tipo de segmento. Default: AUDIENCE."),
+        format: formatSchema,
       },
     },
-    async ({ customerId, query, limit }) => {
+    async ({ customerId, query, limit, type, format }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const nameFilter = query ? `AND audience.name LIKE '%${gaqlLiteral(query)}%'` : "";
-
-      const results = await client.searchStream(
-        customerId,
-        `SELECT audience.id, audience.name, audience.status, audience.description
-         FROM audience
-         WHERE audience.status = 'ENABLED' ${nameFilter}
-         LIMIT ${limit ?? 50}`
-      );
-
-      return { content: [text(`${results.length} audience(s).\n\n${formatJson(results)}`)] };
+      // Implementação no módulo do lote audiences (src/tools/audiences.ts)
+      const { searchAudienceSegments } = await import("./tools/audiences.js");
+      return searchAudienceSegments(getClient(), customerId, { type: type ?? "AUDIENCE", query, limit, format });
     }
   );
 
@@ -3765,46 +3763,29 @@ export function registerGoogleAdsTools(
     "create_audience_segment",
     {
       description: [
-        "Create a custom audience segment based on keywords, URLs, or apps.",
-        "WRITE OPERATION.",
+        "Cria um segmento personalizado (custom audience) a partir de keywords, URLs e/ou apps.",
+        "WRITE OPERATION — confere nome duplicado antes; membros no formato v25 (member_type + keyword/url/app).",
+        "",
+        "type: AUTO (default — interesses e intenção) ou SEARCH (quem pesquisou esses termos no Google).",
+        "INTEREST e PURCHASE_INTENT não são aceitos em segmentos novos.",
+        "Para usar: add_audience_segment_targeting com type CUSTOM_AUDIENCE (Display, Demand Gen, Vídeo).",
+        "Para editar membros depois: update_custom_audience.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
-        name: z.string().describe("Audience name."),
-        keywords: flexArray(z.string()).optional().describe("Interest keywords (e.g. ['marketing digital', 'e-commerce'])."),
-        urls: flexArray(z.string()).optional().describe("URLs of sites your audience visits."),
+        name: z.string().describe("Nome do segmento (único na conta, sem diferenciar maiúsculas)."),
+        description: z.string().optional().describe("Descrição."),
+        type: z.enum(["AUTO", "SEARCH"]).optional().describe("Default: AUTO."),
+        keywords: flexArray(z.string()).optional().describe("Keywords/frases de interesse (até 10 palavras e 80 caracteres cada)."),
+        urls: flexArray(z.string()).optional().describe("URLs com http(s):// de sites que o público visita (ex.: concorrentes)."),
+        apps: flexArray(z.string()).optional().describe("Pacotes de apps Android que o público usa (ex.: com.empresa.app)."),
       },
     },
-    async ({ customerId, name, keywords, urls }) => {
+    async ({ customerId, ...args }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const cid = customerId.replace(/-/g, "");
-
-      const members: Array<Record<string, unknown>> = [];
-      if (keywords) {
-        for (const kw of keywords) {
-          members.push({ keywordInfo: { text: kw, matchType: "BROAD" } });
-        }
-      }
-      if (urls) {
-        for (const url of urls) {
-          members.push({ urlInfo: { url } });
-        }
-      }
-
-      const result = await client.mutate(customerId, "customAudiences", [
-        {
-          create: {
-            name,
-            type: "AUTO",
-            status: "ENABLED",
-            members,
-          },
-        },
-      ]);
-
-      return { content: [text(`Custom audience created: ${name}\n\n${formatJson(result)}`)] };
+      const { createCustomAudience } = await import("./tools/audiences.js");
+      return createCustomAudience(getClient(), customerId, args);
     }
   );
 
@@ -3812,36 +3793,46 @@ export function registerGoogleAdsTools(
     "update_ad_group_targeting",
     {
       description: [
-        "Add audience targeting to an ad group.",
-        "WRITE OPERATION — adds an audience criterion.",
+        "Adiciona um segmento de público a um grupo de anúncios.",
+        "WRITE OPERATION — mesmas validações de add_audience_segment_targeting (level=adGroup), que aceita vários",
+        "segmentos, nível de campanha e exclusões.",
         "",
-        "Use list_audience_segments to find audience IDs.",
-        "Bid modifier: 1.0 = no adjustment, 1.5 = +50%, 0.5 = -50%.",
+        "O tipo sai do resource name: userLists (remarketing/Customer Match), userInterests (afinidade/no mercado),",
+        "customAudiences, combinedAudiences, lifeEvents ou audiences (Audience: só Demand Gen/App com use_audience_grouped).",
+        "Com um ID numérico, informe segmentType.",
+        "bidModifier só é enviado se informado (1.2 = +20%). Em Pesquisa/Shopping sem restrição, o modo fica Observação.",
+        "Se o targeting_setting estiver na campanha (vale para todos os grupos), a tool não troca o modo a partir do grupo:",
+        "use set_targeting_mode level=campaign ou targetingMode KEEP.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
         adGroupId: z.string().describe("Ad group ID."),
-        audienceResourceName: z.string().describe("Audience resource name (from list_audience_segments)."),
-        bidModifier: z.number().optional().describe("Bid modifier. Default: 1.0 (no adjustment)."),
+        audienceResourceName: z.string().describe("Resource name do segmento (ou o ID numérico com segmentType)."),
+        segmentType: z.enum(["USER_LIST", "USER_INTEREST", "CUSTOM_AUDIENCE", "COMBINED_AUDIENCE", "LIFE_EVENT", "AUDIENCE"])
+          .optional().describe("Tipo do segmento, se não der para inferir do resource name."),
+        bidModifier: z.number().optional().describe("Ajuste de lance 0.1–10 (1.0 = sem ajuste). Só se informado."),
+        negative: z.boolean().optional().describe("true = exclusão."),
+        targetingMode: z.enum(["OBSERVATION", "TARGETING", "KEEP"]).optional().describe("Modo da dimensão AUDIENCE do grupo (ver add_audience_segment_targeting); nunca troca o modo da campanha."),
       },
     },
-    async ({ customerId, adGroupId, audienceResourceName, bidModifier }) => {
+    async ({ customerId, adGroupId, audienceResourceName, segmentType, bidModifier, negative, targetingMode }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const cid = customerId.replace(/-/g, "");
-
-      const result = await client.mutateAdGroupCriteria(customerId, [
-        {
-          create: {
-            adGroup: `customers/${cid}/adGroups/${adGroupId}`,
-            audience: { audience: audienceResourceName },
-            bidModifier: bidModifier ?? 1.0,
-          },
-        },
-      ]);
-
-      return { content: [text(`Audience targeting added to ad group ${adGroupId}.\n\n${formatJson(result)}`)] };
+      const { addAudienceSegmentTargeting, inferSegmentType } = await import("./tools/audiences.js");
+      const type = segmentType ?? inferSegmentType(audienceResourceName);
+      if (!type) {
+        return {
+          content: [text(`Não identifiquei o tipo de "${audienceResourceName}". Passe o resource name completo (customers/{cid}/userLists/{id}, ` +
+            `.../audiences/{id} etc.) ou informe segmentType. Nada foi alterado.`)],
+          isError: true,
+        };
+      }
+      return addAudienceSegmentTargeting(getClient(), customerId, {
+        level: "adGroup",
+        adGroupId,
+        segments: [{ type, resourceName: audienceResourceName, negative, bidModifier }],
+        targetingMode,
+      });
     }
   );
 
@@ -4378,50 +4369,26 @@ export function registerGoogleAdsTools(
     "list_remarketing_lists",
     {
       description: [
-        "List all remarketing/audience lists in the account with size and membership details.",
-        "Shows list name, type, size for display/search, membership lifespan, and membership_status (OPEN/CLOSED). Lista todas, inclusive fechadas.",
+        "Lista as listas de público da conta (remarketing, lógicas, Customer Match...) com tamanho e status.",
+        "Mostra tipo, tamanhos (Display/Pesquisa e faixas), membership_status (OPEN/CLOSED, inclusive fechadas),",
+        "a regra legível das listas rule-based (com a janela de cada regra), a pré-população, a combinação das",
+        "listas lógicas e a taxa de correspondência das listas de Customer Match. Somente leitura.",
+        "Em rule-based/lógicas, membership_days é null: a API ignora essa duração — ela está nas regras.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
-        query: z.string().optional().describe("Filter by name (substring match)."),
+        query: z.string().optional().describe("Trecho do nome (LIKE)."),
+        type: z.enum(["REMARKETING", "LOGICAL", "EXTERNAL_REMARKETING", "RULE_BASED", "SIMILAR", "CRM_BASED", "LOOKALIKE"])
+          .optional().describe("Filtra por tipo."),
+        format: formatSchema,
       },
     },
-    async ({ customerId, query }) => {
+    async ({ customerId, query, type, format }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      // Sem filtro de status: user_list.status não existe na v25, e filtrar por
-      // membership_status esconderia listas CLOSED, que são legítimas e reabríveis.
-      const nameFilter = query ? `WHERE user_list.name LIKE '%${gaqlLiteral(query)}%'` : "";
-
-      const results = await client.searchStream(customerId,
-        `SELECT user_list.id, user_list.name, user_list.type,
-                user_list.size_for_display, user_list.size_for_search,
-                user_list.membership_life_span, user_list.description,
-                user_list.membership_status, user_list.eligible_for_display,
-                user_list.eligible_for_search
-         FROM user_list
-         ${nameFilter}
-         ORDER BY user_list.size_for_display DESC`
-      );
-
-      const lists = results.map(r => {
-        const ul = r.userList as Record<string, unknown>;
-        return {
-          id: ul?.id,
-          name: ul?.name,
-          type: ul?.type,
-          size_display: ul?.sizeForDisplay,
-          size_search: ul?.sizeForSearch,
-          membership_days: ul?.membershipLifeSpan,
-          membership_status: ul?.membershipStatus,
-          eligible_display: ul?.eligibleForDisplay,
-          eligible_search: ul?.eligibleForSearch,
-          description: ul?.description,
-        };
-      });
-
-      return { content: [text(`${lists.length} remarketing list(s).\n\n${formatJson(lists)}`)] };
+      // Implementação no módulo do lote audiences (src/tools/audiences.ts)
+      const { listRemarketingLists } = await import("./tools/audiences.js");
+      return listRemarketingLists(getClient(), customerId, { query, type, format });
     }
   );
 
@@ -4498,78 +4465,60 @@ export function registerGoogleAdsTools(
     "create_remarketing_list",
     {
       description: [
-        "Create a rule-based remarketing list.",
-        "WRITE OPERATION.",
+        "Cria uma lista de remarketing por regras (visitantes do site).",
+        "WRITE OPERATION — confere nome duplicado antes.",
         "",
-        "Rule types:",
-        "- URL contains: match visitors who visited pages containing a string",
-        "- URL equals: match visitors who visited an exact URL",
-        "- Custom combination: combine multiple rules with AND/OR",
+        "Cada regra vira um operando próprio com a sua janela (lookbackDays, default membershipLifeSpan):",
+        "- ruleOperator OR (default): visitou A OU B; AND: visitou A E B (cada um na sua janela).",
+        "- excludeRules: cada exclusão é um operando, combinadas em OU (ex.: excluir quem comprou OU finalizou).",
+        "- ruleType: URL_CONTAINS, URL_EQUALS, URL_STARTS_WITH, URL_ENDS_WITH, REFERRER_URL_CONTAINS ou",
+        "  CUSTOM_PARAMETER {parameterName, operator, value} para parâmetros que a tag envia (ex.: ecomm_pagetype).",
+        "  CUSTOM_EVENT foi retirado (gravava ecomm_pagetype, o que não é evento).",
+        "- prepopulate (default true): inclui quem já visitou (até 30 dias, só Display); sem isso a lista começa vazia.",
         "",
-        "For GA4-based lists, create in GA4 and they sync automatically.",
-        "For CRM/customer match lists, use Google Ads UI (requires hashed data upload).",
+        "Para combinar listas (ex.: carrinho E NÃO compradores): create_logical_user_list.",
+        "Listas do GA4 sincronizam sozinhas; Customer Match: create_customer_match_list.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
-        name: z.string().describe("List name."),
-        description: z.string().optional().describe("List description."),
-        membershipLifeSpan: z.number().describe("Days a user stays in the list (1-540). Common: 30, 60, 90."),
+        name: z.string().describe("Nome da lista (único na conta)."),
+        description: z.string().optional().describe("Descrição."),
+        membershipLifeSpan: z.number().describe("Janela padrão de cada regra, em dias (1–540). Comuns: 30, 60, 90."),
         rules: z.array(z.object({
-          ruleType: z.enum(["URL_CONTAINS", "URL_EQUALS", "CUSTOM_EVENT"]).describe("Rule type."),
-          value: z.string().describe("Value to match (URL string or event name)."),
-        })).describe("Rules for list membership."),
-        ruleOperator: z.enum(["AND", "OR"]).optional().describe("How to combine rules. Default: OR."),
+          ruleType: z.enum(["URL_CONTAINS", "URL_EQUALS", "URL_STARTS_WITH", "URL_ENDS_WITH", "REFERRER_URL_CONTAINS", "CUSTOM_PARAMETER", "CUSTOM_EVENT"])
+            .describe("Tipo da regra."),
+          value: z.string().describe("Trecho/URL, ou o valor do parâmetro."),
+          parameterName: z.string().optional().describe("CUSTOM_PARAMETER: nome do parâmetro da tag."),
+          operator: z.enum([
+            "CONTAINS", "EQUALS", "STARTS_WITH", "ENDS_WITH", "NOT_EQUALS", "NOT_CONTAINS", "NOT_STARTS_WITH", "NOT_ENDS_WITH",
+            "GREATER_THAN", "GREATER_THAN_OR_EQUAL", "LESS_THAN", "LESS_THAN_OR_EQUAL",
+          ]).optional().describe("CUSTOM_PARAMETER: operador. Default: EQUALS."),
+          valueType: z.enum(["STRING", "NUMBER"]).optional().describe("CUSTOM_PARAMETER: tipo do valor. Default: STRING (GREATER/LESS usam NUMBER)."),
+          lookbackDays: z.number().optional().describe("Janela desta regra (1–540). Default: membershipLifeSpan."),
+        })).describe("Regras de inclusão."),
+        ruleOperator: z.enum(["AND", "OR"]).optional().describe("Como combinar as regras de inclusão. Default: OR."),
         excludeRules: z.array(z.object({
-          ruleType: z.enum(["URL_CONTAINS", "URL_EQUALS", "CUSTOM_EVENT"]).describe("Rule type to exclude."),
-          value: z.string().describe("Value to match for exclusion."),
-        })).optional().describe("Exclusion rules (e.g. exclude purchasers)."),
-        excludeLifeSpan: z.number().optional().describe("Days for exclusion rule (e.g. 7 = exclude purchasers from last 7 days)."),
+          ruleType: z.enum(["URL_CONTAINS", "URL_EQUALS", "URL_STARTS_WITH", "URL_ENDS_WITH", "REFERRER_URL_CONTAINS", "CUSTOM_PARAMETER", "CUSTOM_EVENT"])
+            .describe("Tipo da regra de exclusão."),
+          value: z.string().describe("Valor da exclusão."),
+          parameterName: z.string().optional(),
+          operator: z.enum([
+            "CONTAINS", "EQUALS", "STARTS_WITH", "ENDS_WITH", "NOT_EQUALS", "NOT_CONTAINS", "NOT_STARTS_WITH", "NOT_ENDS_WITH",
+            "GREATER_THAN", "GREATER_THAN_OR_EQUAL", "LESS_THAN", "LESS_THAN_OR_EQUAL",
+          ]).optional(),
+          valueType: z.enum(["STRING", "NUMBER"]).optional(),
+          lookbackDays: z.number().optional().describe("Janela desta exclusão. Default: excludeLifeSpan ou membershipLifeSpan."),
+        })).optional().describe("Exclusões (ex.: compradores), combinadas em OU."),
+        excludeLifeSpan: z.number().optional().describe("Janela padrão das exclusões (ex.: 7 = compradores dos últimos 7 dias). Default: membershipLifeSpan."),
+        prepopulate: z.boolean().optional().describe("Inclui visitantes passados (REQUESTED). Default: true."),
       },
     },
-    async ({ customerId, name, description, membershipLifeSpan, rules, ruleOperator, excludeRules, excludeLifeSpan }) => {
+    async ({ customerId, ...args }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-
-      const makeRuleItem = (r: unknown) => {
-        const rule = r as Record<string, string>;
-        const op = rule.ruleType === "URL_CONTAINS" ? "CONTAINS" : "EQUALS";
-        const fieldName = rule.ruleType === "CUSTOM_EVENT" ? "ecomm_pagetype" : "url__";
-        return { name: fieldName, stringRuleItem: { operator: op, value: rule.value } };
-      };
-
-      const inclusiveRuleItems = ensureArray(rules).map(makeRuleItem);
-
-      const flexRule: Record<string, unknown> = {
-        inclusiveRuleOperator: (ruleOperator ?? "OR") === "AND" ? "AND" : "OR",
-        inclusiveOperands: [{ rule: { ruleItemGroups: [{ ruleItems: inclusiveRuleItems }] } }],
-      };
-
-      if (excludeRules && ensureArray(excludeRules).length > 0) {
-        const exclusiveRuleItems = ensureArray(excludeRules).map(makeRuleItem);
-        flexRule.exclusiveOperands = [{
-          rule: { ruleItemGroups: [{ ruleItems: exclusiveRuleItems }] },
-          ...(excludeLifeSpan && { lookbackWindowDays: excludeLifeSpan }),
-        }];
-      }
-
-      const listData: Record<string, unknown> = {
-        name,
-        membershipLifeSpan,
-        membershipStatus: "OPEN",
-        ruleBasedUserList: { flexibleRuleUserList: flexRule },
-      };
-      if (description) listData.description = description;
-
-      // NOTE: If flexibleRuleUserList fails (v23 format change), the tool will
-      // return the API error. Use GA4-based lists (created in GA4 UI) for more
-      // reliable rule-based remarketing — they sync automatically to Google Ads.
-
-      const result = await client.mutateUserLists(customerId, [{ create: listData }]);
-      const results = (result as Record<string, unknown>).results as Array<Record<string, unknown>> | undefined;
-      const resourceName = results?.[0]?.resourceName as string;
-
-      return { content: [text(`Remarketing list created: "${name}"\nMembership: ${membershipLifeSpan} days\nRules: ${ensureArray(rules).length} inclusion, ${ensureArray(excludeRules).length} exclusion\nResource: ${resourceName}\n\n${formatJson(result)}`)] };
+      // Implementação no módulo do lote audiences (src/tools/audiences.ts)
+      const { createRemarketingList } = await import("./tools/audiences.js");
+      return createRemarketingList(getClient(), customerId, args);
     }
   );
 
@@ -4577,45 +4526,29 @@ export function registerGoogleAdsTools(
     "update_remarketing_list",
     {
       description: [
-        "Update an existing remarketing list (name, description, membership lifespan).",
-        "WRITE OPERATION.",
+        "Edita uma lista de público: nome, descrição, duração, status (OPEN/CLOSED) e elegibilidade para Pesquisa.",
+        "WRITE OPERATION — lê antes, mostra antes/depois e não grava se nada muda.",
         "",
-        "Note: Rules cannot be changed after creation. To change rules, create a new list.",
+        "Duração (membershipLifeSpan) só vale para listas que não são rule-based nem lógicas (ex.: Customer Match):",
+        "nas rule-based a duração é a janela de cada regra, e as regras não mudam depois de criadas — crie outra lista.",
+        "Fechar (CLOSED) para de acumular membros e exige confirm: true.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
         userListId: z.string().describe("User list ID."),
-        name: z.string().optional().describe("New name."),
-        description: z.string().optional().describe("New description."),
-        membershipLifeSpan: z.number().optional().describe("New membership lifespan in days (1-540)."),
-        status: z.enum(["OPEN", "CLOSED"]).optional().describe("OPEN = accepting new members, CLOSED = no new members."),
+        name: z.string().optional().describe("Novo nome."),
+        description: z.string().optional().describe("Nova descrição."),
+        membershipLifeSpan: z.number().optional().describe("Nova duração em dias (1–540). Não vale para rule-based/lógicas."),
+        status: z.enum(["OPEN", "CLOSED"]).optional().describe("OPEN = acumula membros; CLOSED = para de acumular."),
+        eligibleForSearch: z.boolean().optional().describe("Elegível para a rede de Pesquisa."),
+        confirm: z.boolean().optional().describe("Obrigatório true para fechar (CLOSED)."),
       },
     },
-    async ({ customerId, userListId, name, description, membershipLifeSpan, status }) => {
+    async ({ customerId, ...args }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const cid = customerId.replace(/-/g, "");
-
-      const update: Record<string, unknown> = {
-        resourceName: `customers/${cid}/userLists/${userListId}`,
-      };
-      const fields: string[] = [];
-
-      if (name) { update.name = name; fields.push("name"); }
-      if (description) { update.description = description; fields.push("description"); }
-      if (membershipLifeSpan) { update.membershipLifeSpan = membershipLifeSpan; fields.push("membership_life_span"); }
-      if (status) { update.membershipStatus = status; fields.push("membership_status"); }
-
-      if (fields.length === 0) {
-        return { content: [text("Error: provide at least one field to update.")], isError: true };
-      }
-
-      const result = await client.mutateUserLists(customerId, [
-        { update, updateMask: fields.join(",") },
-      ]);
-
-      return { content: [text(`Remarketing list ${userListId} updated: ${fields.join(", ")}.\n\n${formatJson(result)}`)] };
+      const { updateRemarketingList } = await import("./tools/audiences.js");
+      return updateRemarketingList(getClient(), customerId, args);
     }
   );
 
