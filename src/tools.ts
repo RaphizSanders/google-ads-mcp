@@ -785,47 +785,85 @@ export function registerGoogleAdsTools(
         "Get PURCHASE-only conversions per campaign.",
         "Filters by segments.conversion_action_category = 'PURCHASE'.",
         "Use this to get true e-commerce purchase count (not all conversions).",
+        "purchase_conversions/purchase_revenue = coluna Conversões (ações de compra primárias, as que guiam o lance);",
+        "all_purchase_conversions/all_purchase_revenue = Todas as conversões (inclui ações de compra secundárias).",
+        "Para ver cada ação de compra separada: get_conversions_by_action com category=PURCHASE.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
         dateRange: dateRangeSchema.describe(DATE_RANGE_DESC),
         days: z.number().optional().describe(DAYS_DESC),
+        campaignId: z.string().optional().describe("Só esta campanha (ID numérico)."),
+        format: formatSchema,
       },
     },
-    async ({ customerId, dateRange, days }) => {
+    async ({ customerId, dateRange, days, campaignId, format }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
+      if (campaignId !== undefined && !/^\d+$/.test(campaignId)) {
+        return { content: [text(`campaignId deve ser numérico, recebido "${campaignId}". Nada foi consultado.`)], isError: true };
+      }
       const client = getClient();
       const dateClause = buildDateClause(dateRange, days);
 
+      // campaign.id na chave: nome de campanha não é único. all_conversions revela compras
+      // de ações secundárias, que a coluna Conversões (metrics.conversions) não mostra.
       const results = await client.searchStream(
         customerId,
-        `SELECT campaign.name, segments.conversion_action_category,
-                metrics.conversions, metrics.conversions_value
+        `SELECT campaign.id, campaign.name, segments.conversion_action_category,
+                metrics.conversions, metrics.conversions_value,
+                metrics.all_conversions, metrics.all_conversions_value
          FROM campaign
          WHERE ${dateClause}
            AND segments.conversion_action_category = 'PURCHASE'
-           AND campaign.status != 'REMOVED'
+           AND campaign.status != 'REMOVED'${campaignId ? `
+           AND campaign.id = ${campaignId}` : ""}
          ORDER BY metrics.conversions_value DESC`
       );
 
-      const campaigns = results.map((r) => {
-        const c = r.campaign as Record<string, unknown>;
-        const m = r.metrics as Record<string, unknown>;
-        return {
-          campaign_name: c?.name,
-          purchase_conversions: num(m?.conversions),
-          purchase_revenue: Math.round(num(m?.conversionsValue) * 100) / 100,
+      const byCampaign = new Map<string, {
+        campaign_id: string; campaign_name: unknown;
+        purchase_conversions: number; purchase_revenue: number;
+        all_purchase_conversions: number; all_purchase_revenue: number;
+      }>();
+      for (const r of results) {
+        const c = (r.campaign ?? {}) as Record<string, unknown>;
+        const m = (r.metrics ?? {}) as Record<string, unknown>;
+        const key = String(c.id ?? c.name ?? "");
+        const acc = byCampaign.get(key) ?? {
+          campaign_id: String(c.id ?? ""), campaign_name: c.name,
+          purchase_conversions: 0, purchase_revenue: 0, all_purchase_conversions: 0, all_purchase_revenue: 0,
         };
-      });
+        acc.purchase_conversions += num(m.conversions);
+        acc.purchase_revenue += num(m.conversionsValue);
+        acc.all_purchase_conversions += num(m.allConversions);
+        acc.all_purchase_revenue += num(m.allConversionsValue);
+        byCampaign.set(key, acc);
+      }
+      const campaigns = [...byCampaign.values()].map((c) => ({
+        ...c,
+        purchase_conversions: round2(c.purchase_conversions),
+        purchase_revenue: round2(c.purchase_revenue),
+        all_purchase_conversions: round2(c.all_purchase_conversions),
+        all_purchase_revenue: round2(c.all_purchase_revenue),
+      }));
 
-      const totalConv = campaigns.reduce((sum, c) => sum + c.purchase_conversions, 0);
+      const totalConv = round2(campaigns.reduce((sum, c) => sum + c.purchase_conversions, 0));
       const totalRev = campaigns.reduce((sum, c) => sum + c.purchase_revenue, 0);
+      const totalAllConv = round2(campaigns.reduce((sum, c) => sum + c.all_purchase_conversions, 0));
+      const totalAllRev = campaigns.reduce((sum, c) => sum + c.all_purchase_revenue, 0);
+      const secondaryNote = totalAllConv > totalConv
+        ? `\nTodas as conversões de compra: ${totalAllConv} (R$ ${totalAllRev.toFixed(2)}) — ${round2(totalAllConv - totalConv)} vêm de ações de ` +
+          "compra fora da coluna Conversões (secundárias). Veja get_conversions_by_action com category=PURCHASE."
+        : "";
+      const header = `Total: ${totalConv} compras, R$ ${totalRev.toFixed(2)} receita.${secondaryNote}`;
 
+      if (format === "table") return { content: [text(`${header}\n\n${formatAsTable(campaigns)}`)] };
+      if (format === "csv") return { content: [text(formatAsCsv(campaigns))] };
       return {
         content: [
           text(
-            `Total: ${totalConv} compras, R$ ${totalRev.toFixed(2)} receita.\n\n${formatJson(campaigns)}`
+            `${header}\n\n${formatJson(campaigns)}`
           ),
         ],
       };
