@@ -3245,27 +3245,44 @@ export function registerGoogleAdsTools(
   mcp.registerTool(
     "get_asset_group_performance",
     {
-      description: "Get performance metrics for asset groups in a PMax campaign.",
+      description: [
+        "Métricas por grupo de recursos de uma campanha PMax: gasto, impressões, cliques, conversões, receita,",
+        "ROAS e CPA, com status, status principal e força do anúncio.",
+        "READ OPERATION. Opcional: assetGroupId para um grupo só; format json/table/csv.",
+        "Sinais do grupo: list_asset_group_signals. Combinações que mais veicularam: get_pmax_top_combinations.",
+      ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
-        campaignId: z.string().describe("Campaign ID."),
+        campaignId: z.string().describe("ID da campanha PMax."),
+        assetGroupId: z.string().optional().describe("Só este grupo de recursos (opcional)."),
         dateRange: dateRangeSchema.describe(DATE_RANGE_DESC),
         days: z.number().optional().describe(DAYS_DESC),
+        format: formatSchema,
       },
     },
-    async ({ customerId, campaignId, dateRange, days }) => {
+    async ({ customerId, campaignId, assetGroupId, dateRange, days, format }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
+      // Os IDs entram direto no GAQL: só dígitos passam
+      if (!/^\d+$/.test(String(campaignId).trim())) {
+        return { content: [text(`campaignId deve ser numérico, recebido "${campaignId}".`)], isError: true };
+      }
+      if (assetGroupId !== undefined && !/^\d+$/.test(String(assetGroupId).trim())) {
+        return { content: [text(`assetGroupId deve ser numérico, recebido "${assetGroupId}".`)], isError: true };
+      }
       const client = getClient();
       const dateClause = buildDateClause(dateRange, days);
+      const groupFilter = assetGroupId !== undefined ? `AND asset_group.id = ${String(assetGroupId).trim()}` : "";
 
       const results = await client.searchStream(
         customerId,
-        `SELECT asset_group.id, asset_group.name, asset_group.ad_strength,
+        `SELECT asset_group.id, asset_group.name, asset_group.status, asset_group.ad_strength,
+                asset_group.primary_status,
                 metrics.cost_micros, metrics.impressions, metrics.clicks,
                 metrics.conversions, metrics.conversions_value
          FROM asset_group
-         WHERE campaign.id = ${campaignId}
+         WHERE campaign.id = ${String(campaignId).trim()}
+           ${groupFilter}
            AND ${dateClause}
            AND asset_group.status != 'REMOVED'
          ORDER BY metrics.cost_micros DESC`
@@ -3276,20 +3293,26 @@ export function registerGoogleAdsTools(
         const m = r.metrics as Record<string, unknown>;
         const spend = microsToMoney(m?.costMicros);
         const convValue = num(m?.conversionsValue);
+        const conversions = num(m?.conversions);
         return {
           asset_group_id: ag?.id,
           name: ag?.name,
+          status: ag?.status,
+          primary_status: ag?.primaryStatus,
           ad_strength: ag?.adStrength,
           spend: Math.round(spend * 100) / 100,
           impressions: num(m?.impressions),
           clicks: num(m?.clicks),
-          conversions: num(m?.conversions),
+          conversions: Math.round(conversions * 100) / 100,
           revenue: Math.round(convValue * 100) / 100,
           roas: spend > 0 ? Math.round((convValue / spend) * 100) / 100 : 0,
+          cpa: conversions > 0 ? Math.round((spend / conversions) * 100) / 100 : null,
         };
       });
 
-      return { content: [text(`${groups.length} asset group(s).\n\n${formatJson(groups)}`)] };
+      if (format === "table") return { content: [text(formatAsTable(groups as Array<Record<string, unknown>>))] };
+      if (format === "csv") return { content: [text(formatAsCsv(groups as Array<Record<string, unknown>>))] };
+      return { content: [text(`${groups.length} grupo(s) de recursos.\n\n${formatJson(groups)}`)] };
     }
   );
 
@@ -4531,48 +4554,31 @@ export function registerGoogleAdsTools(
     "add_audience_signal",
     {
       description: [
-        "Add an audience signal to a PMax asset group.",
+        "Adiciona UM sinal a um grupo de recursos Performance Max: um público (Audience) ou um tema de pesquisa.",
         "WRITE OPERATION.",
         "",
-        "Audience signals tell PMax which users to prioritize. They DON'T restrict targeting",
-        "— PMax still finds new audiences, but starts with these as hints.",
+        "Sinais orientam o PMax sobre quem priorizar — não restringem a segmentação.",
+        "- audience: vincula um público existente (ID ou customers/{cid}/audiences/{id}). O grupo aceita UM público;",
+        "  se já houver outro, a tool recusa e indica manage_asset_group_signals (troca) ou update_audience (edição).",
+        "- search_theme: tema de pesquisa de até 10 palavras; tema já existente não é reenviado.",
         "",
-        "Two types:",
-        "1. Audience signal: link an existing Audience (from list_audience_segments) or create one from user lists",
-        "2. Search theme signal: add a keyword/phrase signal",
-        "",
-        "For remarketing PMax: first use list_remarketing_lists to find existing populated lists,",
-        "then create an Audience from them, then link as signal.",
-        "",
-        "IMPORTANT: Do NOT create new empty remarketing lists. Use existing populated ones.",
+        "Confere antes que o grupo existe, é de PMax e não está removido. Para vários sinais de uma vez, remoções e",
+        "relatório por item: manage_asset_group_signals. Para montar o público: create_audience.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
-        assetGroupId: z.string().describe("Asset group ID."),
-        signalType: z.enum(["audience", "search_theme"]).describe("Signal type."),
-        audienceResourceName: z.string().optional().describe("For 'audience' type: Audience resource name. Create with create_audience_from_lists if needed."),
-        searchThemeText: z.string().optional().describe("For 'search_theme' type: keyword/phrase."),
+        assetGroupId: z.string().describe("ID do grupo de recursos PMax."),
+        signalType: z.enum(["audience", "search_theme"]).describe("Tipo de sinal."),
+        audienceResourceName: z.string().optional().describe("Tipo 'audience': ID ou resource name do público (create_audience cria um)."),
+        searchThemeText: z.string().optional().describe("Tipo 'search_theme': o tema (até 10 palavras)."),
       },
     },
     async ({ customerId, assetGroupId, signalType, audienceResourceName, searchThemeText }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const cid = customerId.replace(/-/g, "");
-      const agResource = `customers/${cid}/assetGroups/${assetGroupId}`;
-
-      if (signalType === "audience" && audienceResourceName) {
-        await client.mutateAssetGroupSignals(customerId, [
-          { create: { assetGroup: agResource, audience: { audience: audienceResourceName } } },
-        ] as unknown as import("./google-ads-client.js").MutateOperation[]);
-        return { content: [text(`Audience signal linked to asset group ${assetGroupId}.\nAudience: ${audienceResourceName}`)] };
-      } else if (signalType === "search_theme" && searchThemeText) {
-        await client.mutateAssetGroupSignals(customerId, [
-          { create: { assetGroup: agResource, searchTheme: { text: searchThemeText } } },
-        ] as unknown as import("./google-ads-client.js").MutateOperation[]);
-        return { content: [text(`Search theme signal added: "${searchThemeText}"\nAsset group: ${assetGroupId}`)] };
-      }
-      return { content: [text("Error: provide audienceResourceName for 'audience' type or searchThemeText for 'search_theme' type.")], isError: true };
+      // Implementação no módulo do lote pmax-signals (validação, leitura antes da escrita, dry-run)
+      const { addAudienceSignal } = await import("./tools/pmax-signals.js");
+      return addAudienceSignal(getClient(), customerId, { assetGroupId, signalType, audienceResourceName, searchThemeText });
     }
   );
 
@@ -4580,41 +4586,36 @@ export function registerGoogleAdsTools(
     "create_audience_from_lists",
     {
       description: [
-        "Create an Audience resource from existing user lists (remarketing lists).",
+        "Cria um público (Audience) a partir de listas de público existentes (remarketing, Customer Match, GA4).",
         "WRITE OPERATION.",
         "",
-        "Use this to combine multiple remarketing lists into one Audience,",
-        "then link it as a signal to a PMax asset group with add_audience_signal.",
-        "",
-        "First call list_remarketing_lists to find populated lists (size > 0).",
-        "Pass their resource names (customers/XXX/userLists/YYY format).",
+        "Atalho de create_audience só com listas. Confere antes que cada lista existe na conta e que o nome não",
+        "está em uso. Depois vincule como sinal com add_audience_signal ou manage_asset_group_signals.",
+        "Para combinar com interesses, segmentos personalizados, demografia ou exclusões, use create_audience.",
+        "Use listas já populadas (list_remarketing_lists) — lista vazia não ajuda o sinal.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
-        name: z.string().describe("Audience name."),
-        userListResourceNames: flexArray(z.string()).describe("Resource names of user lists to include."),
+        name: z.string().describe("Nome único do público."),
+        userListResourceNames: flexArray(z.string()).describe("Listas: customers/{cid}/userLists/{id} ou só o ID numérico."),
       },
     },
     async ({ customerId, name, userListResourceNames }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const lists = ensureArray<string>(userListResourceNames);
-
-      const segments = lists.map(ul => ({ userList: { userList: ul } }));
-
-      const result = await client.mutateAudiences(customerId, [
-        {
-          create: {
-            name,
-            status: "ENABLED",
-            dimensions: [{ audienceSegments: { segments } }],
-          },
-        },
-      ] as unknown as import("./google-ads-client.js").MutateOperation[]);
-
-      const resourceName = ((result as Record<string, unknown>).results as Array<Record<string, unknown>>)?.[0]?.resourceName as string;
-      return { content: [text(`Audience created: "${name}"\nResource: ${resourceName}\nUser lists: ${lists.length}\n\nUse this resource name in add_audience_signal.`)] };
+      const cid = customerId.replace(/-/g, "");
+      if (!/^\d+$/.test(cid)) return { content: [text(`customerId inválido: "${customerId}". Nada foi criado.`)], isError: true };
+      if (ensureArray<unknown>(userListResourceNames).length === 0) {
+        return { content: [text("Informe ao menos uma lista em userListResourceNames. Nada foi criado.")], isError: true };
+      }
+      // Implementação no módulo do lote pmax-signals (mesmo núcleo de create_audience)
+      const { createAudienceCore } = await import("./tools/pmax-signals.js");
+      return createAudienceCore(getClient(), cid, {
+        toolName: "create_audience_from_lists",
+        name,
+        scope: "CUSTOMER",
+        userLists: userListResourceNames,
+      });
     }
   );
 
