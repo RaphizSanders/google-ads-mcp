@@ -1,14 +1,22 @@
 #!/usr/bin/env node
 
-// A lista esperada vem do proprio catalogo classificado em src/read-only.ts,
-// lido do fonte (nao do build) para o script rodar tambem no workflow de publish,
-// que verifica a imagem publicada sem compilar o projeto.
-import { readFileSync } from "node:fs";
+// A lista esperada vem do proprio catalogo classificado — src/read-only.ts (nucleo) e
+// os catalogos dos modulos em src/tools/*.catalog.ts —, lido do fonte (nao do build)
+// para o script rodar tambem no workflow de publish, que verifica a imagem publicada
+// sem compilar o projeto.
+import { readdirSync, readFileSync } from "node:fs";
 
 const readOnlySource = readFileSync(new URL("../src/read-only.ts", import.meta.url), "utf8");
-const readBlock = readOnlySource.match(/GOOGLE_ADS_READ_TOOL_NAMES = new Set\(\[([\s\S]*?)\]/);
+const readBlock = readOnlySource.match(/GOOGLE_ADS_READ_TOOL_NAMES = new Set(?:<[^>]+>)?\(\[([\s\S]*?)\]\)/);
 if (!readBlock) throw new Error("nao foi possivel ler GOOGLE_ADS_READ_TOOL_NAMES de src/read-only.ts");
 const expectedReadTools = new Set([...readBlock[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]));
+const catalogDir = new URL("../src/tools/", import.meta.url);
+for (const file of readdirSync(catalogDir).filter((f) => f.endsWith(".catalog.ts"))) {
+  const catalog = readFileSync(new URL(file, catalogDir), "utf8");
+  const moduleRead = catalog.match(/\bread:\s*\[([\s\S]*?)\]/);
+  if (!moduleRead) throw new Error(`nao foi possivel ler o catalogo de leitura de src/tools/${file}`);
+  for (const [, name] of moduleRead[1].matchAll(/"([^"]+)"/g)) expectedReadTools.add(name);
+}
 if (expectedReadTools.size === 0) throw new Error("catalogo de leitura vazio em src/read-only.ts");
 
 const base = process.argv[2] ?? "http://127.0.0.1:3333";

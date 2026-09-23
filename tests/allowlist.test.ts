@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { toolImplementations } from "./tool-sources.js";
 
 import {
   assertHostedReadOnlySecurity,
@@ -119,13 +120,7 @@ test("the pilot's shape still passes", () => {
 });
 
 test("every exposed read tool is account-scoped and discovery is filtered", () => {
-  const source = readFileSync(new URL("../src/tools.ts", import.meta.url), "utf8");
-  const starts = [...source.matchAll(/mcp\.registerTool\(\s*\n?\s*"([^"]+)"/g)];
-  const slices = new Map<string, string>();
-  for (let index = 0; index < starts.length; index += 1) {
-    const current = starts[index];
-    slices.set(current[1], source.slice(current.index, starts[index + 1]?.index ?? source.length));
-  }
+  const slices = toolImplementations();
   for (const name of GOOGLE_ADS_READ_TOOL_NAMES) {
     const implementation = slices.get(name);
     assert.ok(implementation, `missing implementation for ${name}`);

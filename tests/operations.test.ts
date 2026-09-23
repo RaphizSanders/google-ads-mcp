@@ -11,12 +11,12 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import { GoogleAdsClient } from "../src/google-ads-client.js";
 import { GOOGLE_ADS_READ_TOOL_NAMES, GOOGLE_ADS_WRITE_TOOL_NAMES } from "../src/read-only.js";
 import { registerGoogleAdsTools } from "../src/tools.js";
 import { assertGaqlRules, assertUpdateMaskLeaves } from "./gaql-rules.js";
+import { toolSourceFiles } from "./tool-sources.js";
 
 type Row = Record<string, unknown>;
 type Result = { content: Array<{ text?: string }>; isError?: boolean };
@@ -219,8 +219,7 @@ test("create_campaign: CPC manual sai sem Enhanced CPC, e a recusa da API é tra
 });
 
 test("Enhanced CPC não é enviado por nenhuma tool (descontinuado em Pesquisa/Display)", () => {
-  const source = readFileSync(new URL("../src/tools.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(source, /enhancedCpcEnabled:\s*true/);
+  for (const source of toolSourceFiles()) assert.doesNotMatch(source, /enhancedCpcEnabled:\s*true/);
 });
 
 // ── update_campaign (itens 2 e 4) ─────────────────────────────────────

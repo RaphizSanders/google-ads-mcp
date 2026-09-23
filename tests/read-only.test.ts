@@ -18,18 +18,17 @@ import {
   createReadOnlyToolServer,
   parseReadOnlyMode,
 } from "../src/read-only.js";
+import { toolImplementations } from "./tool-sources.js";
 
 function registeredToolNames(): string[] {
-  const source = readFileSync(new URL("../src/tools.ts", import.meta.url), "utf8");
-  return [...source.matchAll(/mcp\.registerTool\(\s*["']([^"']+)["']/g)].map((match) => match[1]);
+  return [...toolImplementations().keys()];
 }
 
-test("all 95 tools are explicitly classified and classifications are disjoint", () => {
+test("every registered tool is explicitly classified and classifications are disjoint", () => {
   const actual = new Set(registeredToolNames());
   const classified = new Set([...GOOGLE_ADS_READ_TOOL_NAMES, ...GOOGLE_ADS_WRITE_TOOL_NAMES]);
-  assert.equal(actual.size, 95);
-  assert.equal(GOOGLE_ADS_READ_TOOL_NAMES.size, 35);
-  assert.equal(GOOGLE_ADS_WRITE_TOOL_NAMES.size, 60);
+  assert.ok(actual.size >= 95, `catálogo encolheu: ${actual.size} tools`);
+  assert.equal(classified.size, GOOGLE_ADS_READ_TOOL_NAMES.size + GOOGLE_ADS_WRITE_TOOL_NAMES.size, "tool em read e write ao mesmo tempo");
   assert.deepEqual([...classified].sort(), [...actual].sort());
   assert.equal(
     [...GOOGLE_ADS_READ_TOOL_NAMES].filter((name) => GOOGLE_ADS_WRITE_TOOL_NAMES.has(name as never)).length,

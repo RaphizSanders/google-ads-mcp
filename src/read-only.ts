@@ -6,7 +6,10 @@
  * are registered. Unknown future tools are therefore blocked by default.
  */
 
-export const GOOGLE_ADS_READ_TOOL_NAMES = new Set([
+import { MODULE_READ_TOOLS, MODULE_WRITE_TOOLS } from "./tools/catalogs.js";
+
+// Tools do núcleo (src/tools.ts). As dos módulos em src/tools/ vêm dos catálogos de cada módulo.
+export const GOOGLE_ADS_READ_TOOL_NAMES = new Set<string>([
   "list_accounts",
   "get_account_info",
   "run_gaql",
@@ -42,9 +45,10 @@ export const GOOGLE_ADS_READ_TOOL_NAMES = new Set([
   "get_asset_performance",
   "list_campaign_image_assets",
   "get_ai_max_report",
-] as const);
+  ...MODULE_READ_TOOLS,
+]);
 
-export const GOOGLE_ADS_WRITE_TOOL_NAMES = new Set([
+export const GOOGLE_ADS_WRITE_TOOL_NAMES = new Set<string>([
   "create_campaign",
   "update_campaign",
   "update_budget",
@@ -105,7 +109,8 @@ export const GOOGLE_ADS_WRITE_TOOL_NAMES = new Set([
   "set_ai_max_settings",
   "update_keyword",
   "remove_negative_keyword",
-] as const);
+  ...MODULE_WRITE_TOOLS,
+]);
 
 /* Booleano de env com rejeição de valor ambíguo. O nome entra na mensagem: o
    mesmo parser serve GOOGLE_ADS_READ_ONLY e GOOGLE_ADS_DRY_RUN, e um erro que
