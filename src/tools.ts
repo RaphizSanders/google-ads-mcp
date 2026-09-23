@@ -354,30 +354,56 @@ export function registerGoogleAdsTools(
   mcp.registerTool(
     "get_keyword_performance",
     {
-      description:
+      description: [
         "Get keyword-level performance for Search campaigns. Shows keyword text, match type, quality score, and metrics.",
+        "Cada linha traz criterion_id, ad_group_id e campaign_id (para update_keyword / remove_keyword /",
+        "bulk_update_keyword_status). Só lista palavras-chave com impressão no período — para ver todas,",
+        "inclusive as sem impressão, use list_keywords.",
+        "",
+        "diagnostics=true acrescenta os componentes do Índice de Qualidade (relevância do anúncio,",
+        "experiência na página, CTR esperada), status e motivos, lance efetivo, estimativas de 1ª página",
+        "e a coluna fix (LP, AD, CTR, BID, VOLUME, POLICY, NEGATIVE, QS).",
+      ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
         dateRange: dateRangeSchema.describe(DATE_RANGE_DESC),
         days: z.number().optional().describe(DAYS_DESC),
         campaignId: z.string().optional().describe("Filter by campaign ID."),
+        adGroupId: z.string().optional().describe("Filtra por grupo de anúncios (ID numérico)."),
+        diagnostics: z.boolean().optional().describe("true = inclui componentes do Índice de Qualidade, status/motivos, lances e a coluna fix."),
         limit: z.number().optional().describe("Max results. Default: 100."),
+        format: formatSchema,
       },
     },
-    async ({ customerId, dateRange, days, campaignId, limit }) => {
+    async ({ customerId, dateRange, days, campaignId, adGroupId, diagnostics, limit, format }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
+      // IDs e limit entram crus na GAQL: só dígitos / inteiro positivo passam
+      if (campaignId !== undefined && !/^\d+$/.test(campaignId)) {
+        return { content: [text(`campaignId deve ser numérico, recebido "${campaignId}".`)], isError: true };
+      }
+      if (adGroupId !== undefined && !/^\d+$/.test(adGroupId)) {
+        return { content: [text(`adGroupId deve ser numérico, recebido "${adGroupId}".`)], isError: true };
+      }
+      if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) {
+        return { content: [text(`limit deve ser inteiro positivo (recebido ${limit}).`)], isError: true };
+      }
       const client = getClient();
       const dateClause = buildDateClause(dateRange, days);
       const campaignFilter = campaignId ? `AND campaign.id = ${campaignId}` : "";
+      const adGroupFilter = adGroupId ? `AND ad_group.id = ${adGroupId}` : "";
+      const keywordsModule = diagnostics ? await import("./tools/keywords.js") : undefined;
+      const diagnosticFields = keywordsModule ? `${keywordsModule.KEYWORD_DIAGNOSTIC_FIELDS.join(", ")},` : "";
 
       const results = await client.searchStream(
         customerId,
-        `SELECT ad_group_criterion.keyword.text,
+        `SELECT ad_group_criterion.criterion_id,
+                ad_group_criterion.keyword.text,
                 ad_group_criterion.keyword.match_type,
                 ad_group_criterion.quality_info.quality_score,
                 ad_group_criterion.status,
-                campaign.name, ad_group.name,
+                ${diagnosticFields}
+                campaign.id, campaign.name, ad_group.id, ad_group.name,
                 metrics.cost_micros, metrics.impressions, metrics.clicks,
                 metrics.ctr, metrics.conversions, metrics.conversions_value,
                 metrics.average_cpc
@@ -385,25 +411,38 @@ export function registerGoogleAdsTools(
          WHERE ${dateClause}
            AND ad_group_criterion.status != 'REMOVED'
            ${campaignFilter}
+           ${adGroupFilter}
            AND metrics.impressions > 0
          ORDER BY metrics.cost_micros DESC
-         LIMIT ${limit ?? 100}`
+         LIMIT ${Math.min(limit ?? 100, 10_000)}`
       );
 
       const keywords = results.map((r) => {
-        const kw = (r.adGroupCriterion as Record<string, unknown>)?.keyword as Record<string, unknown> | undefined;
-        const qi = (r.adGroupCriterion as Record<string, unknown>)?.qualityInfo as Record<string, unknown> | undefined;
-        const c = r.campaign as Record<string, unknown>;
-        const ag = r.adGroup as Record<string, unknown>;
         const m = r.metrics as Record<string, unknown>;
         const spend = microsToMoney(m?.costMicros);
         const conv = num(m?.conversions);
+        const base = keywordsModule
+          ? keywordsModule.keywordView(r, true)
+          : (() => {
+              const criterion = (r.adGroupCriterion ?? {}) as Record<string, unknown>;
+              const kw = (criterion.keyword ?? {}) as Record<string, unknown>;
+              const qi = (criterion.qualityInfo ?? {}) as Record<string, unknown>;
+              const c = (r.campaign ?? {}) as Record<string, unknown>;
+              const ag = (r.adGroup ?? {}) as Record<string, unknown>;
+              return {
+                criterion_id: String(criterion.criterionId ?? ""),
+                ad_group_id: String(ag.id ?? ""),
+                campaign_id: String(c.id ?? ""),
+                keyword: kw.text,
+                match_type: kw.matchType,
+                quality_score: qi.qualityScore,
+                campaign: c.name,
+                ad_group: ag.name,
+                status: criterion.status,
+              };
+            })();
         return {
-          keyword: kw?.text,
-          match_type: kw?.matchType,
-          quality_score: qi?.qualityScore,
-          campaign: c?.name,
-          ad_group: ag?.name,
+          ...base,
           spend: Math.round(spend * 100) / 100,
           impressions: num(m?.impressions),
           clicks: num(m?.clicks),
@@ -415,6 +454,13 @@ export function registerGoogleAdsTools(
         };
       });
 
+      const fmt = format ?? "json";
+      if (fmt === "table" || fmt === "csv") {
+        const flat = keywords.map((row) =>
+          Object.fromEntries(Object.entries(row).map(([k, v]) => [k, Array.isArray(v) ? v.join(" | ") : v]))
+        );
+        return { content: [text(`${keywords.length} keyword(s).\n\n${fmt === "table" ? formatAsTable(flat) : formatAsCsv(flat)}`)] };
+      }
       return { content: [text(`${keywords.length} keyword(s).\n\n${formatJson(keywords)}`)] };
     }
   );
@@ -552,6 +598,14 @@ export function registerGoogleAdsTools(
         "do anunciante), AI_MAX_KEYWORDLESS (AI Max, sem palavra-chave, a partir do site), AI_MAX_BROAD_MATCH",
         "(AI Max expandindo a palavra-chave), DYNAMIC_SEARCH_ADS, PERFORMANCE_MAX, VERTICAL_ADS_DATA_FEED.",
         "Use matchSources para filtrar. Para a análise completa do AI Max, use get_ai_max_report.",
+        "",
+        "Duas visões (a resposta diz qual foi usada):",
+        "- ad_group: search_term_view — por grupo de anúncios, com ad_group_id e, com includeKeyword, a",
+        "  palavra-chave que acionou. NÃO inclui Performance Max.",
+        "- campaign: campaign_search_term_view — por campanha, inclui Performance Max e Pesquisa, sem",
+        "  grupo de anúncios nem palavra-chave (segmento de palavra-chave tira o PMax do resultado).",
+        "view auto (default): usa campaign quando a campanha é PERFORMANCE_MAX ou matchSources pede",
+        "PERFORMANCE_MAX; senão ad_group. Para minerar negativas com o PMax junto, use view: \"campaign\".",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
@@ -561,14 +615,26 @@ export function registerGoogleAdsTools(
         matchSources: flexArray(z.enum(SEARCH_TERM_MATCH_SOURCES)).optional().describe(
           "Filtra pela origem do termo (ex: [\"AI_MAX_KEYWORDLESS\", \"AI_MAX_BROAD_MATCH\"] = só AI Max)."
         ),
+        view: z.enum(["auto", "ad_group", "campaign"]).optional().describe(
+          "auto (default), ad_group (search_term_view, sem PMax) ou campaign (campaign_search_term_view, com PMax)."
+        ),
+        includeKeyword: z.boolean().optional().describe("Só na visão ad_group: traz a palavra-chave que acionou o termo."),
         limit: z.number().optional().describe("Max results. Default: 50."),
+        format: formatSchema,
       },
     },
-    async ({ customerId, dateRange, days, campaignId, matchSources, limit }) => {
+    async ({ customerId, dateRange, days, campaignId, matchSources, view, includeKeyword, limit, format }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       if (campaignId !== undefined && !/^\d+$/.test(campaignId)) {
         return { content: [text(`campaignId deve ser numérico, recebido "${campaignId}".`)], isError: true };
+      }
+      if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) {
+        return { content: [text(`limit deve ser inteiro positivo (recebido ${limit}).`)], isError: true };
+      }
+      const requestedView = view ?? "auto";
+      if (!["auto", "ad_group", "campaign"].includes(requestedView)) {
+        return { content: [text(`view inválida "${requestedView}": use auto, ad_group ou campaign.`)], isError: true };
       }
       // flexArray aceita string JSON sem validar os itens: confere contra o enum antes de ir para o GAQL
       const sources = matchSources === undefined ? [] : ensureArray<string>(matchSources).map(String);
@@ -579,50 +645,134 @@ export function registerGoogleAdsTools(
           isError: true,
         };
       }
+      const wantsPmaxSource = sources.includes("PERFORMANCE_MAX");
+      if (requestedView === "ad_group" && wantsPmaxSource) {
+        return {
+          content: [text("search_term_view (view ad_group) não tem dados de Performance Max: o filtro PERFORMANCE_MAX nunca casaria. Use view: \"campaign\" (ou auto).")],
+          isError: true,
+        };
+      }
+      if (requestedView === "campaign" && includeKeyword) {
+        return {
+          content: [text("includeKeyword não combina com view campaign: segmento de palavra-chave tira o Performance Max do campaign_search_term_view. Use view: \"ad_group\" para ver a palavra-chave.")],
+          isError: true,
+        };
+      }
       const client = getClient();
       const dateClause = buildDateClause(dateRange, days);
+
+      // Canal da campanha: PMax só aparece em campaign_search_term_view.
+      let channel: string | undefined;
+      if (campaignId && requestedView !== "campaign") {
+        const campRows = await client.searchStream(customerId,
+          `SELECT campaign.id, campaign.name, campaign.advertising_channel_type FROM campaign WHERE campaign.id = ${campaignId}`);
+        channel = (campRows[0]?.campaign as Record<string, unknown> | undefined)?.advertisingChannelType as string | undefined;
+        if (!channel) {
+          return { content: [text(`Campanha ${campaignId} não encontrada na conta ${customerId}.`)], isError: true };
+        }
+      }
+      const isPmaxCampaign = channel === "PERFORMANCE_MAX";
+      if (requestedView === "ad_group" && isPmaxCampaign) {
+        return {
+          content: [text(`A campanha ${campaignId} é PERFORMANCE_MAX: search_term_view (view ad_group) não tem dados de PMax. Use view: "campaign" (ou auto).`)],
+          isError: true,
+        };
+      }
+      const usedView = requestedView === "campaign" || (requestedView === "auto" && (wantsPmaxSource || isPmaxCampaign))
+        ? "campaign"
+        : "ad_group";
+      if (usedView === "campaign" && includeKeyword) {
+        return {
+          content: [text("includeKeyword não se aplica aqui: esta consulta usa campaign_search_term_view (Performance Max), e segmento de palavra-chave tiraria o PMax do resultado.")],
+          isError: true,
+        };
+      }
+
       const campaignFilter = campaignId ? `AND campaign.id = ${campaignId}` : "";
       const sourceFilter = sources.length > 0
         ? `AND segments.search_term_match_source IN (${sources.map((source) => `'${source}'`).join(", ")})`
         : "";
+      const max = Math.min(limit ?? 50, 10_000);
 
-      const results = await client.searchStream(
-        customerId,
-        `SELECT search_term_view.search_term, search_term_view.status,
-                segments.search_term_match_source,
-                campaign.name, ad_group.name,
-                metrics.impressions, metrics.clicks, metrics.cost_micros,
-                metrics.conversions, metrics.conversions_value
-         FROM search_term_view
-         WHERE ${dateClause}
-           ${campaignFilter}
-           ${sourceFilter}
-           AND metrics.impressions > 0
-         ORDER BY metrics.cost_micros DESC
-         LIMIT ${limit ?? 50}`
-      );
+      const results = usedView === "campaign"
+        ? await client.searchStream(
+          customerId,
+          `SELECT campaign_search_term_view.search_term,
+                  segments.search_term_targeting_status, segments.search_term_match_source,
+                  campaign.id, campaign.name, campaign.advertising_channel_type,
+                  metrics.impressions, metrics.clicks, metrics.cost_micros,
+                  metrics.conversions, metrics.conversions_value
+           FROM campaign_search_term_view
+           WHERE ${dateClause}
+             ${campaignFilter}
+             ${sourceFilter}
+             AND metrics.impressions > 0
+           ORDER BY metrics.cost_micros DESC
+           LIMIT ${max}`
+        )
+        : await client.searchStream(
+          customerId,
+          `SELECT search_term_view.search_term, search_term_view.status,
+                  segments.search_term_match_source,
+                  ${includeKeyword ? "segments.keyword.info.text, segments.keyword.info.match_type," : ""}
+                  campaign.id, campaign.name, ad_group.id, ad_group.name,
+                  metrics.impressions, metrics.clicks, metrics.cost_micros,
+                  metrics.conversions, metrics.conversions_value
+           FROM search_term_view
+           WHERE ${dateClause}
+             ${campaignFilter}
+             ${sourceFilter}
+             AND metrics.impressions > 0
+           ORDER BY metrics.cost_micros DESC
+           LIMIT ${max}`
+        );
 
       const terms = results.map((r) => {
-        const stv = r.searchTermView as Record<string, unknown>;
-        const c = r.campaign as Record<string, unknown>;
-        const ag = r.adGroup as Record<string, unknown>;
+        const c = (r.campaign ?? {}) as Record<string, unknown>;
+        const ag = (r.adGroup ?? {}) as Record<string, unknown>;
         const m = r.metrics as Record<string, unknown>;
+        const seg = (r.segments ?? {}) as Record<string, unknown>;
         const spend = microsToMoney(m?.costMicros);
-        return {
-          search_term: stv?.searchTerm,
-          status: stv?.status,
-          match_source: (r.segments as Record<string, unknown> | undefined)?.searchTermMatchSource,
-          campaign: c?.name,
-          ad_group: ag?.name,
+        const common = {
           impressions: num(m?.impressions),
           clicks: num(m?.clicks),
           spend: Math.round(spend * 100) / 100,
           conversions: num(m?.conversions),
           revenue: Math.round(num(m?.conversionsValue) * 100) / 100,
         };
+        if (usedView === "campaign") {
+          const cstv = (r.campaignSearchTermView ?? {}) as Record<string, unknown>;
+          return {
+            search_term: cstv.searchTerm,
+            status: seg.searchTermTargetingStatus,
+            match_source: seg.searchTermMatchSource,
+            campaign_id: String(c.id ?? ""),
+            campaign: c.name,
+            channel: c.advertisingChannelType,
+            ...common,
+          };
+        }
+        const stv = (r.searchTermView ?? {}) as Record<string, unknown>;
+        const keyword = ((seg.keyword ?? {}) as Record<string, unknown>).info as Record<string, unknown> | undefined;
+        return {
+          search_term: stv.searchTerm,
+          status: stv.status,
+          match_source: seg.searchTermMatchSource,
+          campaign_id: String(c.id ?? ""),
+          campaign: c.name,
+          ad_group_id: String(ag.id ?? ""),
+          ad_group: ag.name,
+          ...(includeKeyword ? { keyword: keyword?.text ?? null, keyword_match_type: keyword?.matchType ?? null } : {}),
+          ...common,
+        };
       });
 
-      return { content: [text(`${terms.length} search term(s).\n\n${formatJson(terms)}`)] };
+      const viewNote = usedView === "campaign"
+        ? "visão campaign (campaign_search_term_view: Pesquisa + Performance Max, por campanha, sem grupo de anúncios)"
+        : "visão ad_group (search_term_view: por grupo de anúncios, sem Performance Max — use view campaign para incluir o PMax)";
+      const fmt = format ?? "json";
+      const body = fmt === "table" ? formatAsTable(terms) : fmt === "csv" ? formatAsCsv(terms) : formatJson(terms);
+      return { content: [text(`${terms.length} search term(s) — ${viewNote}.\n\n${body}`)] };
     }
   );
 
@@ -1499,6 +1649,11 @@ export function registerGoogleAdsTools(
         "SHOPPING = SHOPPING_PRODUCT_ADS, VIDEO = VIDEO_RESPONSIVE.",
         "Other channels (e.g. DEMAND_GEN) are created without an explicit type.",
         "PERFORMANCE_MAX campaigns do NOT use ad groups — use create_asset_group.",
+        "",
+        "SEARCH_DYNAMIC_ADS (DSA) só é aceito em campanha SEARCH com domínio de DSA configurado",
+        "(dynamic_search_ads_setting); o grupo não aceita palavras-chave positivas e este servidor não cria",
+        "anúncios DSA nem alvos de página. A criação de DSA termina em jan/2027 e a automigração para",
+        "AI Max começa em fev/2027 — prefira AI Max (set_ai_max_settings); inventário em audit_dsa_and_legacy.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
@@ -1526,7 +1681,7 @@ export function registerGoogleAdsTools(
             "VIDEO_EFFICIENT_REACH",
           ])
           .optional()
-          .describe("OPTIONAL override. Default: derived from the campaign's channel type."),
+          .describe("OPTIONAL override. Default: derived from the campaign's channel type. SEARCH_DYNAMIC_ADS exige campanha SEARCH com domínio de DSA."),
       },
     },
     async ({ customerId, campaignId, name, cpcBidMicros, cpmBidMicros, type }) => {
@@ -1543,7 +1698,9 @@ export function registerGoogleAdsTools(
       // O type do ad group precisa casar com o canal da campanha — SEARCH_STANDARD dentro
       // de campanha DISPLAY/VIDEO/SHOPPING é recusado pela API. Consulta o canal antes.
       const campRows = await client.searchStream(customerId,
-        `SELECT campaign.id, campaign.advertising_channel_type, campaign.bidding_strategy_type FROM campaign WHERE campaign.id = ${campaignId} AND campaign.status != 'REMOVED'`);
+        `SELECT campaign.id, campaign.advertising_channel_type, campaign.bidding_strategy_type,
+                campaign.dynamic_search_ads_setting.domain_name
+         FROM campaign WHERE campaign.id = ${campaignId} AND campaign.status != 'REMOVED'`);
       const camp = (campRows[0]?.campaign ?? {}) as Record<string, unknown>;
       const channel = camp.advertisingChannelType as string | undefined;
       if (!channel) {
@@ -1578,6 +1735,47 @@ export function registerGoogleAdsTools(
         VIDEO: "VIDEO_RESPONSIVE",
       };
       const adGroupType: string | undefined = type ?? AD_GROUP_TYPE_BY_CHANNEL[channel];
+
+      // O type explícito precisa ser do mesmo canal da campanha (a API recusa, ex.: SEARCH_STANDARD em DISPLAY).
+      const CHANNEL_BY_AD_GROUP_TYPE: Record<string, string> = {
+        SEARCH_STANDARD: "SEARCH",
+        SEARCH_DYNAMIC_ADS: "SEARCH",
+        DISPLAY_STANDARD: "DISPLAY",
+        SHOPPING_PRODUCT_ADS: "SHOPPING",
+        VIDEO_RESPONSIVE: "VIDEO",
+        VIDEO_BUMPER: "VIDEO",
+        VIDEO_TRUE_VIEW_IN_STREAM: "VIDEO",
+        VIDEO_TRUE_VIEW_IN_DISPLAY: "VIDEO",
+        VIDEO_NON_SKIPPABLE_IN_STREAM: "VIDEO",
+        VIDEO_EFFICIENT_REACH: "VIDEO",
+      };
+      if (type && CHANNEL_BY_AD_GROUP_TYPE[type] && CHANNEL_BY_AD_GROUP_TYPE[type] !== channel) {
+        return {
+          content: [text(`O tipo ${type} é de campanha ${CHANNEL_BY_AD_GROUP_TYPE[type]}, mas a campanha ${campaignId} é ${channel}. Omita type para usar o padrão do canal. Nada foi criado.`)],
+          isError: true,
+        };
+      }
+      // DSA: a API exige dynamic_search_ads_setting na campanha
+      // (AdGroupError.CANNOT_ADD_ADGROUP_OF_TYPE_DSA_TO_CAMPAIGN_WITHOUT_DSA_SETTING).
+      const dsaDomain = String(((camp.dynamicSearchAdsSetting ?? {}) as Record<string, unknown>).domainName ?? "").trim();
+      const dsaWarnings: string[] = [];
+      if (adGroupType === "SEARCH_DYNAMIC_ADS") {
+        if (!dsaDomain) {
+          return {
+            content: [text(
+              `A campanha ${campaignId} não tem domínio de Anúncios Dinâmicos de Pesquisa (dynamic_search_ads_setting.domain_name): ` +
+              "a API recusa grupo SEARCH_DYNAMIC_ADS nela. Este servidor não configura DSA — e a criação de DSA termina em jan/2027, " +
+              "com automigração para AI Max em fev/2027. Para cobrir buscas sem palavra-chave, use AI Max (set_ai_max_settings). Nada foi criado."
+            )],
+            isError: true,
+          };
+        }
+        dsaWarnings.push(
+          `Grupo DSA no domínio ${dsaDomain}: não aceita palavras-chave positivas, e os anúncios DSA e os alvos de página ` +
+          "precisam ser criados na interface (este servidor não os cria). A criação de DSA termina em jan/2027 e a automigração " +
+          "para AI Max começa em fev/2027 — veja audit_dsa_and_legacy."
+        );
+      }
 
       const adGroupData: Record<string, unknown> = {
         name,
@@ -1617,11 +1815,14 @@ export function registerGoogleAdsTools(
       if (cpmBidMicros !== undefined) adGroupData.cpmBidMicros = String(cpmBidMicros);
 
       const result = await client.mutateAdGroups(customerId, [{ create: adGroupData }]);
+      const warnings = [...bidWarnings, ...dsaWarnings];
       return {
         content: [
           text(
-            `Ad group created (PAUSED): ${name}\n` +
-              (bidWarnings.length ? `Avisos: ${bidWarnings.join(" ")}\n` : "") +
+            (client.isDryRun
+              ? `DRY-RUN (validateOnly): validado, nada foi gravado — ad group ${name}\n`
+              : `Ad group created (PAUSED): ${name}\n`) +
+              (warnings.length ? `Avisos: ${warnings.join(" ")}\n` : "") +
               `- Campaign channel: ${channel}\n` +
               `- Ad group type: ${adGroupType ?? "(default do canal)"}\n\n${formatJson(result)}`
           ),
@@ -1756,11 +1957,14 @@ export function registerGoogleAdsTools(
         "Add a keyword to an ad group.",
         "WRITE OPERATION.",
         "Match types: EXACT, PHRASE, BROAD.",
+        "Valida antes da API (até 80 caracteres e 10 palavras, sem colchetes/aspas/+), confere o grupo e não",
+        "duplica: se a palavra-chave já existe (mesmo texto e correspondência, inclusive pausada), nada é",
+        "enviado. Para várias de uma vez, use add_keywords.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
         adGroupId: z.string().describe("Ad group ID."),
-        keyword: z.string().describe("Keyword text."),
+        keyword: z.string().describe("Keyword text (sem colchetes/aspas: a correspondência vai em matchType)."),
         matchType: z
           .enum(["EXACT", "PHRASE", "BROAD"])
           .describe("Match type."),
@@ -1768,52 +1972,76 @@ export function registerGoogleAdsTools(
           .number()
           .optional()
           .describe("CPC bid in MICROS. If omitted, uses ad group default."),
+        finalUrl: z.string().optional().describe("URL final própria da palavra-chave (http/https)."),
       },
     },
-    async ({ customerId, adGroupId, keyword, matchType, cpcBidMicros }) => {
+    async ({ customerId, adGroupId, keyword, matchType, cpcBidMicros, finalUrl }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const cid = customerId.replace(/-/g, "");
-
-      const criterionData: Record<string, unknown> = {
-        adGroup: `customers/${cid}/adGroups/${adGroupId}`,
-        status: "ENABLED",
-        keyword: { text: keyword, matchType },
-        ...(cpcBidMicros && { cpcBidMicros: String(cpcBidMicros) }),
-      };
-
-      const result = await client.mutateAdGroupCriteria(customerId, [
-        { create: criterionData },
-      ]);
-
-      return {
-        content: [text(`Keyword added: [${matchType}] "${keyword}"\n\n${formatJson(result)}`)],
-      };
+      // Mesma validação, checagem do grupo, deduplicação e relatório do add_keywords (src/tools/keywords.ts).
+      const { addKeywordsToAdGroup } = await import("./tools/keywords.js");
+      return addKeywordsToAdGroup(getClient(), customerId, adGroupId, [{ text: keyword, matchType, cpcBidMicros, finalUrl }]);
     }
   );
 
   mcp.registerTool(
     "remove_keyword",
     {
-      description: "Remove a keyword from an ad group.",
+      description: [
+        "Remove uma palavra-chave (ou negativa) de um grupo de anúncios.",
+        "WRITE OPERATION — irreversível: a palavra-chave removida não volta (seria preciso criá-la de novo,",
+        "sem o histórico). Prefira pausar (update_keyword / bulk_update_keyword_status).",
+        "Confere a palavra-chave na conta e exige confirm: true; sem ele, mostra o que seria removido.",
+      ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
         adGroupId: z.string().describe("Ad group ID."),
-        criterionId: z.string().describe("Keyword criterion ID."),
+        criterionId: z.string().describe("Keyword criterion ID (ver list_keywords)."),
+        confirm: z.boolean().optional().describe("Precisa ser true para remover."),
       },
     },
-    async ({ customerId, adGroupId, criterionId }) => {
+    async ({ customerId, adGroupId, criterionId, confirm }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
+      if (!/^\d+$/.test(adGroupId) || !/^\d+$/.test(criterionId)) {
+        return { content: [text("adGroupId e criterionId devem ser numéricos. Nada foi removido.")], isError: true };
+      }
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
+      const rows = await client.searchStream(customerId,
+        `SELECT ad_group_criterion.criterion_id, ad_group_criterion.type, ad_group_criterion.status,
+                ad_group_criterion.negative, ad_group_criterion.keyword.text,
+                ad_group_criterion.keyword.match_type, ad_group.id, ad_group.name, campaign.name
+         FROM ad_group_criterion
+         WHERE ad_group.id = ${adGroupId}
+           AND ad_group_criterion.criterion_id = ${criterionId}`);
+      const criterion = rows[0]?.adGroupCriterion as Record<string, unknown> | undefined;
+      if (!criterion) {
+        return { content: [text(`Palavra-chave ${criterionId} não encontrada no grupo ${adGroupId} da conta ${cid}. Nada foi removido.`)], isError: true };
+      }
+      if (criterion.type !== undefined && criterion.type !== "KEYWORD") {
+        return { content: [text(`O critério ${criterionId} não é palavra-chave (${String(criterion.type)}): remove_keyword só remove palavras-chave. Nada foi removido.`)], isError: true };
+      }
+      const kw = (criterion.keyword ?? {}) as Record<string, unknown>;
+      const label = `${criterion.negative ? "negativa " : ""}"${String(kw.text ?? "")}" [${String(kw.matchType ?? "")}]`;
+      const where = `grupo ${String((rows[0]?.adGroup as Record<string, unknown> | undefined)?.name ?? adGroupId)} / campanha ${String((rows[0]?.campaign as Record<string, unknown> | undefined)?.name ?? "")}`;
+      if (criterion.status === "REMOVED") {
+        return { content: [text(`${label} já está removida. Nenhuma escrita foi enviada.`)] };
+      }
+      if (confirm !== true) {
+        return {
+          content: [text(`Vai remover ${label} (status ${String(criterion.status ?? "")}, ${where}). A remoção é irreversível — envie confirm: true para remover, ou pause em vez disso. Nada foi removido.`)],
+          isError: true,
+        };
+      }
 
       const result = await client.mutateAdGroupCriteria(customerId, [
         { remove: `customers/${cid}/adGroupCriteria/${adGroupId}~${criterionId}` },
       ]);
-
-      return { content: [text(`Keyword ${criterionId} removed.\n\n${formatJson(result)}`)] };
+      const head = client.isDryRun
+        ? `${label} — DRY-RUN (validateOnly): validado, nada foi gravado.`
+        : `${label} removida (${where}).`;
+      return { content: [text(`${head}\n\n${formatJson(result)}`)] };
     }
   );
 
@@ -1832,7 +2060,7 @@ export function registerGoogleAdsTools(
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
         adGroupId: z.string().describe("ID do grupo de anúncios."),
-        criterionId: z.string().describe("ID da palavra-chave (criterion_id, ver get_keyword_performance)."),
+        criterionId: z.string().describe("ID da palavra-chave (criterion_id, ver list_keywords ou get_keyword_performance)."),
         cpcBidMicros: z.number().optional().describe("Lance em micros. 2500000 = R$2,50."),
         status: z.enum(["ENABLED", "PAUSED"]).optional().describe("ENABLED ou PAUSED."),
         finalUrl: z.string().optional().describe("URL final (http/https); \"\" remove."),
