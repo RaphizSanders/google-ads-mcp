@@ -549,51 +549,7 @@ export function registerGoogleAdsTools(
 
   // ── Insights: Device Breakdown ─────────────────────────────────────
 
-  mcp.registerTool(
-    "get_device_breakdown",
-    {
-      description: "Get performance metrics broken down by device (MOBILE, DESKTOP, TABLET, etc.).",
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        dateRange: dateRangeSchema.describe(DATE_RANGE_DESC),
-        days: z.number().optional().describe(DAYS_DESC),
-      },
-    },
-    async ({ customerId, dateRange, days }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const dateClause = buildDateClause(dateRange, days);
-
-      const results = await client.searchStream(
-        customerId,
-        `SELECT segments.device,
-                metrics.impressions, metrics.clicks, metrics.cost_micros,
-                metrics.conversions, metrics.conversions_value, metrics.ctr
-         FROM customer
-         WHERE ${dateClause}`
-      );
-
-      const devices = results.map((r) => {
-        const s = r.segments as Record<string, unknown>;
-        const m = r.metrics as Record<string, unknown>;
-        const spend = microsToMoney(m?.costMicros);
-        const convValue = num(m?.conversionsValue);
-        return {
-          device: s?.device,
-          impressions: num(m?.impressions),
-          clicks: num(m?.clicks),
-          spend: Math.round(spend * 100) / 100,
-          conversions: num(m?.conversions),
-          revenue: Math.round(convValue * 100) / 100,
-          ctr: Math.round(num(m?.ctr) * 10000) / 100,
-          roas: spend > 0 ? Math.round((convValue / spend) * 100) / 100 : 0,
-        };
-      });
-
-      return { content: [text(formatJson(devices))] };
-    }
-  );
+  // get_device_breakdown: reescrita em src/tools/bid-modifiers.ts (lote bid-modifiers).
 
   // ── Insights: Daily Trend ──────────────────────────────────────────
 
@@ -4424,107 +4380,9 @@ export function registerGoogleAdsTools(
   // ══ BID ADJUSTMENTS + AD SCHEDULE + CONVERSION ACTIONS ════════════
   // ══════════════════════════════════════════════════════════════════
 
-  mcp.registerTool(
-    "set_device_bid_adjustment",
-    {
-      description: [
-        "Set bid adjustment for a specific device type on a campaign.",
-        "WRITE OPERATION — changes take effect immediately.",
-        "",
-        "Bid modifier: 1.0 = no adjustment, 1.5 = +50% bid, 0.5 = -50% bid, 0 = exclude device.",
-        "Example: set mobile to 1.3 to bid 30% more on mobile devices.",
-        "",
-        "Device types: MOBILE, DESKTOP, TABLET, CONNECTED_TV.",
-      ].join("\n"),
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        campaignId: z.string().describe("Campaign ID."),
-        deviceType: z.enum(["MOBILE", "DESKTOP", "TABLET", "CONNECTED_TV"]).describe("Device type."),
-        bidModifier: z.number().describe("Bid modifier. 1.0 = no change, 1.5 = +50%, 0.5 = -50%, 0 = exclude."),
-      },
-    },
-    async ({ customerId, campaignId, deviceType, bidModifier }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const cid = customerId.replace(/-/g, "");
+  // set_device_bid_adjustment: reescrita em src/tools/bid-modifiers.ts (lote bid-modifiers).
 
-      // Map device type to criterion ID (Google Ads uses fixed IDs)
-      const deviceMap: Record<string, number> = {
-        MOBILE: 30001,
-        DESKTOP: 30000,
-        TABLET: 30002,
-        CONNECTED_TV: 30004,
-      };
-      const criterionId = deviceMap[deviceType];
-      const resourceName = `customers/${cid}/campaignCriteria/${campaignId}~${criterionId}`;
-
-      const result = await client.mutateCampaignCriteria(customerId, [
-        {
-          create: {
-            campaign: `customers/${cid}/campaigns/${campaignId}`,
-            criterionId: String(criterionId),
-            device: { type: deviceType },
-            bidModifier,
-          },
-        },
-      ]);
-
-      const pctStr = bidModifier === 0 ? "EXCLUDED" : `${((bidModifier - 1) * 100).toFixed(0)}%`;
-      return { content: [text(`Device bid adjustment set: ${deviceType} → ${pctStr} (modifier: ${bidModifier})\nCampaign: ${campaignId}\n\n${formatJson(result)}`)] };
-    }
-  );
-
-  mcp.registerTool(
-    "set_ad_schedule",
-    {
-      description: [
-        "Set ad schedule (day/time targeting) for a campaign.",
-        "WRITE OPERATION — ads will only show during specified time windows.",
-        "",
-        "Days: MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY, SATURDAY, SUNDAY.",
-        "Hours: 0-24 in 15-minute increments (startHour:startMinute to endHour:endMinute).",
-        "",
-        "Example: weekdays 8am-6pm = call 5 times with MONDAY-FRIDAY, startHour=8, endHour=18.",
-        "Optional bid modifier per schedule: 1.2 = bid 20% more during this time.",
-        "",
-        "To show ads 24/7 (default), don't set any schedule.",
-        "To remove a schedule, delete the criterion via run_gaql.",
-      ].join("\n"),
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        campaignId: z.string().describe("Campaign ID."),
-        dayOfWeek: z.enum(["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"]).describe("Day of the week."),
-        startHour: z.number().describe("Start hour (0-23)."),
-        startMinute: z.enum(["ZERO", "FIFTEEN", "THIRTY", "FORTY_FIVE"]).optional().describe("Start minute. Default: ZERO."),
-        endHour: z.number().describe("End hour (1-24). Use 24 for midnight."),
-        endMinute: z.enum(["ZERO", "FIFTEEN", "THIRTY", "FORTY_FIVE"]).optional().describe("End minute. Default: ZERO."),
-        bidModifier: z.number().optional().describe("Bid modifier for this time slot. Default: 1.0."),
-      },
-    },
-    async ({ customerId, campaignId, dayOfWeek, startHour, startMinute, endHour, endMinute, bidModifier }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const cid = customerId.replace(/-/g, "");
-
-      const scheduleData: Record<string, unknown> = {
-        campaign: `customers/${cid}/campaigns/${campaignId}`,
-        adSchedule: {
-          dayOfWeek,
-          startHour,
-          startMinute: startMinute ?? "ZERO",
-          endHour,
-          endMinute: endMinute ?? "ZERO",
-        },
-      };
-      if (bidModifier !== undefined) scheduleData.bidModifier = bidModifier;
-
-      const result = await client.mutateCampaignCriteria(customerId, [{ create: scheduleData }]);
-
-      return { content: [text(`Ad schedule set: ${dayOfWeek} ${startHour}:00-${endHour}:00 (bid modifier: ${bidModifier ?? 1.0})\nCampaign: ${campaignId}\n\n${formatJson(result)}`)] };
-    }
-  );
+  // set_ad_schedule: reescrita em src/tools/bid-modifiers.ts (lote bid-modifiers).
 
   mcp.registerTool(
     "create_conversion_action",
@@ -4896,68 +4754,11 @@ export function registerGoogleAdsTools(
 
   // ══ P2: BID ADJUSTMENTS + EDIT ADS ════════════════════════════════
 
-  mcp.registerTool(
-    "set_location_bid_adjustment",
-    {
-      description: "Set bid adjustment for a location on a campaign. WRITE OPERATION. Use set_campaign_locations first.",
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        campaignId: z.string().describe("Campaign ID."),
-        locationId: z.string().describe("geo_target_constant ID."),
-        bidModifier: z.number().describe("Bid modifier (1.0=no change, 1.3=+30%)."),
-      },
-    },
-    async ({ customerId, campaignId, locationId, bidModifier }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const cid = customerId.replace(/-/g, "");
-      const result = await client.mutateCampaignCriteria(customerId, [{ create: { campaign: `customers/${cid}/campaigns/${campaignId}`, location: { geoTargetConstant: `geoTargetConstants/${locationId}` }, bidModifier } }] as unknown as import("./google-ads-client.js").MutateOperation[]);
-      return { content: [text(`Location bid: ${locationId} → ${bidModifier}\n\n${formatJson(result)}`)] };
-    }
-  );
+  // set_location_bid_adjustment: reescrita em src/tools/bid-modifiers.ts (lote bid-modifiers).
 
-  mcp.registerTool(
-    "set_age_bid_adjustment",
-    {
-      description: "Set bid adjustment for age range on an ad group. WRITE OPERATION.",
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        adGroupId: z.string().describe("Ad group ID."),
-        ageRange: z.enum(["AGE_RANGE_18_24","AGE_RANGE_25_34","AGE_RANGE_35_44","AGE_RANGE_45_54","AGE_RANGE_55_64","AGE_RANGE_65_UP","AGE_RANGE_UNDETERMINED"]).describe("Age range."),
-        bidModifier: z.number().describe("Bid modifier. 0=exclude."),
-      },
-    },
-    async ({ customerId, adGroupId, ageRange, bidModifier }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const cid = customerId.replace(/-/g, "");
-      const result = await client.mutateAdGroupCriteria(customerId, [{ create: { adGroup: `customers/${cid}/adGroups/${adGroupId}`, ageRange: { type: ageRange }, bidModifier } }] as unknown as import("./google-ads-client.js").MutateOperation[]);
-      return { content: [text(`Age bid: ${ageRange} → ${bidModifier}\n\n${formatJson(result)}`)] };
-    }
-  );
+  // set_age_bid_adjustment: reescrita em src/tools/bid-modifiers.ts (lote bid-modifiers).
 
-  mcp.registerTool(
-    "set_gender_bid_adjustment",
-    {
-      description: "Set bid adjustment for gender on an ad group. WRITE OPERATION.",
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        adGroupId: z.string().describe("Ad group ID."),
-        gender: z.enum(["MALE","FEMALE","UNDETERMINED"]).describe("Gender."),
-        bidModifier: z.number().describe("Bid modifier. 0=exclude."),
-      },
-    },
-    async ({ customerId, adGroupId, gender, bidModifier }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const cid = customerId.replace(/-/g, "");
-      const result = await client.mutateAdGroupCriteria(customerId, [{ create: { adGroup: `customers/${cid}/adGroups/${adGroupId}`, gender: { type: gender }, bidModifier } }] as unknown as import("./google-ads-client.js").MutateOperation[]);
-      return { content: [text(`Gender bid: ${gender} → ${bidModifier}\n\n${formatJson(result)}`)] };
-    }
-  );
+  // set_gender_bid_adjustment: reescrita em src/tools/bid-modifiers.ts (lote bid-modifiers).
 
   mcp.registerTool(
     "update_ad",
