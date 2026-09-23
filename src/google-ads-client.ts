@@ -523,4 +523,22 @@ export class GoogleAdsClient {
       },
     ]);
   }
+
+  // ── lote experiments-tracking ──
+
+  /**
+   * GET de leitura sob customers/{cid} — os endpoints de lista que não são GAQL, como
+   * experiments/{id}:listExperimentAsyncErrors e campaignDrafts/{base~draft}:listAsyncErrors.
+   * Não altera a conta (por isso vale também em read-only e dry-run).
+   */
+  async customerGet<T = Record<string, unknown>>(
+    customerId: string,
+    path: string,
+    params: Record<string, string> = {}
+  ): Promise<T> {
+    const cid = customerId.replace(/-/g, "");
+    const query = new URLSearchParams(params).toString();
+    const url = `${API_BASE}/customers/${cid}${path.startsWith(":") ? "" : "/"}${path}${query ? `?${query}` : ""}`;
+    return this.request<T>("GET", url);
+  }
 }

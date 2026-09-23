@@ -4664,56 +4664,343 @@ export function registerGoogleAdsTools(
   mcp.registerTool(
     "create_label",
     {
-      description: "Create a label for organizing campaigns/ad groups/ads.",
+      description: [
+        "Cria um rótulo para organizar campanhas, grupos, anúncios, palavras-chave e contas. WRITE OPERATION.",
+        "backgroundColor (hex #RRGGBB ou #RGB) e description (até 200 caracteres) são opcionais.",
+        "Se já existe rótulo ativo com o mesmo nome, nada é criado e o existente é devolvido — para mudar cor",
+        "ou descrição use update_label. Rótulo criado numa conta de administrador (MCC) serve para rotular",
+        "contas clientes (assign_label com resourceType customer).",
+      ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
-        name: z.string().describe("Label name."),
+        name: z.string().describe("Nome do rótulo (1 a 80 caracteres, único na conta)."),
+        backgroundColor: z.string().optional().describe("Cor de fundo em hex, ex.: #FF9900."),
+        description: z.string().optional().describe("Descrição (até 200 caracteres)."),
       },
     },
-    async ({ customerId, name }) => {
+    async ({ customerId, name, backgroundColor, description }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
+      const labelName = name.trim();
+      const color = backgroundColor?.trim();
+      const problems: string[] = [];
+      if (labelName.length < 1 || labelName.length > 80) problems.push("name precisa ter de 1 a 80 caracteres");
+      if (color !== undefined && !/^#([a-fA-F0-9]{6}|[a-fA-F0-9]{3})$/.test(color)) problems.push(`backgroundColor inválida: "${backgroundColor}" (use #RRGGBB ou #RGB)`);
+      if (description !== undefined && description.length > 200) problems.push("description passa de 200 caracteres");
+      if (problems.length > 0) return { content: [text(`Nada foi criado:\n- ${problems.join("\n- ")}`)], isError: true };
+
       const client = getClient();
-      const result = await client.mutate(customerId, "labels", [{ create: { name } }]);
-      return { content: [text(`Label created: "${name}"\n\n${formatJson(result)}`)] };
+      const existing = await client.searchStream(customerId,
+        `SELECT label.id, label.name, label.status FROM label WHERE label.name = '${gaqlLiteral(labelName)}'`);
+      const active = existing.map((row) => (row.label ?? {}) as Record<string, unknown>).find((label) => label.status !== "REMOVED");
+      if (active) {
+        return { content: [text(`O rótulo "${labelName}" já existe (ID ${active.id}). Nada foi criado — para mudar cor ou descrição use update_label.`)] };
+      }
+      const create: Record<string, unknown> = { name: labelName };
+      const textLabel: Record<string, unknown> = {};
+      if (color) textLabel.backgroundColor = color;
+      if (description) textLabel.description = description;
+      if (Object.keys(textLabel).length > 0) create.textLabel = textLabel;
+      let result: Record<string, unknown>;
+      try {
+        result = await client.mutate(customerId, "labels", [{ create }]);
+      } catch (err) {
+        return { content: [text(`A API recusou o rótulo "${labelName}". Nada foi criado.\nErro: ${(err as Error).message}`)], isError: true };
+      }
+      if (client.isDryRun) {
+        return { content: [text(`Rótulo "${labelName}" — DRY-RUN (validateOnly): a API validou, nada foi gravado.`)] };
+      }
+      const resourceName = String((((result.results as Array<Record<string, unknown>>) ?? [])[0] ?? {}).resourceName ?? "");
+      return {
+        content: [text(
+          `Rótulo criado: "${labelName}"${resourceName ? ` (ID ${resourceName.split("/").pop()})` : ""}.\n\n` +
+          formatJson({ resource_name: resourceName || null, text_label: create.textLabel ?? null })
+        )],
+      };
     }
   );
 
   mcp.registerTool(
     "assign_label",
     {
-      description: "Assign a label to a campaign, ad group, or ad. WRITE OPERATION.",
+      description: [
+        "Aplica ou tira um rótulo de vários itens de uma vez. WRITE OPERATION (partial failure: um item com",
+        "erro não derruba os outros; relatório por item).",
+        "",
+        "resourceType e formato dos IDs em resourceIds:",
+        "- campaign / adGroup: ID numérico",
+        "- adGroupAd: adGroupId~adId",
+        "- adGroupCriterion (palavra-chave): adGroupId~criterionId — não vale para negativas",
+        "- customer: IDs das CONTAS CLIENTES; customerId é a conta de administrador (MCC) dona do rótulo",
+        "  (uma requisição por conta, como a API exige). Rótulo de MCC só serve para contas.",
+        "action: assign (padrão) ou unassign (pede confirm: true). Itens que já estão no estado pedido não",
+        "são reenviados. Máximo de 1000 itens por chamada; a API aceita até 50 rótulos por item.",
+      ].join("\n"),
       inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        resourceType: z.enum(["campaign","adGroup","adGroupAd"]).describe("Resource type."),
-        resourceId: z.string().describe("Resource ID."),
-        labelId: z.string().describe("Label ID."),
+        customerId: z.string().describe("Customer ID (em resourceType customer: a conta de administrador dona do rótulo)."),
+        resourceType: z.enum(["campaign", "adGroup", "adGroupAd", "adGroupCriterion", "customer"]).describe("Tipo do item."),
+        resourceIds: flexArray(z.string()).optional().describe("IDs dos itens (formato acima)."),
+        resourceId: z.string().optional().describe("Um ID só (compatibilidade; prefira resourceIds)."),
+        labelId: z.string().describe("ID do rótulo (list_labels)."),
+        action: z.enum(["assign", "unassign"]).optional().describe("assign (padrão) ou unassign."),
+        confirm: z.boolean().optional().describe("true para unassign."),
       },
     },
-    async ({ customerId, resourceType, resourceId, labelId }) => {
+    async ({ customerId, resourceType, resourceIds, resourceId, labelId, action, confirm }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
       const cid = customerId.replace(/-/g, "");
-      const resMap: Record<string, string> = { campaign: "campaignLabels", adGroup: "adGroupLabels", adGroupAd: "adGroupAdLabels" };
-      const pathMap: Record<string, string> = { campaign: "campaigns", adGroup: "adGroups", adGroupAd: "adGroupAds" };
-      const result = await client.mutate(customerId, resMap[resourceType], [{ create: { [resourceType]: `customers/${cid}/${pathMap[resourceType]}/${resourceId}`, label: `customers/${cid}/labels/${labelId}` } }]);
-      return { content: [text(`Label ${labelId} → ${resourceType} ${resourceId}.\n\n${formatJson(result)}`)] };
+      const mode = action ?? "assign";
+      const ids = [...new Set([...ensureArray<string>(resourceIds), ...(resourceId !== undefined ? [resourceId] : [])]
+        .map((id) => (resourceType === "customer" ? String(id).trim().replace(/-/g, "") : String(id).trim()))
+        .filter(Boolean))];
+      const pattern = resourceType === "adGroupAd" || resourceType === "adGroupCriterion" ? /^\d+~\d+$/ : /^\d+$/;
+      const problems: string[] = [];
+      if (!/^\d+$/.test(cid)) problems.push(`customerId inválido: "${customerId}"`);
+      if (!/^\d+$/.test(labelId)) problems.push(`labelId deve ser numérico (recebido "${labelId}")`);
+      if (ids.length === 0) problems.push("informe resourceIds");
+      if (ids.length > 1000) problems.push(`máximo de 1000 itens por chamada (recebido ${ids.length})`);
+      const badIds = ids.filter((id) => !pattern.test(id));
+      if (badIds.length > 0) {
+        const hint = { campaign: "ID numérico", adGroup: "ID numérico", adGroupAd: "adGroupId~adId", adGroupCriterion: "adGroupId~criterionId", customer: "ID da conta" }[resourceType];
+        problems.push(`IDs fora do formato ${hint}: ${badIds.join(", ")}`);
+      }
+      if (resourceType === "customer") {
+        const denied = ids.filter((id) => checkCustomerAccess(id, allowedCustomerIds, hosted));
+        if (denied.length > 0) problems.push(`contas fora da allowlist: ${denied.join(", ")}`);
+      }
+      if (problems.length > 0) return { content: [text(`Nada foi alterado:\n- ${problems.join("\n- ")}`)], isError: true };
+
+      const client = getClient();
+      const dryRun = client.isDryRun;
+      const labelRows = await client.searchStream(customerId, `SELECT label.id, label.name, label.status FROM label WHERE label.id = ${labelId}`);
+      const label = labelRows[0]?.label as Record<string, unknown> | undefined;
+      if (!label) return { content: [text(`Rótulo ${labelId} não encontrado na conta ${cid}. Nada foi alterado.`)], isError: true };
+      if (label.status === "REMOVED" && mode === "assign") return { content: [text(`Rótulo ${labelId} ("${label.name}") está removido e não pode ser aplicado. Nada foi alterado.`)], isError: true };
+      const labelResource = `customers/${cid}/labels/${labelId}`;
+      const labelLine = `Rótulo ${labelId} ("${label.name}")`;
+      const done: Array<Record<string, unknown>> = [];
+      const errors: Array<Record<string, unknown>> = [];
+      const unchanged: string[] = [];
+      const notFound: string[] = [];
+
+      if (resourceType === "customer") {
+        // Um MutateCustomerLabelsRequest só mexe numa conta: uma chamada por conta cliente.
+        const plan: Array<{ id: string; linked: string | undefined }> = [];
+        for (const clientId of ids) {
+          try {
+            const rows = await client.searchStream(clientId,
+              `SELECT customer_label.resource_name, customer_label.label FROM customer_label WHERE customer_label.label = '${labelResource}'`);
+            const linked = rows.map((row) => String(((row.customerLabel ?? {}) as Record<string, unknown>).resourceName ?? "")).find(Boolean);
+            if ((mode === "assign") === Boolean(linked)) unchanged.push(clientId);
+            else plan.push({ id: clientId, linked });
+          } catch (err) {
+            errors.push({ id: clientId, error: (err as Error).message });
+          }
+        }
+        if (plan.length > 0 && mode === "unassign" && confirm !== true) {
+          return { content: [text(`${labelLine} vai sair de ${plan.length} conta(s): ${plan.map((item) => item.id).join(", ")}. Nada foi alterado — repita com confirm: true.`)], isError: true };
+        }
+        for (const item of plan) {
+          try {
+            const response = await client.mutate(item.id, "customerLabels", [
+              mode === "assign" ? { create: { label: labelResource } } : { remove: item.linked ?? `customers/${item.id}/customerLabels/${labelId}` },
+            ]);
+            const confirmed = String((((response.results as Array<Record<string, unknown>>) ?? [])[0] ?? {}).resourceName ?? "");
+            if (!dryRun && !confirmed) errors.push({ id: item.id, error: "a API não confirmou a operação" });
+            else done.push({ id: item.id });
+          } catch (err) {
+            errors.push({ id: item.id, error: (err as Error).message });
+          }
+        }
+      } else {
+        const spec = {
+          campaign: { service: "campaignLabels", field: "campaign", path: "campaigns" },
+          adGroup: { service: "adGroupLabels", field: "adGroup", path: "adGroups" },
+          adGroupAd: { service: "adGroupAdLabels", field: "adGroupAd", path: "adGroupAds" },
+          adGroupCriterion: { service: "adGroupCriterionLabels", field: "adGroupCriterion", path: "adGroupCriteria" },
+        }[resourceType];
+        const firsts = [...new Set(ids.map((id) => id.split("~")[0]))];
+        const lasts = [...new Set(ids.map((id) => id.split("~").pop() as string))];
+        const targets = new Map<string, Record<string, unknown>>();
+        const links = new Map<string, string>();
+        const get = (row: Record<string, unknown>, key: string) => (row[key] ?? {}) as Record<string, unknown>;
+        if (resourceType === "campaign") {
+          for (const row of await client.searchStream(customerId, `SELECT campaign.id, campaign.name, campaign.status FROM campaign WHERE campaign.id IN (${ids.join(", ")})`)) {
+            targets.set(String(get(row, "campaign").id), get(row, "campaign"));
+          }
+          for (const row of await client.searchStream(customerId, `SELECT campaign.id, campaign_label.resource_name FROM campaign_label WHERE label.id = ${labelId} AND campaign.id IN (${ids.join(", ")})`)) {
+            links.set(String(get(row, "campaign").id), String(get(row, "campaignLabel").resourceName));
+          }
+        } else if (resourceType === "adGroup") {
+          for (const row of await client.searchStream(customerId, `SELECT ad_group.id, ad_group.name, ad_group.status FROM ad_group WHERE ad_group.id IN (${ids.join(", ")})`)) {
+            targets.set(String(get(row, "adGroup").id), get(row, "adGroup"));
+          }
+          for (const row of await client.searchStream(customerId, `SELECT ad_group.id, ad_group_label.resource_name FROM ad_group_label WHERE label.id = ${labelId} AND ad_group.id IN (${ids.join(", ")})`)) {
+            links.set(String(get(row, "adGroup").id), String(get(row, "adGroupLabel").resourceName));
+          }
+        } else if (resourceType === "adGroupAd") {
+          for (const row of await client.searchStream(customerId, `SELECT ad_group.id, ad_group_ad.ad.id, ad_group_ad.status FROM ad_group_ad WHERE ad_group_ad.ad.id IN (${lasts.join(", ")}) AND ad_group.id IN (${firsts.join(", ")})`)) {
+            const adGroupAd = get(row, "adGroupAd");
+            targets.set(`${get(row, "adGroup").id}~${get(adGroupAd, "ad").id}`, { status: adGroupAd.status });
+          }
+          for (const row of await client.searchStream(customerId, `SELECT ad_group.id, ad_group_ad.ad.id, ad_group_ad_label.resource_name FROM ad_group_ad_label WHERE label.id = ${labelId} AND ad_group_ad.ad.id IN (${lasts.join(", ")})`)) {
+            links.set(`${get(row, "adGroup").id}~${get(get(row, "adGroupAd"), "ad").id}`, String(get(row, "adGroupAdLabel").resourceName));
+          }
+        } else {
+          for (const row of await client.searchStream(customerId, `SELECT ad_group.id, ad_group_criterion.criterion_id, ad_group_criterion.status, ad_group_criterion.negative FROM ad_group_criterion WHERE ad_group_criterion.criterion_id IN (${lasts.join(", ")}) AND ad_group.id IN (${firsts.join(", ")})`)) {
+            const criterion = get(row, "adGroupCriterion");
+            targets.set(`${get(row, "adGroup").id}~${criterion.criterionId}`, criterion);
+          }
+          for (const row of await client.searchStream(customerId, `SELECT ad_group.id, ad_group_criterion.criterion_id, ad_group_criterion_label.resource_name FROM ad_group_criterion_label WHERE label.id = ${labelId} AND ad_group_criterion.criterion_id IN (${lasts.join(", ")})`)) {
+            links.set(`${get(row, "adGroup").id}~${get(row, "adGroupCriterion").criterionId}`, String(get(row, "adGroupCriterionLabel").resourceName));
+          }
+        }
+        const operations: Array<Record<string, unknown>> = [];
+        const planned: string[] = [];
+        for (const id of ids) {
+          const target = targets.get(id);
+          if (!target && !(mode === "unassign" && links.has(id))) { notFound.push(id); continue; }
+          if (mode === "assign") {
+            if (links.has(id)) { unchanged.push(id); continue; }
+            if (target?.status === "REMOVED") { errors.push({ id, error: "item removido — rótulo não pode ser aplicado" }); continue; }
+            if (target?.negative === true) { errors.push({ id, error: "palavra-chave negativa não aceita rótulo (CANNOT_APPLY_LABEL_TO_NEGATIVE_AD_GROUP_CRITERION)" }); continue; }
+            operations.push({ create: { [spec.field]: `customers/${cid}/${spec.path}/${id}`, label: labelResource } });
+          } else {
+            if (!links.has(id)) { unchanged.push(id); continue; }
+            operations.push({ remove: links.get(id) });
+          }
+          planned.push(id);
+        }
+        if (operations.length > 0 && mode === "unassign" && confirm !== true) {
+          return { content: [text(`${labelLine} vai sair de ${operations.length} ${resourceType}: ${planned.join(", ")}. Nada foi alterado — repita com confirm: true.`)], isError: true };
+        }
+        if (operations.length > 0) {
+          try {
+            const response = await client.mutate(customerId, spec.service, operations as unknown as import("./google-ads-client.js").MutateOperation[], { partialFailure: true });
+            const results = (response.results as Array<Record<string, unknown>>) ?? [];
+            const { byIndex, unattributed } = partialFailureByOperation(response.partialFailureError, operations.length);
+            planned.forEach((id, index) => {
+              const opErrors = byIndex.get(index);
+              if (opErrors) errors.push({ id, error: opErrors.join("; ") });
+              else if (!dryRun && !results[index]?.resourceName) errors.push({ id, error: "a API não confirmou a operação" });
+              else done.push({ id });
+            });
+            for (const message of unattributed) errors.push({ error: message });
+          } catch (err) {
+            for (const id of planned) errors.push({ id, error: (err as Error).message });
+          }
+        }
+      }
+
+      const verb = mode === "assign" ? "aplicado em" : "retirado de";
+      const header = dryRun
+        ? `${labelLine} — DRY-RUN (validateOnly): nada foi gravado. Validados: ${done.length}`
+        : `${labelLine} ${verb} ${done.length} ${resourceType}`;
+      return {
+        content: [text(
+          `${header} | já estavam assim: ${unchanged.length} | não encontrados: ${notFound.length} | com erro: ${errors.length}\n\n` +
+          formatJson({ [dryRun ? "validated" : mode === "assign" ? "assigned" : "unassigned"]: done, unchanged, not_found: notFound, errors })
+        )],
+        isError: errors.length > 0 || notFound.length > 0,
+      };
     }
   );
 
   mcp.registerTool(
     "list_labels",
     {
-      description: "List all labels in the account.",
-      inputSchema: { customerId: z.string().describe("Customer ID.") },
+      description: [
+        "Lista os rótulos da conta com cor, descrição e quantos itens usam cada um (campanhas, grupos,",
+        "anúncios, palavras-chave e contas). READ OPERATION.",
+        "accounts = contas clientes com o rótulo — só rótulo de conta de administrador (MCC) vai em conta; a",
+        "contagem vem de customer_client.applied_labels, consultado no MCC.",
+        "Filtre relatórios por rótulo com get_label_performance e mude status em lote com",
+        "update_status_by_label (ambos usam o ID do rótulo).",
+      ].join("\n"),
+      inputSchema: {
+        customerId: z.string().describe("Customer ID."),
+        includeRemoved: z.boolean().optional().describe("Inclui rótulos removidos. Padrão false."),
+        withCounts: z.boolean().optional().describe("Conta os itens por rótulo (padrão true)."),
+        format: formatSchema,
+      },
     },
-    async ({ customerId }) => {
+    async ({ customerId, includeRemoved, withCounts, format }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
-      const results = await client.searchStream(customerId, `SELECT label.id, label.name, label.status FROM label WHERE label.status = 'ENABLED'`);
-      return { content: [text(`${results.length} label(s).\n\n${formatJson(results)}`)] };
+      const results = await client.searchStream(customerId,
+        `SELECT label.id, label.name, label.status, label.text_label.background_color, label.text_label.description
+         FROM label${includeRemoved ? "" : " WHERE label.status = 'ENABLED'"}
+         ORDER BY label.name`);
+      const counts = new Map<string, Record<string, number | null>>();
+      const countKeys = ["campaigns", "ad_groups", "ads", "keywords", "accounts"] as const;
+      if (withCounts !== false && results.length > 0) {
+        const sources: Array<[typeof countKeys[number], string]> = [
+          ["campaigns", "SELECT label.id, campaign_label.resource_name FROM campaign_label"],
+          ["ad_groups", "SELECT label.id, ad_group_label.resource_name FROM ad_group_label"],
+          ["ads", "SELECT label.id, ad_group_ad_label.resource_name FROM ad_group_ad_label"],
+          ["keywords", "SELECT label.id, ad_group_criterion_label.resource_name FROM ad_group_criterion_label"],
+          // O vínculo CustomerLabel fica na conta rotulada (customers/{cliente}/customerLabels/...), não no MCC:
+          // do MCC, quem mostra os rótulos dele aplicados em cada conta é customer_client.applied_labels.
+          ["accounts", "SELECT customer_client.id, customer_client.applied_labels FROM customer_client"],
+        ];
+        for (const [key, query] of sources) {
+          let rows: Array<Record<string, unknown>> | undefined;
+          try {
+            rows = await client.searchStream(customerId, query);
+          } catch {
+            rows = undefined; // ex.: conta de administrador não tem campanhas
+          }
+          for (const row of results) {
+            const id = String(((row.label ?? {}) as Record<string, unknown>).id ?? "");
+            const entry = counts.get(id) ?? {};
+            entry[key] = rows === undefined ? null : 0;
+            counts.set(id, entry);
+          }
+          if (key === "accounts") {
+            // Conta cada conta cliente uma vez por rótulo, só com rótulos desta conta (customers/{cid}/labels/{id}).
+            const ownPrefix = `customers/${customerId.replace(/-/g, "")}/labels/`;
+            const clientsByLabel = new Map<string, Set<string>>();
+            for (const row of rows ?? []) {
+              const customerClient = (row.customerClient ?? {}) as Record<string, unknown>;
+              const applied = Array.isArray(customerClient.appliedLabels) ? customerClient.appliedLabels : [];
+              for (const labelResource of applied.map(String).filter((resource) => resource.startsWith(ownPrefix))) {
+                const id = labelResource.slice(ownPrefix.length);
+                const clients = clientsByLabel.get(id) ?? new Set<string>();
+                clients.add(String(customerClient.id ?? ""));
+                clientsByLabel.set(id, clients);
+              }
+            }
+            for (const [id, clients] of clientsByLabel) {
+              const entry = counts.get(id);
+              if (entry && entry[key] !== null) entry[key] = clients.size;
+            }
+            continue;
+          }
+          for (const row of rows ?? []) {
+            const id = String(((row.label ?? {}) as Record<string, unknown>).id ?? "");
+            const entry = counts.get(id);
+            if (entry && entry[key] !== null) entry[key] = (entry[key] ?? 0) + 1;
+          }
+        }
+      }
+      const labels = results.map((row) => {
+        const label = (row.label ?? {}) as Record<string, unknown>;
+        const textLabel = (label.textLabel ?? {}) as Record<string, unknown>;
+        const id = String(label.id ?? "");
+        return {
+          id,
+          name: label.name,
+          status: label.status,
+          background_color: textLabel.backgroundColor ?? null,
+          description: textLabel.description ?? null,
+          ...(withCounts !== false ? Object.fromEntries(countKeys.map((key) => [key, counts.get(id)?.[key] ?? 0])) : {}),
+        };
+      });
+      if (format === "table") return { content: [text(formatAsTable(labels as Array<Record<string, unknown>>))] };
+      if (format === "csv") return { content: [text(formatAsCsv(labels as Array<Record<string, unknown>>))] };
+      return { content: [text(`${labels.length} rótulo(s).\n\n${formatJson(labels)}`)] };
     }
   );
 
