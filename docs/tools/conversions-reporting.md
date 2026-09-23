@@ -131,6 +131,9 @@ saem num único `googleAds:mutate` com IDs temporários, então `validateOnly` f
 ### get_lift_results (leitura, v25.1)
 - `lift_measurement_config` (estudos: campanhas, ações, holdback, perguntas) e `lift_measurement_flight` (voos: tipo
   CONVERSION/SEARCH/SURVEY, status, datas, % de respostas coletadas).
+- `lift_measurement_config.campaigns` derruba a consulta ("Internal error encountered.", reproduzido em contas sem
+  estudo), então fica fora da consulta principal: é lido à parte só quando há estudo. Se falhar, os estudos saem com
+  `campaigns: null` e uma nota — `[]` continua significando estudo sem campanha.
 - Conversion Lift: sempre segmentado por `conversion_lift_start_date/end_date/conversion_category/included_conversion_action_types`
   (resultados por período não podem ser somados) + quebra opcional `CONVERSION_ACTION`, `AGE_RANGE`, `GENDER`, `DEVICE`,
   `COUNTRY`, `EXPERIMENT_ARM`. 24 métricas (incrementais, bounds p90, p-valor, lift relativo, custo por incremental, iROAS,

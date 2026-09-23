@@ -1038,8 +1038,13 @@ const flight = (configId: string, liftType: string): Row => ({
   liftMeasurementFlight: { liftMeasurementConfigId: configId, liftMeasurementFlightId: "1", name: "Voo 1", status: "ENABLED", liftType, startDate: "2026-08-01", endDate: "2026-08-28" },
 });
 
+/** Como a API real: SELECT com lift_measurement_config.campaigns responde "Internal error encountered." */
+const campaignsFieldBreaks = (query: string) => {
+  if (/lift_measurement_config\.campaigns/.test(query)) throw new Error("Google Ads API: Internal error encountered.");
+};
+
 test("get_lift_results: sem estudos responde sem erro e sem consultar resultados", async () => {
-  const { client, calls } = fakeClient();
+  const { client, calls } = fakeClient({ respond: (_from, query) => { campaignsFieldBreaks(query); return undefined; } });
   const result = await call(client, "get_lift_results", {});
   assert.equal(result.isError, undefined);
   assert.match(textOf(result), /Nenhum estudo de lift/);
@@ -1047,6 +1052,25 @@ test("get_lift_results: sem estudos responde sem erro e sem consultar resultados
 
   const missing = await call(client, "get_lift_results", { liftMeasurementConfigId: "77" });
   assert.equal(missing.isError, true);
+});
+
+test("get_lift_results: se a API falhar ao ler as campanhas dos estudos, o resto sai com campaigns null e nota", async () => {
+  const { client } = fakeClient({
+    respond: (from, query) => {
+      campaignsFieldBreaks(query);
+      if (from === "lift_measurement_flight") return [flight("77", "CONVERSION")];
+      if (from === "lift_measurement_config" && /metrics\./.test(query)) return [];
+      if (from === "lift_measurement_config") return [liftConfig("77")];
+      return undefined;
+    },
+  });
+  const result = await call(client, "get_lift_results", {});
+  assert.equal(result.isError, undefined, textOf(result));
+  const [study] = jsonOf(result).studies as Row[];
+  assert.equal(study.config_id, "77");
+  assert.equal(study.campaigns, null, "null = a API não devolveu (≠ estudo sem campanha)");
+  assert.equal((study.flights as Row[]).length, 1);
+  assert.match(textOf(result), /Campanhas dos estudos indisponíveis \(campaigns: null\) — a API falhou ao lê-las: Google Ads API: Internal error encountered\./);
 });
 
 test("get_lift_results: Conversion Lift com intervalo acima de zero vira 'positivo e significativo'", async () => {
