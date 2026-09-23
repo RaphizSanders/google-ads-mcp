@@ -87,7 +87,6 @@ function registerAll() {
  */
 const KNOWN_BROKEN = new Set<string>([
   "get_daily_trend", // #21 — filtro campaign.id em FROM customer
-  "list_merchant_centers", // #20 — merchant_center_link não existe na v25
 ]);
 
 /** run_gaql executa a query que o usuário escreve: não há query "da tool" para validar. */
