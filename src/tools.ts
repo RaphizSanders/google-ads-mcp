@@ -347,68 +347,7 @@ export function registerGoogleAdsTools(
 
   // ── Insights: Ad Performance ───────────────────────────────────────
 
-  mcp.registerTool(
-    "get_ad_performance",
-    {
-      description:
-        "Get performance metrics for ads. Optionally filter by campaign ID.",
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        dateRange: dateRangeSchema.describe(DATE_RANGE_DESC),
-        days: z.number().optional().describe(DAYS_DESC),
-        campaignId: z.string().optional().describe("Filter by campaign ID."),
-        limit: z.number().optional().describe("Max results. Default: 50."),
-      },
-    },
-    async ({ customerId, dateRange, days, campaignId, limit }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const dateClause = buildDateClause(dateRange, days);
-      const campaignFilter = campaignId ? `AND campaign.id = ${campaignId}` : "";
-
-      const results = await client.searchStream(
-        customerId,
-        `SELECT ad_group_ad.ad.id, ad_group_ad.ad.name, ad_group_ad.ad.type,
-                ad_group_ad.status, ad_group.name, campaign.name,
-                metrics.cost_micros, metrics.impressions, metrics.clicks,
-                metrics.ctr, metrics.conversions, metrics.conversions_value
-         FROM ad_group_ad
-         WHERE ${dateClause}
-           AND ad_group_ad.status != 'REMOVED'
-           ${campaignFilter}
-           AND metrics.impressions > 0
-         ORDER BY metrics.cost_micros DESC
-         LIMIT ${limit ?? 50}`
-      );
-
-      const ads = results.map((r) => {
-        const ad = (r.adGroupAd as Record<string, unknown>)?.ad as Record<string, unknown> | undefined;
-        const ag = r.adGroup as Record<string, unknown>;
-        const c = r.campaign as Record<string, unknown>;
-        const m = r.metrics as Record<string, unknown>;
-        const spend = microsToMoney(m?.costMicros);
-        const conv = num(m?.conversions);
-        const convValue = num(m?.conversionsValue);
-        return {
-          ad_id: ad?.id,
-          ad_name: ad?.name,
-          ad_type: ad?.type,
-          ad_group_name: ag?.name,
-          campaign_name: c?.name,
-          spend: Math.round(spend * 100) / 100,
-          impressions: num(m?.impressions),
-          clicks: num(m?.clicks),
-          ctr: Math.round(num(m?.ctr) * 10000) / 100,
-          conversions: conv,
-          revenue: Math.round(convValue * 100) / 100,
-          roas: spend > 0 ? Math.round((convValue / spend) * 100) / 100 : 0,
-        };
-      });
-
-      return { content: [text(`${ads.length} ad(s).\n\n${formatJson(ads)}`)] };
-    }
-  );
+  // get_ad_performance: registrada em src/tools/rsa-ads.ts (lote rsa-ads).
 
   // ── Insights: Keyword Performance ──────────────────────────────────
 
@@ -941,39 +880,7 @@ export function registerGoogleAdsTools(
 
   // ── Assets: Ad Creatives ───────────────────────────────────────────
 
-  mcp.registerTool(
-    "get_ad_creatives",
-    {
-      description:
-        "Get ad creative details: headlines, descriptions, final URLs, and display URL for responsive search ads.",
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        campaignId: z.string().optional().describe("Filter by campaign ID."),
-        limit: z.number().optional().describe("Max results. Default: 50."),
-      },
-    },
-    async ({ customerId, campaignId, limit }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const campaignFilter = campaignId ? `AND campaign.id = ${campaignId}` : "";
-
-      const results = await client.searchStream(
-        customerId,
-        `SELECT ad_group_ad.ad.id, ad_group_ad.ad.type,
-                ad_group_ad.ad.responsive_search_ad.headlines,
-                ad_group_ad.ad.responsive_search_ad.descriptions,
-                ad_group_ad.ad.final_urls, ad_group_ad.ad.display_url,
-                ad_group_ad.status, campaign.name, ad_group.name
-         FROM ad_group_ad
-         WHERE ad_group_ad.status != 'REMOVED'
-           ${campaignFilter}
-         LIMIT ${limit ?? 50}`
-      );
-
-      return { content: [text(`${results.length} creative(s).\n\n${formatJson(results)}`)] };
-    }
-  );
+  // get_ad_creatives: registrada em src/tools/rsa-ads.ts (lote rsa-ads).
 
   // ── Assets: Image Assets ───────────────────────────────────────────
 
@@ -1893,91 +1800,9 @@ export function registerGoogleAdsTools(
 
   // ── Ad Management ──────────────────────────────────────────────────
 
-  mcp.registerTool(
-    "create_ad",
-    {
-      description: [
-        "Create a Responsive Search Ad (RSA) in an ad group.",
-        "WRITE OPERATION — created PAUSED by default.",
-        "",
-        "Requires 3-15 headlines (max 30 chars each) and 2-4 descriptions (max 90 chars each).",
-        "Google will test combinations automatically.",
-      ].join("\n"),
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        adGroupId: z.string().describe("Ad group ID."),
-        finalUrl: z.string().describe("Landing page URL."),
-        headlines: z
-          .array(z.string())
-          .describe("3-15 headlines (max 30 chars each)."),
-        descriptions: z
-          .array(z.string())
-          .describe("2-4 descriptions (max 90 chars each)."),
-        path1: z.string().optional().describe("Display URL path 1 (max 15 chars)."),
-        path2: z.string().optional().describe("Display URL path 2 (max 15 chars)."),
-      },
-    },
-    async ({ customerId, adGroupId, finalUrl, headlines, descriptions, path1, path2 }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const cid = customerId.replace(/-/g, "");
+  // create_ad: registrada em src/tools/rsa-ads.ts (lote rsa-ads).
 
-      const adData: Record<string, unknown> = {
-        adGroup: `customers/${cid}/adGroups/${adGroupId}`,
-        status: "PAUSED",
-        ad: {
-          finalUrls: [finalUrl],
-          responsiveSearchAd: {
-            headlines: headlines.map((h) => ({ text: h })),
-            descriptions: descriptions.map((d) => ({ text: d })),
-            ...(path1 && { path1 }),
-            ...(path2 && { path2 }),
-          },
-        },
-      };
-
-      const result = await client.mutateAdGroupAds(customerId, [{ create: adData }]);
-      return {
-        content: [
-          text(
-            `RSA created (PAUSED) with ${headlines.length} headlines and ${descriptions.length} descriptions.\n\n${formatJson(result)}`
-          ),
-        ],
-      };
-    }
-  );
-
-  mcp.registerTool(
-    "update_ad_status",
-    {
-      description: "Pause or enable an ad.",
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        adGroupId: z.string().describe("Ad group ID."),
-        adId: z.string().describe("Ad ID."),
-        status: z.enum(["ENABLED", "PAUSED"]).describe("New status."),
-      },
-    },
-    async ({ customerId, adGroupId, adId, status }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const cid = customerId.replace(/-/g, "");
-
-      const result = await client.mutateAdGroupAds(customerId, [
-        {
-          update: {
-            resourceName: `customers/${cid}/adGroupAds/${adGroupId}~${adId}`,
-            status,
-          },
-          updateMask: "status",
-        },
-      ]);
-
-      return { content: [text(`Ad ${adId} status → ${status}.\n\n${formatJson(result)}`)] };
-    }
-  );
+  // update_ad_status: registrada em src/tools/rsa-ads.ts (lote rsa-ads).
 
   // ── Keyword Management ─────────────────────────────────────────────
 
@@ -4360,31 +4185,7 @@ export function registerGoogleAdsTools(
     }
   );
 
-  mcp.registerTool(
-    "delete_ad",
-    {
-      description: "Delete an ad (sets status to REMOVED). Prefer pausing.",
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        adGroupId: z.string().describe("Ad group ID."),
-        adId: z.string().describe("Ad ID."),
-        confirm: z.boolean().describe("Must be true."),
-      },
-    },
-    async ({ customerId, adGroupId, adId, confirm }) => {
-      if (!confirm) return { content: [text("Error: set confirm: true.")], isError: true };
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const cid = customerId.replace(/-/g, "");
-
-      const result = await client.mutateAdGroupAds(customerId, [
-        { remove: `customers/${cid}/adGroupAds/${adGroupId}~${adId}` },
-      ]);
-
-      return { content: [text(`Ad ${adId} REMOVED.\n\n${formatJson(result)}`)] };
-    }
-  );
+  // delete_ad: registrada em src/tools/rsa-ads.ts (lote rsa-ads).
 
   // ══════════════════════════════════════════════════════════════════
   // ══ BID ADJUSTMENTS + AD SCHEDULE + CONVERSION ACTIONS ════════════
@@ -4770,43 +4571,7 @@ export function registerGoogleAdsTools(
 
   // set_gender_bid_adjustment: reescrita em src/tools/bid-modifiers.ts (lote bid-modifiers).
 
-  mcp.registerTool(
-    "update_ad",
-    {
-      description: [
-        "Update an RSA's headlines, descriptions, or final URL. WRITE OPERATION.",
-        "Pass only fields to change. Ads are updated via the ads resource.",
-      ].join("\n"),
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        adId: z.string().describe("Ad ID."),
-        finalUrl: z.string().optional().describe("New final URL."),
-        headlines: flexArray(z.string()).optional().describe("New headlines (3-15). Replaces all."),
-        descriptions: flexArray(z.string()).optional().describe("New descriptions (2-4). Replaces all."),
-        path1: z.string().optional().describe("New path 1."),
-        path2: z.string().optional().describe("New path 2."),
-      },
-    },
-    async ({ customerId, adId, finalUrl, headlines, descriptions, path1, path2 }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const cid = customerId.replace(/-/g, "");
-      const updateFields: string[] = [];
-      const adUpdate: Record<string, unknown> = { resourceName: `customers/${cid}/ads/${adId}` };
-      if (finalUrl) { adUpdate.finalUrls = [finalUrl]; updateFields.push("final_urls"); }
-      if (headlines) { adUpdate.responsiveSearchAd = { ...(adUpdate.responsiveSearchAd as Record<string, unknown> ?? {}), headlines: headlines.map(h => ({ text: h })) }; updateFields.push("responsive_search_ad.headlines"); }
-      if (descriptions) { adUpdate.responsiveSearchAd = { ...(adUpdate.responsiveSearchAd as Record<string, unknown> ?? {}), descriptions: descriptions.map(d => ({ text: d })) }; updateFields.push("responsive_search_ad.descriptions"); }
-      // path1/path2 pertencem a ResponsiveSearchAdInfo, não à mensagem Ad (v25):
-      // o objeto e o updateMask precisam usar o caminho aninhado responsive_search_ad.*
-      // ("" é valor válido e limpa o path, por isso o teste é !== undefined)
-      if (path1 !== undefined) { adUpdate.responsiveSearchAd = { ...(adUpdate.responsiveSearchAd as Record<string, unknown> ?? {}), path1 }; updateFields.push("responsive_search_ad.path1"); }
-      if (path2 !== undefined) { adUpdate.responsiveSearchAd = { ...(adUpdate.responsiveSearchAd as Record<string, unknown> ?? {}), path2 }; updateFields.push("responsive_search_ad.path2"); }
-      if (updateFields.length === 0) return { content: [text("Error: provide at least one field.")], isError: true };
-      const result = await client.mutate(customerId, "ads", [{ update: adUpdate, updateMask: updateFields.join(",") }]);
-      return { content: [text(`Ad ${adId} updated: ${updateFields.join(", ")}.\n\n${formatJson(result)}`)] };
-    }
-  );
+  // update_ad: registrada em src/tools/rsa-ads.ts (lote rsa-ads).
 
   // ══ P3: EXTENSIONS + LABELS + SHARED LISTS ════════════════════════
 
@@ -5732,128 +5497,7 @@ export function registerGoogleAdsTools(
     }
   );
 
-  mcp.registerTool(
-    "get_asset_performance",
-    {
-      description: [
-        "Performance por asset (headline, descrição, imagem, vídeo).",
-        "READ OPERATION.",
-        "",
-        "level='AD' (default): assets de RSA/Display/Demand Gen com métricas reais",
-        "(impressões, cliques, conversões) + performance_label (LOW/GOOD/BEST/LEARNING).",
-        "",
-        "level='PMAX': assets de asset groups PMax, com métricas no período + primary_status",
-        "(o status de veiculação/política do link). PMax não tem performance_label: esse rótulo",
-        "só existe para assets de anúncio. Assets sem impressões no período podem não aparecer.",
-      ].join("\n"),
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        level: z.enum(["AD", "PMAX"]).optional().describe("AD (assets de anúncio) ou PMAX (assets de asset group). Default: AD."),
-        campaignId: z.string().optional().describe("Filtra por campanha."),
-        assetGroupId: z.string().optional().describe("Filtra por asset group (level=PMAX)."),
-        dateRange: dateRangeSchema.describe(DATE_RANGE_DESC),
-        days: z.number().optional().describe(DAYS_DESC),
-        format: formatSchema,
-      },
-    },
-    async ({ customerId, level, campaignId, assetGroupId, dateRange, days, format }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-
-      if ((level ?? "AD") === "PMAX") {
-        // asset_group_asset NAO tem performance_label (esse campo so existe em
-        // ad_group_ad_asset_view); o sinal equivalente aqui e primary_status.
-        const filters = ["asset_group_asset.status != 'REMOVED'", buildDateClause(dateRange, days)];
-        if (assetGroupId) filters.push(`asset_group.id = ${assetGroupId}`);
-        if (campaignId) filters.push(`campaign.id = ${campaignId}`);
-
-        const results = await client.searchStream(customerId,
-          `SELECT campaign.name, asset_group.name, asset_group_asset.field_type,
-                  asset_group_asset.primary_status, asset_group_asset.primary_status_reasons,
-                  asset_group_asset.status,
-                  asset.id, asset.name, asset.text_asset.text, asset.image_asset.full_size.url,
-                  asset.youtube_video_asset.youtube_video_id,
-                  metrics.impressions, metrics.clicks, metrics.conversions,
-                  metrics.conversions_value, metrics.cost_micros
-           FROM asset_group_asset
-           WHERE ${filters.join(" AND ")}
-           ORDER BY metrics.impressions DESC`);
-
-        const rows = results.map((r) => {
-          const aga = (r.assetGroupAsset ?? {}) as Record<string, unknown>;
-          const asset = (r.asset ?? {}) as Record<string, unknown>;
-          const metrics = (r.metrics ?? {}) as Record<string, unknown>;
-          const textAsset = (asset.textAsset ?? {}) as Record<string, unknown>;
-          const imageAsset = (asset.imageAsset ?? {}) as Record<string, unknown>;
-          const videoAsset = (asset.youtubeVideoAsset ?? {}) as Record<string, unknown>;
-          const group = (r.assetGroup ?? {}) as Record<string, unknown>;
-          return {
-            asset_group: group.name,
-            field_type: aga.fieldType,
-            primary_status: aga.primaryStatus,
-            primary_status_reasons: aga.primaryStatusReasons,
-            status: aga.status,
-            asset_id: asset.id,
-            content: textAsset.text ?? ((imageAsset.fullSize as Record<string, unknown>)?.url) ?? videoAsset.youtubeVideoId ?? asset.name,
-            impressions: num(metrics.impressions),
-            clicks: num(metrics.clicks),
-            conversions: num(metrics.conversions),
-            conversions_value: num(metrics.conversionsValue),
-            spend: microsToMoney(metrics.costMicros),
-          };
-        });
-
-        if (format === "table") return { content: [text(formatAsTable(rows as Array<Record<string, unknown>>))] };
-        if (format === "csv") return { content: [text(formatAsCsv(rows as Array<Record<string, unknown>>))] };
-        return { content: [text(`${rows.length} asset(s) PMax no período (primary_status + métricas).\n\n${formatJson(rows)}`)] };
-      }
-
-      const filters = [buildDateClause(dateRange, days)];
-      if (campaignId) filters.push(`campaign.id = ${campaignId}`);
-
-      const results = await client.searchStream(customerId,
-        `SELECT campaign.name, ad_group.name,
-                ad_group_ad_asset_view.field_type, ad_group_ad_asset_view.performance_label,
-                asset.id, asset.text_asset.text, asset.image_asset.full_size.url,
-                metrics.impressions, metrics.clicks, metrics.conversions,
-                metrics.conversions_value, metrics.cost_micros
-         FROM ad_group_ad_asset_view
-         WHERE ${filters.join(" AND ")}
-         ORDER BY metrics.impressions DESC`);
-
-      // Um asset aparece em vários anúncios — agrega por asset + field_type
-      const agg = new Map<string, Record<string, unknown>>();
-      for (const r of results) {
-        const view = (r.adGroupAdAssetView ?? {}) as Record<string, unknown>;
-        const asset = (r.asset ?? {}) as Record<string, unknown>;
-        const metrics = (r.metrics ?? {}) as Record<string, unknown>;
-        const textAsset = (asset.textAsset ?? {}) as Record<string, unknown>;
-        const imageAsset = (asset.imageAsset ?? {}) as Record<string, unknown>;
-        const key = `${asset.id}|${view.fieldType}`;
-        const row = agg.get(key) ?? {
-          field_type: view.fieldType,
-          performance: view.performanceLabel ?? "PENDING",
-          content: textAsset.text ?? ((imageAsset.fullSize as Record<string, unknown>)?.url) ?? asset.id,
-          impressions: 0, clicks: 0, conversions: 0, conversions_value: 0, spend: 0,
-        };
-        row.impressions = num(row.impressions) + num(metrics.impressions);
-        row.clicks = num(row.clicks) + num(metrics.clicks);
-        row.conversions = num(row.conversions) + num(metrics.conversions);
-        row.conversions_value = num(row.conversions_value) + num(metrics.conversionsValue);
-        row.spend = num(row.spend) + microsToMoney(metrics.costMicros);
-        agg.set(key, row);
-      }
-
-      const rows: Array<Record<string, unknown>> = [...agg.values()]
-        .map((r): Record<string, unknown> => ({ ...r, ctr: num(r.impressions) > 0 ? Number((num(r.clicks) / num(r.impressions) * 100).toFixed(2)) : 0 }))
-        .sort((a, b) => num(b.impressions) - num(a.impressions));
-
-      if (format === "table") return { content: [text(formatAsTable(rows as Array<Record<string, unknown>>))] };
-      if (format === "csv") return { content: [text(formatAsCsv(rows as Array<Record<string, unknown>>))] };
-      return { content: [text(`${rows.length} asset(s) com métricas.\n\n${formatJson(rows)}`)] };
-    }
-  );
+  // get_asset_performance: registrada em src/tools/rsa-ads.ts (lote rsa-ads).
 
   // ── Módulos por área (src/tools/) ─────────────────────────────────
   const context = { mcp, getClient, allowedCustomerIds, hosted };
