@@ -18,7 +18,7 @@ do lote foram alteradas ali).
 | 46 — sazonalidade e exclusão de dados | feito | A proposta pedia `confirm` acima de 14 dias; o proto limita a janela a (0, 14 dias], então acima disso a tool recusa (não há o que confirmar). |
 | 47 — portfólios e estratégias de MCC | **parcial** | Feitos: `list_bidding_strategies`, `create_bidding_strategy`, `update_bidding_strategy`, `assign_bidding_strategy`, `remove_bidding_strategy`. **Não feito:** mostrar a estratégia efetiva e o status do lance de cada campanha em `diagnose_campaigns` — a tool é do lote diagnostics e este lote não pode alterá-la. Substituto disponível: `list_bidding_strategies` (`system_status` por campanha e `includeStandardCampaigns`). |
 | 64 — overrides de alvo por grupo | **parcial** | Feitos: `targetRoas`, `clearTargetCpa`, `clearTargetRoas` e recusa sob portfólio em `update_ad_group`, mais `get_ad_group_bid_targets`. **Não feito:** alvos efetivos e origem em `get_ad_group_performance` — a tool é de outro lote. Substitutos: `get_ad_group_bid_targets` e `effective_targets_before` na resposta do `update_ad_group`. |
-| 82 — orçamento total e datas de campanha | **parcial** | Feito em `create_campaign` e `update_campaign`. **Não feito:** `create_pmax_campaign`, `create_shopping_campaign` e `create_demand_gen_campaign` (outros lotes) — ver "Parcial / limites". |
+| 82 — orçamento total e datas de campanha | **parcial** | Feito em `create_campaign` e `update_campaign`; depois da integração também em `create_demand_gen_campaign` (lote demand-gen) e `update_budget` (lote budgets grava `total_amount_micros` em CUSTOM_PERIOD). **Não feito:** `create_pmax_campaign` e `create_shopping_campaign` — ver "Parcial / limites". |
 
 Tudo conferido nos protos oficiais da v25 (`resources/*_simulation`, `common/simulation`,
 `bidding_seasonality_adjustment`, `bidding_data_exclusion`, `bidding_strategy`,
@@ -190,14 +190,15 @@ origem (`effective_target_*_source`), e a estratégia da campanha. Filtros `camp
 
 ## Parcial / limites e por quê
 
-- **Orçamento total nas outras tools de criação**: `create_pmax_campaign`,
-  `create_shopping_campaign` e `create_demand_gen_campaign` são de outros lotes — não foram tocadas.
+- **Orçamento total nas outras tools de criação**: `create_pmax_campaign` e
+  `create_shopping_campaign` são de outros lotes e continuam só com orçamento diário.
+  `create_demand_gen_campaign` ganhou orçamento total (CUSTOM_PERIOD) no lote demand-gen.
   `create_campaign` cobre SEARCH, PERFORMANCE_MAX (casca) e DEMAND_GEN; Shopping com orçamento total
   só será possível quando o dono de `create_shopping_campaign` usar os helpers exportados
   (`checkTotalBudgetFlight`, `TOTAL_BUDGET_RULES`, `parseAdsDateTime`, `beforeAccountToday`,
   `readAccountInfo`).
-- **`update_budget`** (lote budgets) grava `amount_micros`; num orçamento CUSTOM_PERIOD o campo certo
-  é `total_amount_micros`.
+- **`update_budget`** (lote budgets): resolvido na integração — em orçamento CUSTOM_PERIOD grava
+  `total_amount_micros` e recusa `amountMicros`.
 - **Item 64 fica parcial — `get_ad_group_performance`** (outro lote) não ganhou os alvos efetivos; a
   mesma informação está em `get_ad_group_bid_targets` e na resposta do `update_ad_group`.
 - **Item 47 fica parcial — `diagnose_campaigns`** (lote diagnostics) não foi tocada; o status do lance

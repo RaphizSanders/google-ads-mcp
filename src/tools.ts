@@ -1392,7 +1392,7 @@ export function registerGoogleAdsTools(
           content: [
             text(
               "create_campaign não cria campanhas VIDEO: a API do Google Ads não permite criar nem alterar campanhas de vídeo " +
-                "(só leitura, e anúncios em ad groups VIDEO_RESPONSIVE já existentes via create_video_ad). " +
+                "(campanhas de Vídeo são só leitura e relatório pela API). " +
                 "Para vídeo programático use create_demand_gen_campaign.",
             ),
           ],
@@ -2103,12 +2103,11 @@ export function registerGoogleAdsTools(
         };
       }
       // A API não altera campanhas VIDEO existentes: adGroups:mutate responde "Mutates
-      // are not allowed for the requested resource" (testado). Vídeo programático é
-      // Demand Gen; em campanha de vídeo criada no Google Ads, só create_video_ad
-      // (anúncio em ad group VIDEO_RESPONSIVE existente) passa.
+      // are not allowed for the requested resource" (testado) e a documentação diz que
+      // Vídeo é só leitura/relatório. Vídeo programático é Demand Gen.
       if (channel === "VIDEO") {
         return {
-          content: [text("A API do Google Ads não cria ad groups em campanhas VIDEO (nem cria/altera essas campanhas). Para vídeo programático use create_demand_gen_campaign; para anúncio num ad group VIDEO_RESPONSIVE já existente, use create_video_ad.")],
+          content: [text("A API do Google Ads não cria ad groups em campanhas VIDEO (nem cria/altera essas campanhas). Campanhas de Vídeo são só leitura e relatório pela API; para vídeo programático use create_demand_gen_campaign. Nada foi criado.")],
           isError: true,
         };
       }
@@ -2452,6 +2451,7 @@ export function registerGoogleAdsTools(
         "Remove uma palavra-chave (ou negativa) de um grupo de anúncios.",
         "WRITE OPERATION — irreversível: a palavra-chave removida não volta (seria preciso criá-la de novo,",
         "sem o histórico). Prefira pausar (update_keyword / bulk_update_keyword_status).",
+        "Negativas (de grupo ou campanha, várias de uma vez): remove_negative_keyword, com a mesma exigência de confirm.",
         "Confere a palavra-chave na conta e exige confirm: true; sem ele, mostra o que seria removido.",
       ].join("\n"),
       inputSchema: {

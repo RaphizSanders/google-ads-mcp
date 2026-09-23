@@ -451,6 +451,7 @@ test("remove_negative_keyword: por ID e por texto, e relata o que não achou", a
     campaignId: CAMPAIGN_ID,
     criterionIds: ["11"],
     keywords: [{ text: "vagas", matchType: "PHRASE" }, { text: "emprego", matchType: "EXACT" }],
+    confirm: true,
   });
   const write = calls.writes.find((w) => w.method === "mutate:campaignCriteria")!;
   assert.deepEqual(write.operations.map((op) => op.remove), [negativeRows[0].campaignCriterion.resourceName, negativeRows[1].campaignCriterion.resourceName]);
@@ -474,7 +475,7 @@ test("remove_negative_keyword: nada encontrado não envia escrita; erro por oper
       partialFailureError: { details: [{ errors: [{ message: "Resource was not found.", location: { fieldPathElements: [{ fieldName: "operations", index: 1 }] } }] }] },
     }),
   });
-  const r2 = await call(partial.client, "remove_negative_keyword", { campaignId: CAMPAIGN_ID, criterionIds: ["11", "12"] });
+  const r2 = await call(partial.client, "remove_negative_keyword", { campaignId: CAMPAIGN_ID, criterionIds: ["11", "12"], confirm: true });
   assert.equal(r2.isError, true);
   const payload = jsonOf(r2);
   assert.deepEqual((payload.removed as Row[]).map((r) => r.criterion_id), ["11"]);

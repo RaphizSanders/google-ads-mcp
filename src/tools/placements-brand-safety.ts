@@ -76,10 +76,11 @@ export const MAX_MANAGER_LISTS_PER_CLIENT = 5;
 export const PLACEMENT_TYPES = ["WEBSITE", "YOUTUBE_CHANNEL", "YOUTUBE_VIDEO", "MOBILE_APP", "MOBILE_APP_CATEGORY"] as const;
 export type PlacementType = (typeof PLACEMENT_TYPES)[number];
 export const placementTypeSchema = z.enum(PLACEMENT_TYPES);
-export const placementItemSchema = z.union([
+/** Fábrica (uma instância por uso): instância compartilhada vira "$ref" cruzado no JSON Schema da tool. */
+export const placementItemSchema = () => z.union([
   z.string(),
   z.object({
-    type: placementTypeSchema.optional().describe("Tipo. Sem ele, a tool detecta pelo valor."),
+    type: z.enum(PLACEMENT_TYPES).optional().describe("Tipo. Sem ele, a tool detecta pelo valor."),
     value: z.string().describe("URL, domínio, ID do canal (UC…), ID do vídeo, app ID (1-… / 2-…) ou ID da categoria."),
   }),
 ]);
@@ -784,7 +785,7 @@ export function registerPlacementsBrandSafetyTools(ctx: ToolContext): void {
         level: z.enum(["AD_GROUP", "CAMPAIGN", "ACCOUNT"]).describe("Nível da exclusão."),
         campaignId: z.string().optional().describe("Obrigatório com level CAMPAIGN."),
         adGroupId: z.string().optional().describe("Obrigatório com level AD_GROUP."),
-        items: flexArray(placementItemSchema).describe("Posicionamentos a excluir: [{type, value}] ou valores (URL, domínio, ID)."),
+        items: flexArray(placementItemSchema()).describe("Posicionamentos a excluir: [{type, value}] ou valores (URL, domínio, ID)."),
       },
     },
     async ({ customerId, level, campaignId, adGroupId, items }) => {
@@ -982,7 +983,7 @@ export function registerPlacementsBrandSafetyTools(ctx: ToolContext): void {
       inputSchema: {
         customerId: z.string().describe("Customer ID (conta ou MCC que será dona da lista)."),
         name: z.string().describe("Nome da lista (1 a 255 bytes, único entre as listas ativas)."),
-        items: flexArray(placementItemSchema).describe("Posicionamentos da lista."),
+        items: flexArray(placementItemSchema()).describe("Posicionamentos da lista."),
         attachCampaignIds: flexArray(z.string()).optional().describe("Campanhas em que a lista passa a valer."),
         attachToAccount: z.boolean().optional().describe("true = aplicar a lista na conta inteira (inclusive PMax)."),
       },
@@ -1109,8 +1110,8 @@ export function registerPlacementsBrandSafetyTools(ctx: ToolContext): void {
       inputSchema: {
         customerId: z.string().describe("Customer ID (dona da lista)."),
         sharedSetId: z.string().describe("ID da lista (list_placement_exclusion_lists)."),
-        addItems: flexArray(placementItemSchema).optional().describe("Posicionamentos a incluir na lista."),
-        removeItems: flexArray(placementItemSchema).optional().describe("Posicionamentos a tirar da lista."),
+        addItems: flexArray(placementItemSchema()).optional().describe("Posicionamentos a incluir na lista."),
+        removeItems: flexArray(placementItemSchema()).optional().describe("Posicionamentos a tirar da lista."),
         attachCampaignIds: flexArray(z.string()).optional().describe("Campanhas em que a lista passa a valer."),
         detachCampaignIds: flexArray(z.string()).optional().describe("Campanhas de onde a lista sai."),
         attachToAccount: z.boolean().optional().describe("true = aplicar a lista na conta inteira (todas as campanhas, inclusive PMax)."),
@@ -2007,7 +2008,7 @@ export function registerPlacementsBrandSafetyTools(ctx: ToolContext): void {
         "exclusões de conteúdo e IP, e ajustes de lance.",
         "WRITE OPERATION ATÔMICA (tudo ou nada). Exige confirm: true (validateOnly dispensa); sem ele mostra o que sairia.",
         "",
-        "Recusa palavras-chave (use remove_keyword / remove_negative_keyword) e listing groups (set_listing_group_filter),",
+        "Recusa palavras-chave (use remove_keyword / remove_negative_keyword) e listing groups de Shopping (set_shopping_product_groups / exclude_products),",
         "resource name de outra conta e critério inexistente. Avisa quando a campanha fica sem nenhum local ou idioma",
         "positivo (passa a valer para todos). Idioma em campanha de Pesquisa não é mais usado pelo Google (set/2026):",
         "removê-lo é só limpeza. Pegue os resource names em get_targeting_overview.",
@@ -2082,7 +2083,7 @@ export function registerPlacementsBrandSafetyTools(ctx: ToolContext): void {
         const item = found.get(name);
         if (!item || item.status === "REMOVED") problems.push(`${name}: não existe (ou já foi removido) na conta ${cid}`);
         else if (item.type === "KEYWORD") problems.push(`${name}: palavra-chave — use remove_keyword / remove_negative_keyword`);
-        else if (item.type === "LISTING_GROUP") problems.push(`${name}: listing group — use set_listing_group_filter`);
+        else if (item.type === "LISTING_GROUP") problems.push(`${name}: grupo de produtos de Shopping — use set_shopping_product_groups (refazer a árvore) ou exclude_products (excluir itens)`);
       }
       if (problems.length) return fail(`Nada foi removido:\n- ${problems.join("\n- ")}`);
       const items = names.map((name) => found.get(name) as Row);
@@ -2345,15 +2346,18 @@ export function registerPlacementsBrandSafetyTools(ctx: ToolContext): void {
         "se a expansão pode incluir demografia (exclude_demographic_expansion) — Display, Demand Gen e Vídeo.",
         "WRITE OPERATION — updateMask só com os campos que mudam; valor igual ao atual não é gravado. Mostra antes/depois.",
         "Com a otimização desligada, excludeDemographicExpansion é ignorado pelo Google.",
+        "Ampliar o alcance (ligar a otimização, ou liberar a expansão demográfica com ela ligada) exige confirm: true",
+        "(validateOnly dispensa): sem ele, mostra antes/depois e não grava. Desligar grava direto.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
         adGroupId: z.string().describe("Ad group ID."),
         enabled: z.boolean().optional().describe("true = ligar a segmentação otimizada; false = desligar."),
         excludeDemographicExpansion: z.boolean().optional().describe("true = não expandir por demografia."),
+        confirm: z.boolean().optional().describe("true para gravar quando a mudança amplia o alcance."),
       },
     },
-    async ({ customerId, adGroupId, enabled, excludeDemographicExpansion }) => {
+    async ({ customerId, adGroupId, enabled, excludeDemographicExpansion, confirm }) => {
       const blocked = checkCustomerAccess(customerId, ctx.allowedCustomerIds, ctx.hosted);
       if (blocked) return { content: [blocked], isError: true };
       const cid = normalizeCid(customerId);
@@ -2399,6 +2403,18 @@ export function registerPlacementsBrandSafetyTools(ctx: ToolContext): void {
         : [];
       const label = `Grupo ${adGroupId} ("${adGroup.name}")`;
       if (mask.length === 0) return done(`${label}: nada a mudar.\n\n${formatJson({ before, after, warnings })}`);
+      // Otimização ligada leva o grupo a gente fora dos públicos escolhidos; liberar a demografia com
+      // ela ligada amplia mais. Gasto novo em público novo: mesmo portão do inventário de vídeo.
+      const widens =
+        (after.optimized_targeting_enabled && !before.optimized_targeting_enabled) ||
+        (after.optimized_targeting_enabled && before.exclude_demographic_expansion && !after.exclude_demographic_expansion);
+      if (widens && confirm !== true && !client.isDryRun) {
+        return fail(
+          `Confirmação necessária: ${label} passaria a alcançar pessoas fora dos públicos escolhidos ` +
+            `(segmentação otimizada${after.exclude_demographic_expansion ? "" : " com expansão demográfica"}). ` +
+            `Reenvie com confirm: true. Nada foi gravado.\n\n${formatJson({ before, after, update_mask: mask, warnings })}`
+        );
+      }
       let result: Row;
       try {
         result = await client.mutateAdGroups(customerId, [{ update, updateMask: mask.join(",") }]);

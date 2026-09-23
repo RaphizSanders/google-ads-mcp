@@ -373,7 +373,7 @@ test("add_negative_keyword: validateOnly roda em dry-run e não diz que gravou",
 test("remove_negative_keyword: nível de grupo remove em adGroupCriteria", async () => {
   const { client, calls } = fakeClient({ rows: { ad_group_criterion: [adGroupNegative("5", "usado", "BROAD"), adGroupNegative("6", "barato", "EXACT")] } });
   const result = await call(client, "remove_negative_keyword", {
-    level: "AD_GROUP", adGroupId: AD_GROUP_ID, keywords: [{ text: "Usado", matchType: "BROAD" }], criterionIds: ["77"],
+    level: "AD_GROUP", adGroupId: AD_GROUP_ID, keywords: [{ text: "Usado", matchType: "BROAD" }], criterionIds: ["77"], confirm: true,
   });
   const write = onlyWrite(calls, "mutate:adGroupCriteria");
   assert.deepEqual(write.operations, [{ remove: `customers/${CID}/adGroupCriteria/${AD_GROUP_ID}~5` }]);
@@ -383,7 +383,14 @@ test("remove_negative_keyword: nível de grupo remove em adGroupCriteria", async
   assert.deepEqual(payload.not_found, ["criterionId 77"]);
 });
 
-test("remove_negative_keyword: mais de 20 de uma vez exige confirm; validateOnly dispensa", async () => {
+test("remove_negative_keyword: sempre exige confirm (até uma só); validateOnly dispensa", async () => {
+  const single = fakeClient({ rows: { campaign_criterion: [campaignNegative("100", "grátis", "BROAD")] } });
+  const r0 = await call(single.client, "remove_negative_keyword", { campaignId: CAMPAIGN_ID, criterionIds: ["100"] });
+  assert.equal(r0.isError, true);
+  assert.match(textOf(r0), /PRÉVIA — nada foi gravado/);
+  assert.match(textOf(r0), /confirm: true/);
+  assert.equal(single.calls.writes.length, 0, "remover negativa amplia o tráfego: nem uma sai sem confirm");
+
   const rows = Array.from({ length: 21 }, (_, i) => campaignNegative(String(100 + i), `termo ${i}`, "BROAD"));
   const ids = rows.map((r) => String((r.campaignCriterion as Row).criterionId));
 

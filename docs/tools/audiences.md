@@ -112,9 +112,10 @@ get started", "Deprecations"; Ajuda do Google Ads 10537509 (segmentação otimiz
   (ausente = Segmentação); recusa gravar no grupo se a campanha tem setting e na campanha se algum grupo
   tem o próprio.
 
-### `set_optimized_targeting` (write, nova)
-- `adGroupId`, `enabled?`, `excludeDemographicExpansion?`. Só Display, Vídeo e Demand Gen (Ajuda
-  10537509); `exclude_demographic_expansion` só em Demand Gen. Lê antes e só grava o que muda.
+### `set_optimized_targeting` — movida
+- Na integração ficou só a versão do grupo `placements-brand-safety` (duas tools com o mesmo nome
+  derrubavam o registro); a restrição "`exclude_demographic_expansion` só em Demand Gen" desta versão
+  não vale pelo proto. Documentação: `docs/tools/placements-brand-safety.md`.
 
 ## Item 8 — Listas de remarketing
 

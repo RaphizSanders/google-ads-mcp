@@ -74,7 +74,7 @@ classificadas no núcleo de `src/read-only.ts`, por isso não estão no catálog
 - Passou a aceitar `level: AD_GROUP` com `adGroupId`. Nesse caso remove em `adGroupCriteria`.
 - Continua identificando por `criterionIds` ou por `keywords [{text, matchType}]`, e continua
   informando o que não achou.
-- Remover mais de 20 de uma vez exige `confirm: true`. Sem ele, a tool devolve a prévia e não grava.
+- Toda remoção exige `confirm: true` (na revisão da integração passou de "acima de 20" para sempre, como `remove_keyword` e as listas compartilhadas): tirar negativa libera tráfego. Sem ele, a tool devolve a prévia e não grava.
   O validateOnly dispensa o confirm, porque não grava nada.
 - O formato de resposta (`removed`, `not_found`, `errors`) é o mesmo de antes, e os testes antigos
   continuam passando.
@@ -191,11 +191,8 @@ classificadas no núcleo de `src/read-only.ts`, por isso não estão no catálog
 
 ## O que ficou de fora ou parcial, e por quê
 
-- **validateOnly em `create_shared_negative_list`:** a tool agora é atômica e aceitaria
-  validate_only, mas o nome dela continua em `CHAINED_WRITE_TOOLS`, em `src/tool-kit.ts`, e este lote
-  não pode editar esse arquivo. Por isso o parâmetro `validateOnly: true` ainda é recusado sem enviar
-  nada, o que é seguro. O dry-run global (`GOOGLE_ADS_DRY_RUN`) funciona e está testado.
-  **Integração:** tirar `"create_shared_negative_list"` desse Set.
+- **validateOnly em `create_shared_negative_list`:** resolvido na integração — a tool é atômica e saiu
+  de `CHAINED_WRITE_TOOLS`; `validateOnly: true` por chamada valida o pedido inteiro.
 - **Criar a lista de nível de conta:** a documentação da API e o time da API (fórum, ago/2023,
   "v14 supports retrieving, creating and updating account-level negative keywords") indicam que é
   possível. Mesmo assim, o erro `CUSTOMER_CANNOT_CREATE_SHARED_SET_OF_THIS_TYPE` existe. Se a API

@@ -157,19 +157,16 @@ Lookalikes da conta com sementes, nível, países, faixa de tamanho e elegibilid
   account-auth; com os detalhes repassados, a tool poderia citar o valor exato.
 - **TARGET_CPM em Display**: não adicionado. A ajuda do Google para Display lista CPM visível (= `MANUAL_CPM`, adicionado),
   não CPM desejado; nenhuma fonte oficial encontrada mostra `target_cpm` aceito em campanha DISPLAY.
-- **Fora da posse (notas para o integrador)**:
-  - `create_asset_group`: a descrição ainda cita Demand Gen e não há trava de canal (deveria recusar campanha que não
-    seja PERFORMANCE_MAX antes de criar os assets de texto).
-  - `create_campaign` com `channelType=DEMAND_GEN` ainda aceita `MANUAL_CPC` (a API recusa) e não tem os lances de
-    Demand Gen; o caminho certo é `create_demand_gen_campaign`.
-  - `create_ad_group`/`update_ad_group` sem entradas de Demand Gen e `set_campaign_locations`/`set_campaign_languages`
-    sem detectar upgraded targeting: cobertos por `create_demand_gen_ad_group`, `update_demand_gen_ad_group` e
-    `set_demand_gen_ad_group_targeting`; as tools do núcleo poderiam recusar DEMAND_GEN com upgraded targeting e apontar
-    para cá.
-  - `src/resources.ts` (lote account-auth): a linha de DEMAND_GEN ainda diz "Discovery + Gmail + YouTube Shorts";
-    hoje é YouTube (in-stream, in-feed, Shorts), Discover, Gmail, Display e Maps, sem asset groups.
-  - `CHAINED_WRITE_TOOLS` (`src/tool-kit.ts`) ainda lista `create_display_campaign` e `create_demand_gen_campaign`, então
-    o `validateOnly` por chamada é recusado nelas. Agora são atômicas: podem sair da lista (o dry-run por env já funciona).
+- **Notas para o integrador — situação depois da integração**:
+  - `create_asset_group`: resolvido pelo lote pmax-assets (recusa campanha que não seja PERFORMANCE_MAX).
+  - `create_campaign` com `channelType=DEMAND_GEN` + `MANUAL_CPC`: resolvido (recusa e aponta as estratégias aceitas).
+  - `create_ad_group` recusa DEMAND_GEN e aponta `create_demand_gen_ad_group` (que também envia
+    `use_audience_grouped` quando o grupo nasce com público). `update_ad_group` e
+    `set_campaign_locations`/`set_campaign_languages` continuam sem detectar upgraded targeting; os caminhos
+    dedicados são `update_demand_gen_ad_group` e `set_demand_gen_ad_group_targeting`.
+  - `src/resources.ts`: linha de DEMAND_GEN corrigida.
+  - `create_display_campaign` e `create_demand_gen_campaign` saíram de `CHAINED_WRITE_TOOLS`: `validateOnly` por
+    chamada valida o pedido inteiro.
 - **Merchant Center em campanha Demand Gen já existente**: não há tool para ligar `shopping_setting.merchant_id` depois
   (seria `update_campaign`, do núcleo). Anúncio PRODUCT em campanha sem Merchant é recusado com orientação.
 - **Listing groups em Demand Gen de produto**: a doc recomenda ao menos um listing group por grupo para relatório

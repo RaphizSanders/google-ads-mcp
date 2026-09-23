@@ -19,6 +19,10 @@ export function toolGroupOf(toolName: string): string {
 export function parseToolGroups(raw: string | undefined): string[] | null {
   if (raw === undefined || raw.trim() === "" || raw.trim().toLowerCase() === "all") return null;
   const groups = [...new Set(raw.split(",").map((group) => group.trim()).filter(Boolean))];
+  // Só separadores (ex.: "${GROUPS}" vazio num template) subiria sem nenhuma tool e com /health ok.
+  if (groups.length === 0) {
+    throw new Error(`GOOGLE_ADS_TOOL_GROUPS sem nenhum grupo ("${raw}"). Use all ou uma lista de: ${TOOL_GROUP_KEYS.join(", ")}.`);
+  }
   const unknown = groups.filter((group) => !TOOL_GROUP_KEYS.includes(group));
   if (unknown.length > 0) {
     throw new Error(

@@ -8,7 +8,7 @@ mutação equivalente documentada na seção de correções).
 
 | Item | Status | O que foi feito |
 |------|--------|-----------------|
-| #2 Developer token extinto (09/09/2026) | parcial (README, `run-http.mjs` e `.env.example` pendentes — fora da posse do lote, ver abaixo) | Token opcional no client, no `index.ts` e na config hospedada; header só vai quando definido; erros de acesso (`CLOUD_PROJECT_NOT_APPROVED_FOR_PRODUCTION` e outros) explicados em PT-BR com o link da página "Google Ads API Overview" do projeto Cloud; tool `check_api_access` para diagnóstico. |
+| #2 Developer token extinto (09/09/2026) | feito (README, `run-http.mjs` e `.env.example` aplicados na integração) | Token opcional no client, no `index.ts` e na config hospedada; header só vai quando definido; erros de acesso (`CLOUD_PROJECT_NOT_APPROVED_FOR_PRODUCTION` e outros) explicados em PT-BR com o link da página "Google Ads API Overview" do projeto Cloud; tool `check_api_access` para diagnóstico. |
 | #24 Resources com orientação errada | feito | `conversions` x `all_conversions`, categorias (sem `LEAD`), ECPC descontinuado, VIDEO/DEMAND_GEN/DISPLAY corrigidos, exemplos de GAQL válidos, nomes de tools sem o prefixo `google_` inexistente (resources e prompts), campanhas com ECPC ligado apontadas por `get_account_settings`. |
 | #42 Configurações de conta e saúde do MCC | feito | `get_account_settings` (uma conta ou MCC inteiro, score ponderado), `update_account_settings` (MutateCustomer), `list_accounts` com status, sub-MCCs, rótulo, ocultas, hierarquia e contagem por status. |
 | #43 Verificação de identidade do anunciante | feito | `get_identity_verification` (uma conta ou MCC, cache de 6 h, ordenado pelo prazo) e `start_identity_verification` (confirm, recusado em dry-run). GET genérico `customerGet` no client. |
@@ -128,7 +128,7 @@ positivo. O teste cruza o resultado com `tests/gaql-validator.ts` em 10 queries.
 
 - **`src/google-ads-client.ts`**
   - `developerToken` opcional; header `developer-token` só quando definido.
-  - Service account: `serviceAccount` na config, JWT RS256 (`iss` = e-mail, `scope` adwords, `aud` =
+  - Service account: `serviceAccount` na config, JWT RS256 (`iss` = e-mail, `scope` adwords + datamanager — este acrescentado na integração, para as tools da Data Manager API —, `aud` =
     token_uri, `exp` = `iat` + 3600) trocado por `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`;
     token só em memória, compartilhado entre instâncias pelo par e-mail + hash da chave (o `getClient()`
     cria um client por tool).
@@ -151,13 +151,13 @@ positivo. O teste cruza o resultado com `tests/gaql-validator.ts` em 10 queries.
 - **`src/hosted-config.ts`** — `resolveGoogleAdsAuth(env)` (exatamente uma credencial entre as quatro
   variáveis; login obrigatório; developer token opcional; `~` expandido) e `parseServiceAccountKeyJson`
   (type `service_account`, `client_email`, `private_key` PEM, `token_uri` https).
-- **`src/index.ts`** — usa `resolveGoogleAdsAuth`; o fallback do `.env` passou a olhar
-  `GOOGLE_ADS_LOGIN_CUSTOMER_ID` (o token deixou de ser obrigatório).
-- **`run-http.mjs`** e **`.env.example`** — **não alterados** (fora da lista de posse do lote; a primeira
-  versão os mexeu e a mudança foi desfeita). Consequência: `node run-http.mjs` ainda sai com
-  `process.exit(1)` quando o `.env` não tem `GOOGLE_ADS_DEVELOPER_TOKEN`. O servidor em si não precisa dele:
-  sem token, rode `npm run build && PORT=3333 node dist/index.js` (ou `npm run dev:http`), que lê o `.env`
-  pelo `src/index.ts`. Patch pronto para o integrador na seção "Pendente fora da posse".
+- **`src/index.ts`** — usa `resolveGoogleAdsAuth`. O `.env` do projeto (ao lado de `dist/`) sempre completa
+  o ambiente sem sobrescrever (`src/project-env.ts`). O lote tinha trocado o gatilho do fallback de
+  `GOOGLE_ADS_DEVELOPER_TOKEN` para `GOOGLE_ADS_LOGIN_CUSTOMER_ID`; a revisão final da integração mostrou que
+  isso fazia `READ_ONLY`/`DRY_RUN`/`ALLOWED_CUSTOMER_IDS` do `.env` sumirem quando o cliente MCP define o MCC.
+- **`run-http.mjs`** e **`.env.example`** — aplicados na integração: o launcher repassa o token só quando o
+  `.env` o define e não sai mais sem ele; o `.env.example` traz o token comentado e as variáveis de service
+  account.
 - **`src/resources.ts`** — glossário (conversões, canais, lances), playbook (nomes reais das tools),
   referência GAQL (métricas, categorias, exemplo de compras válido, regras de WHERE/data, tools de
   metadados) e troubleshooting (acesso via projeto Cloud, cotas, 2SV, service account, serviços
@@ -200,35 +200,10 @@ Tools: acrescentar à seção "Descoberta de contas" `check_api_access`, `get_ac
 `update_account_settings`, `get_identity_verification`, `start_identity_verification`, `get_gaql_fields`,
 `validate_gaql` e atualizar a linha de `list_accounts`. Contagens do modo somente leitura: +5 leitura, +2 escrita.
 
-## Pendente fora da posse — patch pronto para o integrador
-
-`run-http.mjs` (troca as 5 linhas que exigem o token):
-
-```js
-// Developer token é opcional desde 09/09/2026 (a API ignora o header; o acesso
-// vem do projeto Google Cloud do OAuth client). Repassado só se existir.
-const token = process.env.GOOGLE_ADS_DEVELOPER_TOKEN;
-if (token) globalThis.__GOOGLE_ADS_DEVELOPER_TOKEN = token;
-```
-
-`.env.example` (troca a linha `GOOGLE_ADS_DEVELOPER_TOKEN=seu_developer_token`):
-
-```
-# Credencial — defina EXATAMENTE UMA das quatro:
-#   GOOGLE_ADS_CREDENTIALS_PATH / GOOGLE_ADS_CREDENTIALS_JSON (OAuth de usuário)
-# Service account (e-mail dela adicionado como usuário da conta/MCC no Google Ads):
-# GOOGLE_ADS_SERVICE_ACCOUNT_KEY_PATH=./service-account.json
-# GOOGLE_ADS_SERVICE_ACCOUNT_JSON={...}
-# Opcional desde 09/09/2026 (a API ignora o header; o acesso vem do projeto Google Cloud):
-# GOOGLE_ADS_DEVELOPER_TOKEN=
-```
-
 ## Parcial / fora do alcance — e por quê
 
-- **README**: fora da posse do lote; o texto acima está pronto para o integrador.
-- **`run-http.mjs` / `.env.example`**: fora da posse do lote; enquanto o patch acima não entrar, o launcher
-  HTTP exige um `GOOGLE_ADS_DEVELOPER_TOKEN` no `.env` (qualquer valor serve hoje, porque a API ignora o
-  header — mas uma versão major futura vai recusá-lo) ou use `PORT=3333 node dist/index.js`.
+- **README, `run-http.mjs`, `.env.example`**: aplicados na integração (não há mais token obrigatório em
+  nenhum caminho de boot).
 - **ECPC**: `get_account_settings` só aponta as campanhas com `enhanced_cpc_enabled=true`; mudar a estratégia
   é do lote de lances (a regra do lote é não mexer em lance fora do propósito da tool).
 - **Serviços restritos** (ReachPlanService, AudienceInsightsService, ContentCreatorInsightsService,
@@ -241,7 +216,7 @@ if (token) globalThis.__GOOGLE_ADS_DEVELOPER_TOKEN = token;
 - **Fuso das datas da verificação de identidade**: não documentado; lidas como UTC (dito na resposta).
 - **Correção da verificação independente**: o servidor não recusava iniciar — `getClient()` é lazy e cada
   tool falhava com "GOOGLE_ADS_DEVELOPER_TOKEN não definido"; o `run-http.mjs`, esse sim, saía com
-  `process.exit(1)`. O primeiro foi corrigido; o `run-http.mjs` ficou pendente (fora da posse — ver acima). A cota de 2.880 operações/dia do Explorer está citada com a
+  `process.exit(1)`. O primeiro foi corrigido no lote; o `run-http.mjs`, na integração. A cota de 2.880 operações/dia do Explorer está citada com a
   fonte certa (`/docs/api-policy/access-levels`).
 
 ## Fontes verificadas
@@ -283,5 +258,5 @@ if (token) globalThis.__GOOGLE_ADS_DEVELOPER_TOKEN = token;
   diferente de ENABLED vira problema. Mutações: forçar o MCC como liberado, voltar a sempre exibir
   `login_customer_id`, citar o ID na mensagem de "sem acesso direto" e remover o problema de status
   derrubam os testes.
-- **Violação de posse** — `run-http.mjs` e `.env.example` voltaram ao estado de `bc68023`; item #2 rebaixado
-  para parcial com o patch pronto acima.
+- **Violação de posse** — `run-http.mjs` e `.env.example` voltaram ao estado de `bc68023` no lote; o patch
+  foi aplicado depois, na integração.

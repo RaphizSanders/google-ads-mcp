@@ -5,23 +5,27 @@
  */
 
 import dotenv from "dotenv";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { fillFromProjectEnv } from "./project-env.js";
 
 // Carrega .env: primeiro cwd (raiz ao rodar do projeto), depois pasta acima de dist/
 const rootByCwd = join(process.cwd(), ".env");
 const rootByDir = join(dirname(fileURLToPath(import.meta.url)), "..", ".env");
 // quiet: true — em modo stdio qualquer log em stdout corrompe o protocolo JSON-RPC.
 dotenv.config({ path: rootByCwd, quiet: true });
-/* O fallback olhava GOOGLE_ADS_DEVELOPER_TOKEN, que deixou de ser obrigatório
-   (a API ignora o header desde 09/09/2026). O critério agora é a variável que
-   continua obrigatória: sem ela o .env do cwd não configurou este servidor. */
-if (!process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID) {
-  dotenv.config({ path: rootByDir, quiet: true });
+/* O .env do projeto sempre completa o que faltar (sem sobrescrever). Condicioná-lo a uma
+   variável que o cliente MCP costuma definir (GOOGLE_ADS_LOGIN_CUSTOMER_ID) fazia
+   READ_ONLY, DRY_RUN e ALLOWED_CUSTOMER_IDS postos lá sumirem sem aviso. */
+if (resolve(rootByDir) !== resolve(rootByCwd) && existsSync(rootByDir)) {
+  fillFromProjectEnv(readFileSync(rootByDir), process.env);
 }
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
+import express from "express";
+import type { NextFunction, Request, Response } from "express";
+import { hostHeaderValidation } from "@modelcontextprotocol/sdk/server/middleware/hostHeaderValidation.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { GoogleAdsClient } from "./google-ads-client.js";
@@ -66,9 +70,8 @@ assertHostedReadOnlySecurity({
   allowedCustomerIds: ALLOWED_CUSTOMER_IDS,
 });
 
-// Runner run-http.mjs injeta o token aqui quando carrega .env. O servidor não o
-// exige (a API ignora o developer token desde 09/09/2026), mas o run-http.mjs —
-// fora deste lote — ainda sai sem ele; sem token, use `PORT=3333 node dist/index.js`.
+// O run-http.mjs repassa o token aqui só quando o .env o define. O servidor não o
+// exige (a API ignora o developer token desde 09/09/2026).
 const g = globalThis as unknown as { __GOOGLE_ADS_DEVELOPER_TOKEN?: string };
 const tokenFromRunner = typeof g.__GOOGLE_ADS_DEVELOPER_TOKEN === "string" ? g.__GOOGLE_ADS_DEVELOPER_TOKEN : null;
 if (tokenFromRunner && !process.env.GOOGLE_ADS_DEVELOPER_TOKEN) {
@@ -114,11 +117,43 @@ function checkAuth(req: IncomingMessage, res: ServerResponse): boolean {
   return true;
 }
 
+/* Limite do corpo JSON do POST /mcp. O padrão do express.json (100 KB, o que o
+   createMcpExpressApp do SDK usa) recusava com HTML 413 as chamadas que as tools anunciam:
+   upload de vídeo em base64 (até 20 MB), 2.000 linhas de conversão, 10.000 operações. */
+const MCP_MAX_BODY = process.env.MCP_MAX_BODY?.trim() || "32mb";
+
 async function runHttp(): Promise<void> {
-  const app = createMcpExpressApp({
-    host: "0.0.0.0",
-    allowedHosts: ALLOWED_HOSTS.length > 0 ? ALLOWED_HOSTS : undefined,
-  });
+  // Mesmo arranjo do createMcpExpressApp (host 0.0.0.0), mas com o parser JSON só no /mcp,
+  // depois da checagem da chave: corpo grande de quem não autenticou nem chega a ser lido.
+  const app = express();
+  if (ALLOWED_HOSTS.length > 0) {
+    app.use(hostHeaderValidation(ALLOWED_HOSTS));
+  } else {
+    console.warn(
+      "Warning: Server is binding to 0.0.0.0 without DNS rebinding protection. " +
+        "Consider using the allowedHosts option to restrict allowed hosts, or use authentication to protect your server."
+    );
+  }
+  const requireAuth = (req: Request, res: Response, next: NextFunction) => {
+    if (checkAuth(req, res)) next();
+  };
+  const parseJson = express.json({ limit: MCP_MAX_BODY });
+  // Erro do parser (corpo acima do limite, JSON inválido) volta como JSON-RPC, não como página HTML.
+  const jsonRpcBodyError = (err: unknown, _req: Request, res: Response, next: NextFunction) => {
+    const status = (err as { status?: number; type?: string }).status;
+    if (!status || res.headersSent) return next(err);
+    const tooLarge = (err as { type?: string }).type === "entity.too.large";
+    res.status(status).json({
+      jsonrpc: "2.0",
+      error: {
+        code: tooLarge ? -32600 : -32700,
+        message: tooLarge
+          ? `Requisição acima do limite de ${MCP_MAX_BODY} (MCP_MAX_BODY). Divida a chamada em partes menores.`
+          : `Corpo JSON inválido: ${(err as Error).message}`,
+      },
+      id: null,
+    });
+  };
 
   app.get("/health", (_req: IncomingMessage, res: ServerResponse) => {
     res.writeHead(200, { "Content-Type": "application/json" });
@@ -130,8 +165,7 @@ async function runHttp(): Promise<void> {
     res.end("Google Ads MCP running. Use path /mcp for MCP client.");
   });
 
-  app.post("/mcp", async (req: IncomingMessage & { body?: unknown }, res: ServerResponse) => {
-    if (!checkAuth(req, res)) return;
+  app.post("/mcp", requireAuth, parseJson, async (req: IncomingMessage & { body?: unknown }, res: ServerResponse) => {
     const server = createMcpServer(serverOpts());
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
@@ -181,6 +215,8 @@ async function runHttp(): Promise<void> {
       });
     }
   });
+
+  app.use(jsonRpcBodyError);
 
   const port = PORT || 3333;
   app.listen(port, "0.0.0.0", () => {

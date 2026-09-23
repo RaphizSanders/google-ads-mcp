@@ -20,6 +20,8 @@ const MAX_RETRIES = 3;
 const RETRY_BASE_MS = 2000;
 
 export const GOOGLE_ADS_OAUTH_SCOPE = "https://www.googleapis.com/auth/adwords";
+/** Escopo da Data Manager API (conversões offline e Customer Match pelo caminho novo). */
+export const DATA_MANAGER_OAUTH_SCOPE = "https://www.googleapis.com/auth/datamanager";
 export const DEFAULT_TOKEN_URI = "https://oauth2.googleapis.com/token";
 const JWT_BEARER_GRANT = "urn:ietf:params:oauth:grant-type:jwt-bearer";
 /** Página do projeto Cloud onde se pede acesso Explorer/Basic/Standard. */
@@ -191,14 +193,16 @@ function base64url(value: string | Buffer): string {
 
 /**
  * JWT de service account (RS256) para o fluxo server-to-server do OAuth:
- * iss = e-mail da service account, scope = adwords, aud = endpoint de token,
- * exp no máximo 1 h depois de iat.
+ * iss = e-mail da service account, scope = adwords + datamanager, aud = endpoint
+ * de token, exp no máximo 1 h depois de iat. Service account não passa por tela de
+ * consentimento: pedir os dois escopos é o que deixa as tools da Data Manager API
+ * funcionarem com o mesmo token (só adwords → 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT).
  */
 export function buildServiceAccountAssertion(key: ServiceAccountKey, nowSeconds: number, tokenUri?: string): string {
   const header = { alg: "RS256", typ: "JWT", ...(key.private_key_id ? { kid: key.private_key_id } : {}) };
   const claims = {
     iss: key.client_email,
-    scope: GOOGLE_ADS_OAUTH_SCOPE,
+    scope: `${GOOGLE_ADS_OAUTH_SCOPE} ${DATA_MANAGER_OAUTH_SCOPE}`,
     aud: tokenUri ?? key.token_uri ?? DEFAULT_TOKEN_URI,
     iat: nowSeconds,
     exp: nowSeconds + 3600,
@@ -816,9 +820,9 @@ export class GoogleAdsClient {
 
   /* Data Manager API (datamanager.googleapis.com/v1): o caminho que o Google indica
      para importação offline depois da restrição de 15/06/2026 no UploadClickConversions.
-     Usa o MESMO token OAuth, que precisa ter sido consentido também com o escopo
-     https://www.googleapis.com/auth/datamanager — um token só com adwords recebe 403
-     (escopo insuficiente). Não usa developer token nem login-customer-id: a conta de
+     Usa o MESMO token: OAuth de usuário precisa ter sido consentido também com o escopo
+     https://www.googleapis.com/auth/datamanager (só adwords recebe 403, escopo
+     insuficiente); service account já pede os dois escopos no JWT. Não usa developer token nem login-customer-id: a conta de
      login vai em destinations[].loginAccount, preenchida aqui com a do login quando
      ausente (o equivalente do header login-customer-id). */
   private static readonly DATA_MANAGER_BASE = "https://datamanager.googleapis.com/v1";

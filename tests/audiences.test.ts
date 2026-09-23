@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { registerGoogleAdsTools } from "../src/tools.js";
-import { normalizeEmail, normalizePhone, sha256Hex, likeLiteral } from "../src/tools/audiences.js";
+import { normalizeEmail, normalizePhone, prepareCustomerMatchMembers, sha256Hex, likeLiteral } from "../src/tools/audiences.js";
 import { assertGaqlRules, assertUpdateMaskLeaves } from "./gaql-rules.js";
 
 type Row = Record<string, unknown>;
@@ -872,6 +872,19 @@ test("normalização de Customer Match: gmail, E.164 com +55 e SHA-256 hex", () 
   assert.equal(normalizePhone("5511912345678"), "+5511912345678");
   assert.equal(normalizePhone("12345"), null);
   assert.equal(sha256Hex("test@example.com"), "973dfe463ec85785f5f95af5ba3906eedb2d931c24e69824a89ea65dba4e813b");
+});
+
+test("Customer Match: telefone que já traz o DDI sem '+' não ganha o DDI de novo (qualquer país)", () => {
+  assert.equal(normalizePhone("15551234567", "1"), "+15551234567");
+  assert.equal(normalizePhone("5551234567", "1"), "+15551234567");
+  assert.equal(normalizePhone("351912345678", "351"), "+351912345678");
+  assert.equal(normalizePhone("447911123456", "44"), null, "DDI sem plano conhecido e sem '+': ambíguo, recusado");
+  const prepared = prepareCustomerMatchMembers({ phones: ["15551234567", "+1 555 123 4567", "447911123456"] }, "1");
+  assert.equal(prepared.userData.length, 1, "as duas grafias do mesmo número viram um membro só");
+  assert.equal(prepared.duplicates, 1);
+  assert.equal(prepared.userData[0].identifiers[0].hashedPhoneNumber, sha256Hex("+15551234567"));
+  assert.equal(prepared.invalid.length, 1);
+  assert.match(prepared.invalid[0].reason, /telefone/);
 });
 
 test("create_customer_match_list: CRM CONTACT_INFO com 540 dias; limites recusados antes de gravar", async () => {

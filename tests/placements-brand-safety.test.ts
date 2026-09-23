@@ -1106,6 +1106,31 @@ test("set_optimized_targeting: updateMask só com folhas que mudam, no-op e cana
   assert.equal(search.calls.writes.length, 0);
 });
 
+test("set_optimized_targeting: ampliar alcance exige confirm (prévia sem gravar); desligar grava direto", async () => {
+  const off = { ad_group: [adGroupRow("555", "111", "DEMAND_GEN", { optimizedTargetingEnabled: false, excludeDemographicExpansion: true })] };
+  const preview = fakeClient({ rows: off });
+  const r1 = await call(preview.client, "set_optimized_targeting", { adGroupId: "555", enabled: true });
+  assert.equal(r1.isError, true);
+  assert.match(textOf(r1), /Confirmação necessária.*fora dos públicos escolhidos/s);
+  assert.equal(preview.calls.writes.length, 0);
+
+  const confirmed = fakeClient({ rows: off });
+  const r2 = await call(confirmed.client, "set_optimized_targeting", { adGroupId: "555", enabled: true, confirm: true });
+  assert.equal(r2.isError, undefined, textOf(r2));
+  assert.equal(confirmed.calls.writes.length, 1);
+
+  const on = { ad_group: [adGroupRow("555", "111", "DEMAND_GEN", { optimizedTargetingEnabled: true, excludeDemographicExpansion: true })] };
+  const demographic = fakeClient({ rows: on });
+  const r3 = await call(demographic.client, "set_optimized_targeting", { adGroupId: "555", excludeDemographicExpansion: false });
+  assert.match(textOf(r3), /com expansão demográfica/);
+  assert.equal(demographic.calls.writes.length, 0);
+
+  const narrowing = fakeClient({ rows: on });
+  const r4 = await call(narrowing.client, "set_optimized_targeting", { adGroupId: "555", enabled: false });
+  assert.equal(r4.isError, undefined, textOf(r4));
+  assert.equal(narrowing.calls.writes.length, 1, "restringir não pede confirmação");
+});
+
 test("remove_targeting_criteria: idioma em Pesquisa sai como limpeza (nota), sem aviso de 'todos os idiomas'", async () => {
   const name = `customers/${CID}/campaignCriteria/111~1014`;
   const { client } = fakeClient({

@@ -276,7 +276,8 @@ test("client: service account assina JWT RS256 válido e reaproveita o token ent
       const claims = JSON.parse(Buffer.from(p, "base64url").toString());
       assert.deepEqual(header, { alg: "RS256", typ: "JWT", kid: "kid-1" });
       assert.equal(claims.iss, key.client_email);
-      assert.equal(claims.scope, "https://www.googleapis.com/auth/adwords");
+      assert.equal(claims.scope, "https://www.googleapis.com/auth/adwords https://www.googleapis.com/auth/datamanager",
+        "service account pede também o escopo da Data Manager API — sem ele as tools de lá recebem 403");
       assert.equal(claims.aud, "https://oauth2.googleapis.com/token");
       assert.equal(claims.exp - claims.iat, 3600);
       assert.ok(createVerify("RSA-SHA256").update(`${h}.${p}`).verify(publicKey, Buffer.from(sig, "base64url")), "assinatura inválida");

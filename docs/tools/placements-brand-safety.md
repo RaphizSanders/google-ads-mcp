@@ -177,7 +177,7 @@ campanha) — escolha conservadora: o caminho positivo continua disponível no g
 ### remove_targeting_criteria (escrita, atômica)
 - `resourceNames` (`…/campaignCriteria/{c}~{id}` ou `…/adGroupCriteria/{g}~{id}`), `confirm`.
 - Recusa: outra conta, critério inexistente, palavra-chave (use `remove_keyword`/`remove_negative_keyword`),
-  listing group (use `set_listing_group_filter`) e exclusão de conta (use `remove_account_exclusions`).
+  listing group de Shopping (use `set_shopping_product_groups` ou `exclude_products`; `set_listing_group_filter` é só de asset group PMax) e exclusão de conta (use `remove_account_exclusions`).
 - Avisa quando a campanha fica sem local positivo (passa a valer para todos os países) ou sem idioma (exceto
   Pesquisa, onde idioma não é mais usado). Remove tudo numa requisição `googleAds:mutate` (tudo ou nada).
 
@@ -192,7 +192,9 @@ campanha) — escolha conservadora: o caminho positivo continua disponível no g
   PMax recusada. `partialFailure`. Só acrescenta — para tirar, `remove_targeting_criteria`.
 
 ### set_optimized_targeting (escrita)
-- `adGroupId`, `enabled?`, `excludeDemographicExpansion?`. Display, Demand Gen e Vídeo.
+- `adGroupId`, `enabled?`, `excludeDemographicExpansion?`, `confirm?`. Display, Demand Gen e Vídeo.
+- Ampliar o alcance (ligar a otimização, ou liberar a expansão demográfica com ela ligada) exige
+  `confirm: true` — sem ele devolve antes/depois e não grava (acrescentado na revisão da integração).
 - Antes/depois; `updateMask` só com as folhas que mudam (`optimized_targeting_enabled`,
   `exclude_demographic_expansion`); valor igual não é gravado; avisa que a expansão demográfica só vale com a
   otimização ligada.

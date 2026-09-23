@@ -312,7 +312,7 @@ export function withValidateOnlyParam<T extends object>(server: T): T {
         const inputSchema = {
           ...((config.inputSchema as Record<string, unknown>) ?? {}),
           validateOnly: z.boolean().optional().describe(
-            "true = só valida na API (validate_only), sem gravar nada. Use para conferir antes de aplicar."
+            "true = só valida na API, sem gravar nada. Use para conferir antes de aplicar (o nome é exatamente validateOnly; outra grafia é ignorada e a chamada grava)."
           ),
         };
         const banner = { type: "text", text: VALIDATE_ONLY_BANNER };
@@ -677,4 +677,73 @@ export const attributionModelSchema = z.enum([
 /** Resolve apelido → valor aceito pela API. */
 export function resolveEnumAlias(value: string, aliases: Record<string, string>): string {
   return aliases[value] ?? value;
+}
+
+// ── Telefone E.164 (conversões offline, chamadas, Customer Match) ─────
+
+/**
+ * Tamanhos do número nacional (sem DDI e sem o 0 de tronco) nos planos de numeração que o
+ * módulo conhece. É o que separa "5511999998888" (DDI 55 já incluído, sem "+") de um número
+ * nacional: no Brasil, DDD + 8 ou 9 dígitos = 10 ou 11; com o DDI, 12 ou 13.
+ * - 55 (Brasil): DDD de 2 dígitos + 8 (fixo) ou 9 (celular).
+ * - 1 (NANP — EUA/Canadá): código de área + 7 dígitos = 10.
+ * - 351 (Portugal): 9 dígitos.
+ */
+const NATIONAL_NUMBER_LENGTHS: Record<string, number[]> = {
+  "55": [10, 11],
+  "1": [10],
+  "351": [9],
+};
+
+const PLUS_DDI_HELP = (cc: string) => `use E.164 com "+" (ex.: +${cc}…)`;
+
+/**
+ * Número sem "+"/"00" com defaultCountryCode. Um número que já traz o DDI sem "+" não pode
+ * ganhar o DDI de novo: "+555511999998888" tem 15 dígitos, passa na regex E.164 e, depois do
+ * hash, a API não tem como avisar — o enhancement/lead/chamada simplesmente não casa.
+ * Nos planos conhecidos o tamanho decide; nos outros, número que começa com o DDI é ambíguo
+ * e é recusado (número nacional escrito com o 0 de tronco nunca começa pelo DDI).
+ */
+function applyDefaultCountryCode(digits: string, cc: string): { value: string } | { error: string } {
+  const trunkPrefix = digits.startsWith("0");
+  const national = digits.replace(/^0+/, "");
+  const startsWithCc = !trunkPrefix && national.startsWith(cc);
+  const lengths = NATIONAL_NUMBER_LENGTHS[cc];
+  if (lengths) {
+    const asNational = lengths.includes(national.length);
+    const asInternational = startsWithCc && lengths.includes(national.length - cc.length);
+    if (asNational && asInternational) {
+      return { error: `telefone ambíguo: pode já ter o DDI ${cc} ou não — ${PLUS_DDI_HELP(cc)}` };
+    }
+    if (asInternational) return { value: `+${national}` };
+    if (asNational) return { value: `+${cc}${national}` };
+    return {
+      error: `telefone com ${national.length} dígito(s): não é número nacional do DDI ${cc} (${lengths.join(" ou ")} dígitos` +
+        `${cc === "55" ? ", com DDD" : ""}) nem já tem o DDI ${cc} — ${PLUS_DDI_HELP(cc)}`,
+    };
+  }
+  if (startsWithCc) {
+    return { error: `telefone começa com ${cc} (o DDI padrão) e não tem "+": não dá para saber se o DDI já está incluído — ${PLUS_DDI_HELP(cc)}` };
+  }
+  return { value: `+${cc}${national}` };
+}
+
+/**
+ * Telefone em E.164 (+5511999998888). Sem "+" (ou "00") no início, só com
+ * defaultCountryCode — número nacional sem DDI viraria um E.164 errado que a regex aceita.
+ * Número que já traz o DDI sem "+" (ex.: "5511999998888" do CRM) não ganha o DDI de novo.
+ */
+export function normalizePhone(raw: string, defaultCountryCode?: string): { value: string } | { error: string } {
+  const trimmed = raw.trim();
+  const digits = trimmed.replace(/\D/g, "");
+  let e164: string;
+  if (trimmed.startsWith("+")) e164 = `+${digits}`;
+  else if (trimmed.startsWith("00")) e164 = `+${digits.slice(2)}`;
+  else if (defaultCountryCode) {
+    const withCc = applyDefaultCountryCode(digits, defaultCountryCode);
+    if ("error" in withCc) return withCc;
+    e164 = withCc.value;
+  } else return { error: "telefone sem código do país — use E.164 (+5511999998888) ou informe defaultPhoneCountryCode (ex.: \"55\")" };
+  if (!/^\+[1-9]\d{6,14}$/.test(e164)) return { error: "telefone não forma um E.164 válido (+ DDI + número, 7 a 15 dígitos)" };
+  return { value: e164 };
 }

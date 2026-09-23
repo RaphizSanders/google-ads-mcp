@@ -12,7 +12,7 @@ Funciona em modo **local** (stdio) e **remoto** (HTTP/SSE), com suporte a deploy
 
 - Node.js 20+
 - Conta Google Ads com acesso MCC (Manager)
-- Token OAuth 2.0 com escopo `https://www.googleapis.com/auth/adwords`
+- Token OAuth 2.0 com escopo `https://www.googleapis.com/auth/adwords` (as tools da Data Manager API — `upload_offline_conversions_data_manager`, `get_data_manager_request_status` — pedem também `https://www.googleapis.com/auth/datamanager` no consentimento; service account já pede os dois)
 - Projeto Google Cloud com a Google Ads API ativada e nivel de acesso Explorer, Basic ou Standard. **Desde 09/09/2026 o developer token foi descontinuado**: o acesso e do projeto Cloud dono do OAuth client (ou da service account) — peca o nivel na pagina "Google Ads API Overview" do projeto. `check_api_access` diagnostica a configuracao.
 
 ---
@@ -31,9 +31,10 @@ Funciona em modo **local** (stdio) e **remoto** (HTTP/SSE), com suporte a deploy
 | `MCP_ALLOWED_HOSTS` | Em qualquer modo HTTP | Hostnames aceitos, separados por vírgula e sem porta. Ativa proteção contra DNS rebinding |
 | `ALLOWED_CUSTOMER_IDS` | Em qualquer modo HTTP | Escopo de contas. **`*`** = toda conta alcancavel pelo MCC do login (agencia/gestor com um MCC so). Ou uma lista nao vazia de IDs de 10 digitos separados por virgula (um cliente por servico). Ausencia ou vazio derruba o boot — vazio e engano de configuracao, nao curinga; e `*` nao se mistura com IDs. Em stdio segue opcional. |
 | `GOOGLE_ADS_READ_ONLY` | Nao | Modo somente leitura (`true`/`1`). Remove as 206 tools mutáveis do catálogo e bloqueia mutações no cliente. Ausente mantém compatibilidade com o comportamento atual |
-| `GOOGLE_ADS_DRY_RUN` | Nao | Dry-run (`true`/`1`). Envia `validateOnly=true` nos endpoints `:mutate` e nos uploads de conversão: a API valida o payload inteiro e devolve os mesmos erros de uma gravação real, sem alterar a conta. `apply_recommendation`/`dismiss_recommendation` não aceitam `validateOnly` e são **recusados** em dry-run (fail-closed). Tools encadeadas (orçamento→campanha, asset→vínculo) validam só o primeiro passo — a API não devolve `results` em `validateOnly`, então o passo seguinte falha com mensagem de "resource ausente", não por defeito de payload. Desligado por padrão |
+| `GOOGLE_ADS_DRY_RUN` | Nao | Dry-run (`true`/`1`). Envia `validateOnly=true` nos endpoints `:mutate` e nos uploads de conversão: a API valida o payload inteiro e devolve os mesmos erros de uma gravação real, sem alterar a conta. `apply_recommendation`/`dismiss_recommendation` não aceitam `validateOnly` e são **recusados** em dry-run (fail-closed). As criações (campanha com orçamento, asset groups, extensões, listas de negativas) vão numa operação atômica e são validadas inteiras. Só `create_video_ad`, `create_batch_job`, `create_location_sync_asset_set` e `upload_customer_match_members` ainda gravam em passos dependentes: em dry-run não validam o pedido inteiro (a API não devolve `results` em `validateOnly`) e a resposta diz o que ficou sem validar. Desligado por padrão |
 | `GOOGLE_ADS_TOOL_GROUPS` | Nao | Publica so os grupos de tools listados (virgula): `core` (as 95 do nucleo) e as areas de [Tools por área](#tools-por-área-250--módulos-em-srctools). O catalogo completo tem 345 tools e o `tools/list` ~640 KB; o `core` sozinho ~210 KB e cada area 9–31 KB. Ausente ou `all` = todas. Grupo desconhecido derruba o boot |
 | `PORT` | Nao | Se definido, inicia servidor HTTP. Sem `PORT`, usa stdio |
+| `MCP_MAX_BODY` | Nao | Modo HTTP: tamanho maximo do corpo de uma chamada (padrao `32mb`, formato do express: `10mb`, `500kb`). Acima disso a resposta e um erro JSON-RPC; o corpo so e lido depois da checagem do `MCP_API_KEY` |
 
 ---
 
@@ -174,7 +175,7 @@ As **95 do núcleo** estão nesta seção; as **250 das áreas** (segmentação,
 | `create_campaign` | Cria campanha (Search, Display, PMax, Demand Gen) com budget numa unica operacao atomica — orcamento e campanha, ou nenhum. Aceita `TARGET_SPEND` (Maximizar cliques) com `cpcBidCeilingMicros`; `MANUAL_CPC` sem Enhanced CPC (descontinuado em 31/03/2025). `enableAiMax` cria campanha de Pesquisa com AI Max ligado. Criada PAUSED. |
 | `create_pmax_campaign` | Cria campanha PMax completa: budget + campaign + asset group + listing group. Suporta Merchant Center. |
 | `create_display_campaign` | Cria campanha Display |
-| `create_video_campaign` | **Não suportado pela API**: o Google Ads não cria nem altera campanhas de video via API (`campaigns:mutate` e `adGroups:mutate` recusam). A tool retorna erro explicativo sem tocar na conta. Video programatico = `create_demand_gen_campaign`; em campanha de video criada no Google Ads, so `create_video_ad` (anuncio em ad group VIDEO_RESPONSIVE existente) e aceito |
+| `create_video_campaign` | **Não suportado pela API**: o Google Ads não cria nem altera campanhas de video via API (`campaigns:mutate` e `adGroups:mutate` recusam). A tool retorna erro explicativo sem tocar na conta. Video programatico = `create_demand_gen_campaign`. Campanhas de video existentes sao so leitura e relatorio pela API |
 | `create_shopping_campaign` | Cria campanha Shopping com Merchant Center |
 | `create_demand_gen_campaign` | Cria campanha Demand Gen |
 
@@ -186,7 +187,7 @@ As **95 do núcleo** estão nesta seção; as **250 das áreas** (segmentação,
 | `update_ad_group` | Edita nome, status, lances do grupo (`cpcBidMicros`, `cpmBidMicros`, `targetCpaMicros`) e a correspondencia de termos do AI Max (`disableSearchTermMatching`). Avisa lance muito baixo ou ignorado pela estrategia |
 | `create_ad` | Cria RSA (Responsive Search Ad) com headlines e descriptions |
 | `create_responsive_display_ad` | Cria ad responsivo de Display com imagens |
-| `create_video_ad` | Cria responsive video ad (YouTube) em ad group VIDEO_RESPONSIVE. Exige headline, description, callToAction, businessName e logoAssetId (asset IMAGE 1:1); reaproveita o asset do video se ja existir |
+| `create_video_ad` | Tenta criar responsive video ad (YouTube) em ad group VIDEO_RESPONSIVE. A API trata campanhas de Video como so leitura: sem reserva a gravacao e recusada (`MUTATE_REQUIRES_RESERVATION`) e a tool explica o erro — para video por API use Demand Gen (`create_demand_gen_ad`). Pode deixar criado o asset YOUTUBE_VIDEO (inofensivo) antes da recusa |
 | `update_ad` | Edita headlines, descriptions, final URL de um RSA existente |
 | `update_ad_status` | Pausar ou ativar anuncio |
 
@@ -198,7 +199,7 @@ As **95 do núcleo** estão nesta seção; as **250 das áreas** (segmentação,
 | `remove_keyword` | Remove keyword |
 | `update_keyword` | Ajusta lance (`cpcBidMicros`), status (pausar/ativar) e URL final de uma palavra-chave sem apaga-la |
 | `add_negative_keyword` | Adiciona keyword negativa |
-| `remove_negative_keyword` | Remove negativas da campanha por ID (`list_negative_keywords` mostra o `criterion_id`) ou por texto + correspondencia |
+| `remove_negative_keyword` | Remove negativas da campanha ou do grupo por ID (`list_negative_keywords` mostra o `criterion_id`) ou por texto + correspondencia. Exige `confirm: true` (sem ele, so a previa) — tirar negativa libera trafego |
 | `list_negative_keywords` | Lista keywords negativas |
 | `create_shared_negative_list` | Cria lista de negativos compartilhada entre campanhas |
 
@@ -216,7 +217,7 @@ As **95 do núcleo** estão nesta seção; as **250 das áreas** (segmentação,
 | Tool | Descricao |
 |------|-----------|
 | `set_campaign_locations` | Segmentacao geografica (pais, estado, cidade). Por padrao adiciona a existente; `replace=true` substitui (remove antes os criterios de LOCATION da mesma polaridade) |
-| `set_campaign_languages` | Segmentacao por idioma |
+| `set_campaign_languages` | Segmentacao por idioma em PMax, Display e Demand Gen. Em Pesquisa o Google removeu o idioma (set/2026): a tool recusa, e `cleanup=true` + `confirm` so remove criterios antigos |
 | `update_ad_group_targeting` | Adiciona audiencia a ad group |
 | `add_placement` | Adiciona placement (site, app, canal YouTube) |
 | `list_audience_segments` | Lista audiencias disponiveis |
@@ -808,7 +809,7 @@ A criacao de campanhas Performance Max na API v23 tem particularidades criticas:
 
 ```
 create_campaign (SEARCH) → create_ad_group → create_ad (RSA) → create_keyword
-→ set_campaign_locations → set_campaign_languages
+→ set_campaign_locations → set_geo_target_type (PRESENCE para negocio local)
 → create_sitelink_extension → create_callout_extension
 ```
 
@@ -857,11 +858,10 @@ create_display_campaign → create_ad_group → upload_image_asset
 ### Video (YouTube)
 
 ```
-Video programatico: create_demand_gen_campaign (a API nao cria nem altera campanhas VIDEO).
-Campanha VIDEO ja existente (criada no Google Ads, com ad group VIDEO_RESPONSIVE):
-→ get_image_assets (logo 1:1)
-→ create_video_ad (headline, description, callToAction, businessName, logoAssetId —
-   o asset do video e reaproveitado ou criado a partir do YouTube ID)
+Video programatico: create_demand_gen_campaign → create_demand_gen_ad_group → create_demand_gen_ad
+(upload_youtube_video sobe o arquivo para o YouTube, se preciso).
+Campanhas VIDEO existentes: so leitura e relatorio (get_video_performance, get_placement_report) —
+a API nao cria nem altera campanhas de Video.
 ```
 
 ### Shopping

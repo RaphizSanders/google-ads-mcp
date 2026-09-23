@@ -35,6 +35,7 @@ import {
   partialFailureByOperation,
   round2,
   text,
+  normalizePhone as phoneE164,
 } from "../tool-kit.js";
 import type { MetricTotals, ToolContext } from "../tool-kit.js";
 
@@ -1803,33 +1804,14 @@ export function normalizeEmail(raw: string): string | null {
 }
 
 /**
- * Telefone em E.164 (+ e só dígitos). Com + ou 00 na frente, o número já traz o DDI.
- * Sem DDI: com o padrão 55, aceita 10/11 dígitos (DDD + número, zeros de operadora/tronco à esquerda
- * são tirados) ou 12/13 dígitos começando com 55; outros tamanhos são ambíguos e recusados.
+ * Telefone em E.164 para Customer Match — a mesma regra das conversões offline
+ * (tool-kit normalizePhone): número que já traz o DDI sem "+" não ganha o DDI de novo, e o
+ * que não dá para decidir é recusado. Um DDI duplicado passaria na regex, viraria hash e
+ * nunca casaria — a API não tem como avisar.
  */
 export function normalizePhone(raw: string, defaultCountryCode = "55"): string | null {
-  const trimmed = String(raw ?? "").trim();
-  if (!trimmed) return null;
-  let digits: string;
-  if (trimmed.startsWith("+")) {
-    digits = trimmed.slice(1).replace(/\D/g, "");
-  } else {
-    const d = trimmed.replace(/\D/g, "");
-    if (d.startsWith("00")) {
-      digits = d.slice(2);
-    } else {
-      const national = d.replace(/^0+/, "");
-      if (defaultCountryCode === "55") {
-        if (national.length === 10 || national.length === 11) digits = `55${national}`;
-        else if ((national.length === 12 || national.length === 13) && national.startsWith("55")) digits = national;
-        else return null;
-      } else {
-        digits = `${defaultCountryCode}${national}`;
-      }
-    }
-  }
-  if (!/^[1-9]\d{7,14}$/.test(digits)) return null;
-  return `+${digits}`;
+  const result = phoneE164(String(raw ?? ""), defaultCountryCode);
+  return "value" in result ? result.value : null;
 }
 
 export const sha256Hex = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
@@ -1857,8 +1839,8 @@ export function prepareCustomerMatchMembers(
       if (email) identifiers.push({ hashedEmail: sha256Hex(email) }); else reasons.push("e-mail inválido");
     }
     if (entry.phone !== undefined && String(entry.phone).trim()) {
-      const phone = normalizePhone(entry.phone, defaultCountryCode);
-      if (phone) identifiers.push({ hashedPhoneNumber: sha256Hex(phone) }); else reasons.push("telefone fora do E.164 (informe com DDI, ex.: +55 11 91234-5678)");
+      const phone = phoneE164(String(entry.phone), defaultCountryCode);
+      if ("value" in phone) identifiers.push({ hashedPhoneNumber: sha256Hex(phone.value) }); else reasons.push(phone.error);
     }
     if (reasons.length) invalid.push({ source: entry.source, reason: reasons.join("; ") });
     if (!identifiers.length) {

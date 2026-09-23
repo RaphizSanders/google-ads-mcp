@@ -51,16 +51,15 @@ export const NEGATIVE_LIMITS = {
   listsPerAccount: 20,
   /** Operações por requisição de mutate. */
   operationsPerRequest: 10_000,
-  /** Acima disso, remover negativas de uma campanha/grupo exige confirm. */
-  bulkRemoveWithoutConfirm: 20,
 };
 
 const MATCH_TYPES = ["EXACT", "PHRASE", "BROAD"] as const;
 type MatchType = (typeof MATCH_TYPES)[number];
-const matchTypeSchema = z.enum(MATCH_TYPES);
-const keywordSchema = z.object({
+const matchTypeSchema = () => z.enum(MATCH_TYPES);
+/** Fábrica (uma instância por uso): instância compartilhada vira "$ref" cruzado no JSON Schema da tool. */
+const keywordSchema = () => z.object({
   text: z.string().describe("Texto da negativa, sem [ ], aspas ou '-' (até 80 caracteres e 10 palavras)."),
-  matchType: matchTypeSchema.describe("EXACT, PHRASE ou BROAD."),
+  matchType: matchTypeSchema().describe("EXACT, PHRASE ou BROAD."),
 });
 
 const ID = /^\d+$/;
@@ -777,9 +776,9 @@ export function registerNegativesTools(ctx: ToolContext): void {
         level: z.enum(["CAMPAIGN", "AD_GROUP"]).optional().describe("Nível. Padrão: AD_GROUP se adGroupId vier, senão CAMPAIGN."),
         campaignId: z.string().optional().describe("ID da campanha (obrigatório em CAMPAIGN)."),
         adGroupId: z.string().optional().describe("ID do grupo de anúncios (obrigatório em AD_GROUP)."),
-        keywords: flexArray(keywordSchema).optional().describe("Lote [{text, matchType}]."),
+        keywords: flexArray(keywordSchema()).optional().describe("Lote [{text, matchType}]."),
         keyword: z.string().optional().describe("Uma negativa só (forma antiga)."),
-        matchType: matchTypeSchema.optional().describe("Correspondência de keyword."),
+        matchType: matchTypeSchema().optional().describe("Correspondência de keyword."),
       },
     },
     async ({ customerId, level: rawLevel, campaignId, adGroupId, keywords, keyword, matchType }) => {
@@ -894,11 +893,12 @@ export function registerNegativesTools(ctx: ToolContext): void {
     {
       description: [
         "Remove palavras-chave negativas de uma campanha ou de um grupo de anúncios.",
-        "WRITE OPERATION — reversível: é só adicionar de novo com add_negative_keyword.",
+        "WRITE OPERATION — tirar negativa libera tráfego que estava bloqueado; dá para desfazer adicionando de novo",
+        "com add_negative_keyword.",
         "",
         "- level CAMPAIGN (padrão): campaignId. level AD_GROUP: adGroupId.",
         "Identifique por criterionIds (ver list_negative_keywords) ou por keywords [{text, matchType}].",
-        `Mais de ${NEGATIVE_LIMITS.bulkRemoveWithoutConfirm} de uma vez exige confirm: true (sem ele, devolve a prévia).`,
+        "Exige confirm: true (validateOnly dispensa); sem ele, devolve a prévia do que sairia e não grava.",
         "Listas compartilhadas: update_shared_set_members. Conta inteira: remove_account_negative_keywords.",
       ].join("\n"),
       inputSchema: {
@@ -907,8 +907,8 @@ export function registerNegativesTools(ctx: ToolContext): void {
         campaignId: z.string().optional().describe("Campaign ID (obrigatório em CAMPAIGN)."),
         adGroupId: z.string().optional().describe("ID do grupo (obrigatório em AD_GROUP)."),
         criterionIds: flexArray(z.string()).optional().describe("IDs das negativas (criterion_id)."),
-        keywords: flexArray(keywordSchema).optional().describe("Negativas por texto + correspondência."),
-        confirm: z.boolean().optional().describe(`Obrigatório acima de ${NEGATIVE_LIMITS.bulkRemoveWithoutConfirm} negativas.`),
+        keywords: flexArray(keywordSchema()).optional().describe("Negativas por texto + correspondência."),
+        confirm: z.boolean().optional().describe("true para remover (sem ele, só a prévia)."),
       },
     },
     async ({ customerId, level: rawLevel, campaignId, adGroupId, criterionIds, keywords, confirm }) => {
@@ -959,8 +959,10 @@ export function registerNegativesTools(ctx: ToolContext): void {
           `Nada foi removido.\nNão encontradas: ${notFound.join(", ")}`);
       }
       const describe = (negative: ExistingNegative) => ({ criterion_id: negative.criterionId, keyword: describeKeyword(negative) });
-      if (toRemove.length > NEGATIVE_LIMITS.bulkRemoveWithoutConfirm && confirm !== true && !client.isDryRun) {
-        return preview(`${where}: ${toRemove.length} negativas seriam removidas (acima de ${NEGATIVE_LIMITS.bulkRemoveWithoutConfirm} exige confirm).`,
+      // Mesma regra de remove_keyword, update_shared_set_members e remove_account_negative_keywords:
+      // remover negativa amplia o tráfego, então sempre passa pela prévia.
+      if (confirm !== true && !client.isDryRun) {
+        return preview(`${where}: ${toRemove.length} negativa(s) seriam removidas — envie confirm: true para remover.`,
           { to_remove: toRemove.map(describe), not_found: notFound });
       }
 
@@ -1004,7 +1006,7 @@ export function registerNegativesTools(ctx: ToolContext): void {
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
         name: z.string().describe("Nome da lista (1 a 255 bytes)."),
-        keywords: flexArray(keywordSchema).describe("Palavras [{text, matchType}] (pode ser vazia)."),
+        keywords: flexArray(keywordSchema()).describe("Palavras [{text, matchType}] (pode ser vazia)."),
         campaignIds: flexArray(z.string()).optional().describe("Campanhas para vincular a lista."),
       },
     },
@@ -1103,8 +1105,8 @@ export function registerNegativesTools(ctx: ToolContext): void {
       inputSchema: {
         customerId: z.string().describe("Customer ID da conta dona da lista."),
         sharedSetId: z.string().describe("ID da lista (ou resource name customers/{customerId}/sharedSets/{id})."),
-        add: flexArray(keywordSchema).optional().describe("Palavras a adicionar."),
-        remove: flexArray(keywordSchema).optional().describe("Palavras a remover (texto + correspondência)."),
+        add: flexArray(keywordSchema()).optional().describe("Palavras a adicionar."),
+        remove: flexArray(keywordSchema()).optional().describe("Palavras a remover (texto + correspondência)."),
         removeCriterionIds: flexArray(z.string()).optional().describe("criterion_id das palavras a remover."),
         confirm: z.boolean().optional().describe("Necessário para remover, para a lista de nível de conta e em MCC."),
       },
@@ -1475,7 +1477,7 @@ export function registerNegativesTools(ctx: ToolContext): void {
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
-        keywords: flexArray(keywordSchema).describe("Negativas [{text, matchType}]."),
+        keywords: flexArray(keywordSchema()).describe("Negativas [{text, matchType}]."),
         listName: z.string().optional().describe(`Nome da lista, se ela precisar ser criada. Padrão: "${ACCOUNT_LIST_DEFAULT_NAME}".`),
         confirm: z.boolean().optional().describe("Precisa ser true para gravar."),
       },
@@ -1618,7 +1620,7 @@ export function registerNegativesTools(ctx: ToolContext): void {
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
-        keywords: flexArray(keywordSchema).optional().describe("Negativas a remover."),
+        keywords: flexArray(keywordSchema()).optional().describe("Negativas a remover."),
         criterionIds: flexArray(z.string()).optional().describe("criterion_id das negativas."),
         confirm: z.boolean().optional().describe("Precisa ser true para gravar."),
       },

@@ -223,9 +223,8 @@ ficou só um comentário de uma linha no lugar de cada uma. A classificação de
 
 ## Parcial e por quê
 
-- **`create_pmax_campaign` continua forçando `feed_label: "BR"`.** Essa tool pertence ao lote
-  pmax-assets, não a este. A correção é a mesma feita aqui: remover o `?? "BR"` (feed label
-  omitido = todos os feeds, conforme a doc de PMax varejo).
+- ~~`create_pmax_campaign` forçando `feed_label: "BR"`~~ — resolvido pelo lote pmax-assets: `feedLabel`
+  é opcional e, omitido, a campanha usa todos os feeds.
 - **MAXIMIZE_CONVERSION_VALUE em Shopping padrão não foi validada contra uma conta real.** A
   doc da API de Shopping padrão lista só `manual_cpc`, `target_spend` e `target_roas`; o
   Google Ads Help lista Maximizar valor de conversão para Shopping. Ela continua disponível
@@ -256,10 +255,8 @@ ficou só um comentário de uma linha no lugar de cada uma. A classificação de
 ## Notas para integração
 
 - `tests/gaql-sweep.test.ts`: `list_merchant_centers` saiu de `KNOWN_BROKEN`.
-- `create_shopping_campaign` agora é atômica (um `googleAds:mutate`), mas continua em
-  `CHAINED_WRITE_TOOLS` (`src/tool-kit.ts`, fora da posse deste lote). Por isso o
-  `validateOnly` por chamada ainda é recusado nela, enquanto `GOOGLE_ADS_DRY_RUN` funciona.
-  Tirar o nome de `CHAINED_WRITE_TOOLS` libera o validateOnly.
+- `create_shopping_campaign` é atômica (um `googleAds:mutate`) e saiu de `CHAINED_WRITE_TOOLS` na
+  integração: o `validateOnly` por chamada valida o pedido inteiro.
 - Em `src/tools.ts`, os imports `LISTING_GROUP_DIMENSIONS` e `buildListingGroupCaseValue`
   ficaram sem uso depois da mudança. O bloco de imports não foi tocado para evitar conflito
   de merge. Os helpers equivalentes (com PRODUCT_CONDITION) estão em `src/tools/shopping.ts`.

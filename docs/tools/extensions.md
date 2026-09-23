@@ -231,8 +231,5 @@ quebra derruba ao menos um teste.
 - As 7 tools existentes foram **removidas de `src/tools.ts`** e reimplementadas no módulo
   (ficou um comentário no lugar). Continuam classificadas nas listas do núcleo em
   `src/read-only.ts`; não estão no catálogo do módulo.
-- As `create_*_extension`/`create_structured_snippet` continuam em `CHAINED_WRITE_TOOLS`
-  (`src/tool-kit.ts`, fora deste lote), então o `validateOnly` por chamada segue recusado
-  nelas. Como agora gravam numa única chamada atômica, dá para tirá-las dessa lista na
-  integração — o `GOOGLE_ADS_DRY_RUN` já funciona nelas. As tools novas de criação não
-  são encadeadas e aceitam `validateOnly`.
+- As `create_*_extension`/`create_structured_snippet` gravam numa única chamada atômica e saíram de
+  `CHAINED_WRITE_TOOLS` na integração: aceitam `validateOnly` por chamada, como as tools novas.

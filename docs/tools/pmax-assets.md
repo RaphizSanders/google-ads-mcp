@@ -102,9 +102,8 @@ consecutivos → raiz do listing group (`UNIT_INCLUDED`, `SHOPPING`) em varejo.
   `landscapeLogoAssets`, `businessName`/`businessNameAsset`, `callToAction`. Textos agora são opcionais (varejo).
 - Valida antes de chamar a API: IDs, URLs, contagens máximas, caracteres, repetidos, conta dos assets; depois,
   com a campanha lida, mínimos (inclusive a descrição curta), tipo e proporção de cada asset.
-- validateOnly: o pedido agora é um só (sem passos encadeados), então valida inteiro em dry-run — hoje isso
-  vale no modo global `GOOGLE_ADS_DRY_RUN`. O `validateOnly: true` por chamada continua **recusado** pelo wrapper
-  (nada é enviado) enquanto a tool estiver em `CHAINED_WRITE_TOOLS`; ver "Pendente para o integrador".
+- validateOnly: o pedido é um só (sem passos encadeados), então valida inteiro — no modo global
+  `GOOGLE_ADS_DRY_RUN` e, desde a integração (a tool saiu de `CHAINED_WRITE_TOOLS`), com `validateOnly: true` por chamada.
 - Erro da API: dicas em PT-BR (NOT_ENOUGH_*, SHORT_DESCRIPTION_REQUIRED, BRAND_ASSETS_NOT_LINKED_*,
   ASPECT_RATIO_NOT_ALLOWED, DUPLICATE_NAME...) e conferência na conta: "nada gravado" só quando confirmado; erro
   de transporte com o grupo criado é relatado como tal.
@@ -126,8 +125,8 @@ depois: qualquer recusa desfaz tudo.
 - `audienceResourceName` precisa ser `customers/{id}/audiences/{id}` desta conta (lista de remarketing é
   recusada com a orientação de virar público antes).
 - Confere nome de campanha repetido e tipo/proporção de cada asset antes de gravar.
-- validateOnly: mesma situação de `create_asset_group` — valida o pedido inteiro no modo `GOOGLE_ADS_DRY_RUN`; o
-  `validateOnly: true` por chamada é recusado sem enviar nada até o integrador aplicar a mudança abaixo.
+- validateOnly: como `create_asset_group` — valida o pedido inteiro no `GOOGLE_ADS_DRY_RUN` e com `validateOnly: true`
+  por chamada (liberado na integração).
 - Erro da API: dicas em PT-BR e conferência na conta pelo nome — "nada foi gravado" só quando a campanha não
   aparece; se aparecer, relata o ID; se a conferência falhar, diz que o resultado é INCERTO.
 - Campanha e asset group nascem PAUSADOS; a resposta indica ativar o asset group e depois a campanha.
@@ -164,34 +163,14 @@ Acrescenta `primary_status_reasons` (com explicação em PT-BR), `coverage_actio
   palavra final e recusa o pedido inteiro se discordar — nada é gravado nesse caso).
 - `update_demand_gen_ad` não edita `call_to_actions` (vídeo) nem `call_to_action` (produto), que usam assets
   CALL_TO_ACTION próprios.
-- validateOnly por chamada em `create_pmax_campaign` e `create_asset_group` (itens 16 e 17): **parcial**, ver
-  abaixo.
+- validateOnly por chamada em `create_pmax_campaign` e `create_asset_group` (itens 16 e 17): feito na integração
+  (as duas saíram de `CHAINED_WRITE_TOOLS`).
 
-## Pendente para o integrador
+## Pendente para o integrador — aplicado
 
-`create_pmax_campaign` e `create_asset_group` gravam agora num único `googleAds:mutate` atômico, então o motivo
-de estarem em `CHAINED_WRITE_TOOLS` (segundo passo usando o ID do primeiro) deixou de existir. Mas esse conjunto
-fica em `src/tool-kit.ts`, fora da posse deste lote, e o catálogo do módulo só consegue **acrescentar** nomes a
-ele, não retirar. A primeira versão do lote editou `src/tool-kit.ts`; a edição foi desfeita. Enquanto isso:
-
-- `validateOnly: true` por chamada nessas duas tools é recusado pelo wrapper, com a mensagem de "passos
-  encadeados", e **nada é enviado** (nem leitura). É o comportamento seguro de antes.
-- No modo global `GOOGLE_ADS_DRY_RUN` as duas validam o pedido atômico inteiro e respondem "DRY-RUN
-  (validateOnly): a API validou o pedido inteiro — nada foi gravado".
-
-Para ligar o validateOnly por chamada, o integrador tira as duas linhas de `CHAINED_WRITE_TOOLS` em
-`src/tool-kit.ts` (atenção: o lote demand-gen mexe em entradas vizinhas do mesmo conjunto):
-
-```diff
- export const CHAINED_WRITE_TOOLS = new Set([
--  "create_pmax_campaign",
--  "create_asset_group",
-   "create_display_campaign",
-```
-
-Os testes já cobrem os dois estados: `assertPerCallValidateOnly` lê `CHAINED_WRITE_TOOLS` e exige a recusa sem
-envio enquanto os nomes estiverem lá, e o pedido inteiro em dry-run (um `batchMutate` com `validateOnly`) depois
-da mudança. A suíte do lote foi rodada com a mudança aplicada e continua verde.
+`create_pmax_campaign` e `create_asset_group` saíram de `CHAINED_WRITE_TOOLS` na integração: gravam num único
+`googleAds:mutate` atômico, então o `validateOnly: true` por chamada valida o pedido inteiro, como o
+`GOOGLE_ADS_DRY_RUN`.
 
 ## Cobertura e checagem por mutação
 

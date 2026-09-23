@@ -1077,7 +1077,8 @@ export function registerPlannerRecommendationsTools(ctx: ToolContext): void {
 
   // ── Planejador: previsão ───────────────────────────────────────────
 
-  const keywordEntry = z.union([
+  // Fábrica: instância compartilhada vira "$ref" cruzado no JSON Schema publicado.
+  const keywordEntry = () => z.union([
     z.string(),
     z.object({ text: z.string(), matchType: z.enum(MATCH_TYPES).optional() }),
   ]);
@@ -1102,9 +1103,9 @@ export function registerPlannerRecommendationsTools(ctx: ToolContext): void {
       inputSchema: {
         customerId: z.string().describe("Customer ID (use uma conta do mesmo negócio: a previsão usa o histórico dela)."),
         adGroups: flexArray(z.object({
-          keywords: flexArray(keywordEntry).describe("Keywords do grupo: texto ou {text, matchType}."),
+          keywords: flexArray(keywordEntry()).describe("Keywords do grupo: texto ou {text, matchType}."),
         })).optional().describe("Grupos de anúncios da campanha proposta."),
-        keywords: flexArray(keywordEntry).optional().describe("Atalho: um único grupo com estas keywords."),
+        keywords: flexArray(keywordEntry()).optional().describe("Atalho: um único grupo com estas keywords."),
         defaultMatchType: z.enum(MATCH_TYPES).optional().describe("Match type das keywords sem matchType. Default: BROAD."),
         languageCode: z.string().optional().describe("Idioma ISO (ou ID numérico). Default: 'pt'."),
         geoTargetIds: flexArray(z.string()).optional().describe("Geo target IDs. Default: ['2076'] (Brasil)."),
@@ -1713,7 +1714,7 @@ export function registerPlannerRecommendationsTools(ctx: ToolContext): void {
         finalUrl: z.string().optional().describe("URL final da campanha / do grupo de recursos."),
         headlines: flexArray(z.string()).optional().describe("Títulos (opcional, CAMPAIGN_BUDGET)."),
         descriptions: flexArray(z.string()).optional().describe("Descrições (opcional, CAMPAIGN_BUDGET)."),
-        adGroupKeywords: flexArray(keywordEntry).optional().describe("Keywords do grupo planejado (texto ou {text, matchType})."),
+        adGroupKeywords: flexArray(keywordEntry()).optional().describe("Keywords do grupo planejado (texto ou {text, matchType})."),
         adGroupType: z.enum(AD_GROUP_TYPES).optional().describe("Tipo do grupo planejado (ex: SEARCH_STANDARD)."),
         keywordSeeds: flexArray(z.string()).optional().describe("Sementes para KEYWORD."),
         seedUrl: z.string().optional().describe("URL semente para KEYWORD, com ou sem http(s)://."),

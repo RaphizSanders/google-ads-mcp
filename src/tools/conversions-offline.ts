@@ -36,6 +36,7 @@ import {
   num,
   round2,
   text,
+  normalizePhone,
 } from "../tool-kit.js";
 import type { ToolContext } from "../tool-kit.js";
 
@@ -157,72 +158,9 @@ export function normalizeEmail(raw: string): { value: string } | { error: string
   return { value: `${local}@${domain}` };
 }
 
-/**
- * Tamanhos do número nacional (sem DDI e sem o 0 de tronco) nos planos de numeração que o
- * módulo conhece. É o que separa "5511999998888" (DDI 55 já incluído, sem "+") de um número
- * nacional: no Brasil, DDD + 8 ou 9 dígitos = 10 ou 11; com o DDI, 12 ou 13.
- * - 55 (Brasil): DDD de 2 dígitos + 8 (fixo) ou 9 (celular).
- * - 1 (NANP — EUA/Canadá): código de área + 7 dígitos = 10.
- * - 351 (Portugal): 9 dígitos.
- */
-const NATIONAL_NUMBER_LENGTHS: Record<string, number[]> = {
-  "55": [10, 11],
-  "1": [10],
-  "351": [9],
-};
-
-const PLUS_DDI_HELP = (cc: string) => `use E.164 com "+" (ex.: +${cc}…)`;
-
-/**
- * Número sem "+"/"00" com defaultCountryCode. Um número que já traz o DDI sem "+" não pode
- * ganhar o DDI de novo: "+555511999998888" tem 15 dígitos, passa na regex E.164 e, depois do
- * hash, a API não tem como avisar — o enhancement/lead/chamada simplesmente não casa.
- * Nos planos conhecidos o tamanho decide; nos outros, número que começa com o DDI é ambíguo
- * e é recusado (número nacional escrito com o 0 de tronco nunca começa pelo DDI).
- */
-function applyDefaultCountryCode(digits: string, cc: string): { value: string } | { error: string } {
-  const trunkPrefix = digits.startsWith("0");
-  const national = digits.replace(/^0+/, "");
-  const startsWithCc = !trunkPrefix && national.startsWith(cc);
-  const lengths = NATIONAL_NUMBER_LENGTHS[cc];
-  if (lengths) {
-    const asNational = lengths.includes(national.length);
-    const asInternational = startsWithCc && lengths.includes(national.length - cc.length);
-    if (asNational && asInternational) {
-      return { error: `telefone ambíguo: pode já ter o DDI ${cc} ou não — ${PLUS_DDI_HELP(cc)}` };
-    }
-    if (asInternational) return { value: `+${national}` };
-    if (asNational) return { value: `+${cc}${national}` };
-    return {
-      error: `telefone com ${national.length} dígito(s): não é número nacional do DDI ${cc} (${lengths.join(" ou ")} dígitos` +
-        `${cc === "55" ? ", com DDD" : ""}) nem já tem o DDI ${cc} — ${PLUS_DDI_HELP(cc)}`,
-    };
-  }
-  if (startsWithCc) {
-    return { error: `telefone começa com ${cc} (o DDI padrão) e não tem "+": não dá para saber se o DDI já está incluído — ${PLUS_DDI_HELP(cc)}` };
-  }
-  return { value: `+${cc}${national}` };
-}
-
-/**
- * Telefone em E.164 (+5511999998888). Sem "+" (ou "00") no início, só com
- * defaultCountryCode — número nacional sem DDI viraria um E.164 errado que a regex aceita.
- * Número que já traz o DDI sem "+" (ex.: "5511999998888" do CRM) não ganha o DDI de novo.
- */
-export function normalizePhone(raw: string, defaultCountryCode?: string): { value: string } | { error: string } {
-  const trimmed = raw.trim();
-  const digits = trimmed.replace(/\D/g, "");
-  let e164: string;
-  if (trimmed.startsWith("+")) e164 = `+${digits}`;
-  else if (trimmed.startsWith("00")) e164 = `+${digits.slice(2)}`;
-  else if (defaultCountryCode) {
-    const withCc = applyDefaultCountryCode(digits, defaultCountryCode);
-    if ("error" in withCc) return withCc;
-    e164 = withCc.value;
-  } else return { error: "telefone sem código do país — use E.164 (+5511999998888) ou informe defaultPhoneCountryCode (ex.: \"55\")" };
-  if (!/^\+[1-9]\d{6,14}$/.test(e164)) return { error: "telefone não forma um E.164 válido (+ DDI + número, 7 a 15 dígitos)" };
-  return { value: e164 };
-}
+// normalizePhone (E.164 com DDI padrão sem somar o DDI duas vezes) mora em tool-kit.ts:
+// Customer Match (audiences) usa a mesma regra.
+export { normalizePhone };
 
 /** Nome para hash: minúsculo, sem pontuação, sem espaços nas pontas e com espaço simples no meio. */
 export function normalizeName(raw: string): string {
@@ -322,7 +260,8 @@ export const RESTRICTION_MESSAGE = [
   "",
   "Caminho indicado pelo Google: Data Manager API → use upload_offline_conversions_data_manager (mesmos dados).",
   "Ela exige: (1) a Data Manager API ativada no projeto do Google Cloud; (2) um token OAuth consentido também com o",
-  "escopo https://www.googleapis.com/auth/datamanager (o token atual, só com adwords, precisa ser gerado de novo).",
+  "escopo https://www.googleapis.com/auth/datamanager (refresh token só com adwords precisa ser gerado de novo;",
+  "service account já pede os dois escopos).",
   "Não são afetados: upload_conversion_adjustments (ajustes) e upload_call_conversions (chamadas).",
 ].join("\n");
 
@@ -570,7 +509,8 @@ function contextLine(context: ConversionContext): string {
 const identifierField = (description: string) =>
   z.union([z.string(), z.array(z.string())]).optional().describe(description);
 
-const consentSchema = z.enum(["GRANTED", "DENIED"]);
+// Fábrica: instância compartilhada vira "$ref" cruzado no JSON Schema publicado.
+const consentSchema = () => z.enum(["GRANTED", "DENIED"]);
 
 const idString = (label: string) => z.string().describe(label);
 
@@ -738,7 +678,7 @@ export function registerConversionsOfflineTools(ctx: ToolContext): void {
           phone: identifierField("Telefone(s) — viram E.164 e SHA-256 no servidor. Sem '+DDI', use defaultPhoneCountryCode."),
           hashedEmail: identifierField("SHA-256 (hex) do e-mail já normalizado."),
           hashedPhoneNumber: identifierField("SHA-256 (hex) do telefone E.164."),
-          adUserDataConsent: consentSchema.optional().describe("Consentimento ad_user_data desta conversão (sobrepõe o padrão)."),
+          adUserDataConsent: consentSchema().optional().describe("Consentimento ad_user_data desta conversão (sobrepõe o padrão)."),
           customerType: z.enum(["NEW", "RETURNING"]).optional().describe("Cliente novo ou recorrente."),
           conversionEnvironment: z.enum(["WEB", "APP"]).optional().describe("Onde a conversão aconteceu."),
           cartData: cartDataSchema.optional().describe("Itens do carrinho (conversões com dados do carrinho)."),
@@ -747,7 +687,7 @@ export function registerConversionsOfflineTools(ctx: ToolContext): void {
             value: z.string().describe("Valor (sem dado pessoal)."),
           })).optional().describe("Variáveis personalizadas (não use com gbraid/wbraid)."),
         })).describe("Conversões a enviar (até 2.000)."),
-        adUserDataConsent: consentSchema.optional().describe("Consentimento padrão (ad_user_data) para linhas sem o seu."),
+        adUserDataConsent: consentSchema().optional().describe("Consentimento padrão (ad_user_data) para linhas sem o seu."),
         defaultPhoneCountryCode: phoneCountryCodeField,
         jobId: z.number().optional().describe("job_id opcional (1 a 2^31−1) para agrupar este envio no diagnóstico."),
       },
@@ -976,7 +916,8 @@ export function registerConversionsOfflineTools(ctx: ToolContext): void {
         "WRITE OPERATION.",
         "",
         "Pré-requisitos: Data Manager API ativada no projeto do Google Cloud e token OAuth consentido também com o escopo",
-        "https://www.googleapis.com/auth/datamanager (um token só com adwords precisa ser gerado de novo).",
+        "https://www.googleapis.com/auth/datamanager (refresh token só com adwords precisa ser gerado de novo; service account",
+        "já pede os dois escopos).",
         "Mesmos dados de upload_offline_conversion: gclid/gbraid/wbraid e/ou e-mail/telefone/endereço (hash SHA-256 aqui),",
         "consentimento, valor, moeda, orderId (vira transactionId — reenviar o mesmo orderId com outro valor vira ajuste),",
         "carrinho e variáveis. Até 2.000 eventos e 10 identificadores por evento. O destino é a conta DONA da ação",
@@ -1005,7 +946,7 @@ export function registerConversionsOfflineTools(ctx: ToolContext): void {
             countryCode: z.string().optional().describe("ISO-3166-1 alfa-2 (ex.: BR)."),
             postalCode: z.string().optional(),
           }).optional().describe("Nome, sobrenome, país e CEP (os quatro obrigatórios; nome/sobrenome com hash)."),
-          adUserDataConsent: consentSchema.optional().describe("Consentimento ad_user_data deste evento."),
+          adUserDataConsent: consentSchema().optional().describe("Consentimento ad_user_data deste evento."),
           customerType: z.enum(["NEW", "RETURNING", "REENGAGED"]).optional(),
           cartData: z.object({
             merchantId: z.string().optional(),
@@ -1023,7 +964,7 @@ export function registerConversionsOfflineTools(ctx: ToolContext): void {
             value: z.string(),
           })).optional(),
         })).describe("Conversões (até 2.000)."),
-        adUserDataConsent: consentSchema.optional().describe("Consentimento padrão (nível da requisição)."),
+        adUserDataConsent: consentSchema().optional().describe("Consentimento padrão (nível da requisição)."),
         defaultPhoneCountryCode: phoneCountryCodeField,
         eventSource: z.enum(["WEB", "APP", "IN_STORE", "PHONE", "MESSAGE", "OTHER"]).optional().describe("Origem dos eventos."),
       },
@@ -1168,7 +1109,7 @@ export function registerConversionsOfflineTools(ctx: ToolContext): void {
       try {
         result = await client.dataManagerIngestEvents(body);
       } catch (err) {
-        return { content: [text(`${contextLine(context)}\n${explainDataManagerError((err as Error).message)}`)], isError: true };
+        return { content: [text(`${contextLine(context)}\n${explainDataManagerError((err as Error).message, client.authMode)}`)], isError: true };
       }
       const dryRun = client.isDryRun;
       const warnings = ((result.fieldWarnings as Row[]) ?? []).map((w) => `- ${formatJson(w).replace(/\s+/g, " ")}`);
@@ -1218,7 +1159,7 @@ export function registerConversionsOfflineTools(ctx: ToolContext): void {
       try {
         result = await client.dataManagerRequestStatus(id);
       } catch (err) {
-        return { content: [text(explainDataManagerError((err as Error).message))], isError: true };
+        return { content: [text(explainDataManagerError((err as Error).message, client.authMode))], isError: true };
       }
       const destinations = (result.requestStatusPerDestination as Row[]) ?? [];
       const visible: Row[] = [];
@@ -1518,13 +1459,13 @@ export function registerConversionsOfflineTools(ctx: ToolContext): void {
           conversionDateTime: z.string().describe("Quando virou conversão, com fuso (≥ início da chamada)."),
           conversionValue: z.number().optional().describe("Valor (≥ 0)."),
           currencyCode: z.string().optional().describe("Moeda ISO 4217. Default: moeda padrão da ação ou da conta."),
-          adUserDataConsent: consentSchema.optional().describe("Consentimento ad_user_data desta chamada."),
+          adUserDataConsent: consentSchema().optional().describe("Consentimento ad_user_data desta chamada."),
           customVariables: z.array(z.object({
             id: z.string().describe("ID da conversion custom variable."),
             value: z.string(),
           })).optional(),
         })).describe("Chamadas (até 2.000)."),
-        adUserDataConsent: consentSchema.optional().describe("Consentimento padrão para linhas sem o seu."),
+        adUserDataConsent: consentSchema().optional().describe("Consentimento padrão para linhas sem o seu."),
         defaultPhoneCountryCode: phoneCountryCodeField,
       },
     },
@@ -2134,8 +2075,13 @@ function flatSummary(level: string, r: Row): Row {
 }
 
 /** Traduz os erros mais comuns da Data Manager API (escopo, API desativada, permissão). */
-export function explainDataManagerError(message: string): string {
+export function explainDataManagerError(message: string, authMode: "oauth_user" | "service_account" = "oauth_user"): string {
   if (/ACCESS_TOKEN_SCOPE_INSUFFICIENT|insufficient authentication scopes|insufficientPermissions/i.test(message)) {
+    if (authMode === "service_account") {
+      return "A Data Manager API recusou o token da service account por escopo, embora o JWT peça adwords E datamanager. " +
+        "Confira se a Data Manager API está ativada no projeto do Google Cloud da service account e se ela tem acesso " +
+        "à conta de conversão no Google Ads. Nada foi gravado.\n" + message;
+    }
     return "A Data Manager API recusou o token: falta o escopo https://www.googleapis.com/auth/datamanager. " +
       "Gere um novo refresh token consentindo adwords E datamanager (o app OAuth precisa ter o escopo em Data Access; " +
       "por ser sensível, pode exigir verificação do Google). Nada foi gravado.\n" + message;
@@ -2145,7 +2091,7 @@ export function explainDataManagerError(message: string): string {
       "(APIs e serviços → Data Manager API) e tente de novo. Nada foi gravado.\n" + message;
   }
   if (/PERMISSION_DENIED|HTTP 403/i.test(message)) {
-    return "A Data Manager API negou acesso: o usuário do token precisa ter acesso de escrita à conta de conversão " +
+    return "A Data Manager API negou acesso: o usuário do token (ou a service account) precisa ter acesso de escrita à conta de conversão " +
       "(direto ou pela conta de login). Nada foi gravado.\n" + message;
   }
   return `A Data Manager API recusou a requisição (modelo fast-fail: nada foi gravado).\n${message}`;

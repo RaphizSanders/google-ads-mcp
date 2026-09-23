@@ -197,9 +197,9 @@ Continua gravando na conta da campanha, como a API exige para `CampaignConversio
 
 ## Limites e o que ficou parcial
 
-- `upload_offline_conversion` e `get_account_info` não são deste lote: o upload continua usando o
-  `customerId` recebido. Com conversões na MCC, ele precisa usar a conta de conversão — o helper
-  `resolveConversionCustomer` / `conversionWriteTarget` está exportado para o lote dono aplicar.
+- `upload_offline_conversion`: resolvido na integração pelo lote conversions-offline — o upload vai
+  para a conta dona da ação / conta de conversão (`conversion_tracking_setting.google_ads_conversion_customer`),
+  depois da checagem da allowlist. `get_account_info` não é deste lote.
 - `conversionCategorySchema` do `tool-kit.ts` não foi alterado (regra de propriedade); as tools deste
   lote usam `conversionCategoryV25Schema`, que inclui `YOUTUBE_FOLLOW_ON_VIEWS`.
 - Janela click-through: a documentação da API diz [1,30] "para a maioria" dos tipos não-chamada; a

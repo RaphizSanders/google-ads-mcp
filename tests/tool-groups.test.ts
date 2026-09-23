@@ -32,6 +32,9 @@ test("parseToolGroups: ausente/all = tudo; lista válida; grupo desconhecido der
   assert.equal(parseToolGroups("ALL"), null);
   assert.deepEqual(parseToolGroups("core, targeting-geo,core"), ["core", "targeting-geo"]);
   assert.throws(() => parseToolGroups("core,nao-existe"), /grupo\(s\) desconhecido\(s\) nao-existe/);
+  for (const onlySeparators of [",", " , ", ",,"]) {
+    assert.throws(() => parseToolGroups(onlySeparators), /sem nenhum grupo/, `"${onlySeparators}" não pode subir sem tools`);
+  }
 });
 
 test("sem grupos publica todas; com grupos publica exatamente as tools deles", async () => {

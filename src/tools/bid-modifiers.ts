@@ -80,7 +80,8 @@ const DAY_GROUPS: Record<string, string[]> = {
 };
 const MINUTES = { ZERO: 0, FIFTEEN: 15, THIRTY: 30, FORTY_FIVE: 45 } as const;
 type MinuteEnum = keyof typeof MINUTES;
-const MINUTE_ENUM = z.enum(["ZERO", "FIFTEEN", "THIRTY", "FORTY_FIVE"]);
+// Fábrica: a mesma instância zod duas vezes numa tool vira "$ref" cruzado no JSON Schema publicado.
+const MINUTE_ENUM = () => z.enum(["ZERO", "FIFTEEN", "THIRTY", "FORTY_FIVE"]);
 const DAY_ENUM = z.enum([...WEEK, "WEEKDAYS", "WEEKEND", "ALL_DAYS"]);
 
 /** Dimensões demográficas (enums v25: age_range_type, gender_type, parental_status_type, income_range_type). */
@@ -928,9 +929,9 @@ const overlaps = (a: Slot, b: Slot) => a.day === b.day && a.start < b.end && b.s
 const slotInputSchema = z.object({
   dayOfWeek: DAY_ENUM.describe("Dia (MONDAY..SUNDAY) ou atalho WEEKDAYS (seg–sex), WEEKEND (sáb–dom), ALL_DAYS."),
   startHour: z.number().describe("Hora inicial (0–23)."),
-  startMinute: MINUTE_ENUM.optional().describe("ZERO, FIFTEEN, THIRTY ou FORTY_FIVE. Default: ZERO."),
+  startMinute: MINUTE_ENUM().optional().describe("ZERO, FIFTEEN, THIRTY ou FORTY_FIVE. Default: ZERO."),
   endHour: z.number().describe("Hora final (1–24; 24 = meia-noite)."),
-  endMinute: MINUTE_ENUM.optional().describe("ZERO, FIFTEEN, THIRTY ou FORTY_FIVE. Default: ZERO."),
+  endMinute: MINUTE_ENUM().optional().describe("ZERO, FIFTEEN, THIRTY ou FORTY_FIVE. Default: ZERO."),
   bidModifier: z.number().optional().describe("Ajuste de lance no horário (0.1–10; 1.2 = +20%)."),
 });
 type SlotInput = z.infer<typeof slotInputSchema>;
@@ -1553,9 +1554,9 @@ export function registerBidModifiersTools(ctx: ToolContext): void {
         slots: flexArray(slotInputSchema).optional().describe("Horários: [{dayOfWeek, startHour, startMinute?, endHour, endMinute?, bidModifier?}]."),
         dayOfWeek: DAY_ENUM.optional().describe("Horário avulso: dia ou atalho (WEEKDAYS, WEEKEND, ALL_DAYS)."),
         startHour: z.number().optional().describe("Horário avulso: hora inicial (0–23)."),
-        startMinute: MINUTE_ENUM.optional().describe("Horário avulso: minuto inicial. Default: ZERO."),
+        startMinute: MINUTE_ENUM().optional().describe("Horário avulso: minuto inicial. Default: ZERO."),
         endHour: z.number().optional().describe("Horário avulso: hora final (1–24)."),
-        endMinute: MINUTE_ENUM.optional().describe("Horário avulso: minuto final. Default: ZERO."),
+        endMinute: MINUTE_ENUM().optional().describe("Horário avulso: minuto final. Default: ZERO."),
         bidModifier: z.number().optional().describe("Horário avulso: ajuste de lance (0.1–10)."),
         replace: z.boolean().optional().describe("true = substitui a programação inteira por slots[]. Default: false (adiciona)."),
         confirm: z.boolean().optional().describe("Obrigatório (true) quando replace remove horários existentes."),
