@@ -3256,61 +3256,8 @@ export function registerGoogleAdsTools(
   // ══ DISPLAY + VIDEO + SHOPPING + DEMAND GEN ═══════════════════════
   // ══════════════════════════════════════════════════════════════════
 
-  mcp.registerTool(
-    "create_display_campaign",
-    {
-      description: [
-        "Create a Display campaign with targeting.",
-        "WRITE OPERATION — created PAUSED by default.",
-        "",
-        "Display campaigns show banner ads on Google Display Network (GDN).",
-        "After creating, use create_responsive_display_ad to add ads.",
-        "Targeting is set at ad group level (audiences, topics, placements).",
-      ].join("\n"),
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        name: z.string().describe("Campaign name."),
-        dailyBudgetMicros: z.number().describe("Daily budget in MICROS."),
-        biddingStrategy: z.enum(["MAXIMIZE_CONVERSIONS", "MAXIMIZE_CONVERSION_VALUE", "TARGET_CPA", "MANUAL_CPC"]).optional()
-          .describe("Default: MAXIMIZE_CONVERSIONS."),
-        targetCpaMicros: z.number().optional().describe("Target CPA in MICROS."),
-      },
-    },
-    async ({ customerId, name, dailyBudgetMicros, biddingStrategy, targetCpaMicros }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-
-      const strategy = biddingStrategy ?? "MAXIMIZE_CONVERSIONS";
-      // Valida ANTES de criar o orçamento: TARGET_CPA sem targetCpaMicros não casaria
-      // com nenhum ramo, a campanha subiria sem estratégia de lance, a API rejeitaria
-      // e o budget já criado ficaria órfão na conta.
-      if (strategy === "TARGET_CPA" && !targetCpaMicros) {
-        return { content: [text("TARGET_CPA exige targetCpaMicros (ex: 50000000 = R$50 por conversão).")], isError: true };
-      }
-
-      const budgetResult = await client.mutateCampaignBudgets(customerId, [
-        { create: { name: `Budget — ${name}`, amountMicros: String(dailyBudgetMicros), deliveryMethod: "STANDARD", explicitlyShared: false } },
-      ]);
-      const budgetResource = ((budgetResult as Record<string, unknown>).results as Array<Record<string, unknown>>)?.[0]?.resourceName as string;
-
-      const campaignData: Record<string, unknown> = {
-        name, status: "PAUSED", advertisingChannelType: "DISPLAY", campaignBudget: budgetResource, containsEuPoliticalAdvertising: EU_POLITICAL_DECLARATION,
-        networkSettings: { targetContentNetwork: true, targetGoogleSearch: false, targetSearchNetwork: false },
-      };
-      if (strategy === "MAXIMIZE_CONVERSION_VALUE") campaignData.maximizeConversionValue = {};
-      else if (strategy === "TARGET_CPA") campaignData.maximizeConversions = { targetCpaMicros: String(targetCpaMicros) };
-      else if (strategy === "MANUAL_CPC") campaignData.manualCpc = {}; // sem Enhanced CPC (descontinuado)
-      // else final: MAXIMIZE_CONVERSIONS (default) e qualquer valor novo do enum —
-      // garante que campaignData nunca sai sem estratégia de lance.
-      else campaignData.maximizeConversions = {};
-
-      const result = await client.mutateCampaigns(customerId, [{ create: campaignData }]);
-      const resource = ((result as Record<string, unknown>).results as Array<Record<string, unknown>>)?.[0]?.resourceName as string;
-
-      return { content: [text(`Display campaign created (PAUSED): ${name}\nResource: ${resource}\nNext: create an ad group, then create_responsive_display_ad.`)] };
-    }
-  );
+  // create_display_campaign: registrada em src/tools/demand-gen.ts (lote demand-gen) — atômica via
+  // googleAds:mutate, com mais estratégias de lance e remarketing dinâmico de varejo.
 
   mcp.registerTool(
     "create_responsive_display_ad",
@@ -3514,58 +3461,8 @@ export function registerGoogleAdsTools(
 
   // create_shopping_campaign: lote shopping (src/tools/shopping.ts).
 
-  mcp.registerTool(
-    "create_demand_gen_campaign",
-    {
-      description: [
-        "Create a Demand Gen campaign (Discovery + Gmail + YouTube Shorts).",
-        "WRITE OPERATION — created PAUSED by default.",
-        "",
-        "Demand Gen uses asset groups (like PMax). After creating the campaign,",
-        "use create_asset_group to add asset groups with images and texts.",
-      ].join("\n"),
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        name: z.string().describe("Campaign name."),
-        dailyBudgetMicros: z.number().describe("Daily budget in MICROS."),
-        biddingStrategy: z.enum(["MAXIMIZE_CONVERSIONS", "MAXIMIZE_CONVERSION_VALUE", "TARGET_CPA"]).optional()
-          .describe("Default: MAXIMIZE_CONVERSIONS."),
-        targetCpaMicros: z.number().optional().describe("Target CPA in MICROS."),
-      },
-    },
-    async ({ customerId, name, dailyBudgetMicros, biddingStrategy, targetCpaMicros }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-
-      const strategy = biddingStrategy ?? "MAXIMIZE_CONVERSIONS";
-      // Valida ANTES de criar o orçamento: TARGET_CPA sem targetCpaMicros não casaria
-      // com nenhum ramo, a campanha subiria sem estratégia de lance, a API rejeitaria
-      // e o budget já criado ficaria órfão na conta.
-      if (strategy === "TARGET_CPA" && !targetCpaMicros) {
-        return { content: [text("TARGET_CPA exige targetCpaMicros (ex: 50000000 = R$50 por conversão).")], isError: true };
-      }
-
-      const budgetResult = await client.mutateCampaignBudgets(customerId, [
-        { create: { name: `Budget — ${name}`, amountMicros: String(dailyBudgetMicros), deliveryMethod: "STANDARD", explicitlyShared: false } },
-      ]);
-      const budgetResource = ((budgetResult as Record<string, unknown>).results as Array<Record<string, unknown>>)?.[0]?.resourceName as string;
-
-      const campaignData: Record<string, unknown> = {
-        name, status: "PAUSED", advertisingChannelType: "DEMAND_GEN", campaignBudget: budgetResource, containsEuPoliticalAdvertising: EU_POLITICAL_DECLARATION,
-      };
-      if (strategy === "MAXIMIZE_CONVERSION_VALUE") campaignData.maximizeConversionValue = {};
-      else if (strategy === "TARGET_CPA") campaignData.maximizeConversions = { targetCpaMicros: String(targetCpaMicros) };
-      // else final: MAXIMIZE_CONVERSIONS (default) e qualquer valor novo do enum —
-      // garante que campaignData nunca sai sem estratégia de lance.
-      else campaignData.maximizeConversions = targetCpaMicros ? { targetCpaMicros: String(targetCpaMicros) } : {};
-
-      const result = await client.mutateCampaigns(customerId, [{ create: campaignData }]);
-      const resource = ((result as Record<string, unknown>).results as Array<Record<string, unknown>>)?.[0]?.resourceName as string;
-
-      return { content: [text(`Demand Gen campaign created (PAUSED): ${name}\nResource: ${resource}\nNext: use create_asset_group to add asset groups.`)] };
-    }
-  );
+  // create_demand_gen_campaign: registrada em src/tools/demand-gen.ts (lote demand-gen) — atômica via
+  // googleAds:mutate, com mais estratégias de lance, orçamento total e primeiro grupo.
 
   // ══════════════════════════════════════════════════════════════════
   // ══ TARGETING + AUDIENCES + EXTENSIONS + DELETES ══════════════════
