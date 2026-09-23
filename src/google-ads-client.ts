@@ -541,4 +541,79 @@ export class GoogleAdsClient {
     const url = `${API_BASE}/customers/${cid}${path.startsWith(":") ? "" : "/"}${path}${query ? `?${query}` : ""}`;
     return this.request<T>("GET", url);
   }
+
+  // ── lote conversions-offline ──
+
+  /* Data Manager API (datamanager.googleapis.com/v1): o caminho que o Google indica
+     para importação offline depois da restrição de 15/06/2026 no UploadClickConversions.
+     Usa o MESMO token OAuth, que precisa ter sido consentido também com o escopo
+     https://www.googleapis.com/auth/datamanager — um token só com adwords recebe 403
+     (escopo insuficiente). Não usa developer token nem login-customer-id: a conta de
+     login vai em destinations[].loginAccount, preenchida aqui com a do login quando
+     ausente (o equivalente do header login-customer-id). */
+  private static readonly DATA_MANAGER_BASE = "https://datamanager.googleapis.com/v1";
+
+  /** POST events:ingest. Grava (bloqueado em read-only); em dry-run vai com validateOnly. */
+  async dataManagerIngestEvents(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    this.assertWriteAllowed();
+    const destinations = ((body.destinations as Array<Record<string, unknown>>) ?? []).map((destination) =>
+      destination.loginAccount
+        ? destination
+        : { ...destination, loginAccount: { accountType: "GOOGLE_ADS", accountId: this.loginCustomerId } }
+    );
+    return this.dataManagerRequest<Record<string, unknown>>("POST", "events:ingest", {
+      ...body,
+      destinations,
+      ...(this.dryRun ? { validateOnly: true } : {}),
+    });
+  }
+
+  /** GET requestStatus:retrieve — status de um events:ingest (leitura). */
+  async dataManagerRequestStatus(requestId: string): Promise<Record<string, unknown>> {
+    return this.dataManagerRequest<Record<string, unknown>>(
+      "GET",
+      `requestStatus:retrieve?requestId=${encodeURIComponent(requestId)}`
+    );
+  }
+
+  private async dataManagerRequest<T>(
+    method: "GET" | "POST",
+    path: string,
+    body?: unknown,
+    attempt: number = 0
+  ): Promise<T> {
+    const token = await this.getAccessToken();
+    const res = await fetch(`${GoogleAdsClient.DATA_MANAGER_BASE}/${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    if ((res.status === 429 || res.status === 503) && attempt < MAX_RETRIES) {
+      await new Promise((r) => setTimeout(r, RETRY_BASE_MS * Math.pow(2, attempt)));
+      return this.dataManagerRequest<T>(method, path, body, attempt + 1);
+    }
+    let data: unknown;
+    try {
+      data = await res.json();
+    } catch {
+      throw new Error(`Data Manager API: resposta inesperada (HTTP ${res.status}, não é JSON).`);
+    }
+    const err = (data as Record<string, unknown> | null)?.error as Record<string, unknown> | undefined;
+    if (err) {
+      const details = (err.details as Array<Record<string, unknown>>) ?? [];
+      const reasons = details.map((d) => d.reason).filter(Boolean) as string[];
+      const violations = details
+        .flatMap((d) => (d.fieldViolations as Array<Record<string, unknown>>) ?? [])
+        .map((v) => `${String(v.field ?? "")}: ${String(v.description ?? "")}`);
+      const extra = [...reasons, ...violations];
+      throw new Error(
+        `Data Manager API: ${String(err.status ?? "")} (HTTP ${String(err.code ?? res.status)}): ` +
+          `${String(err.message ?? "sem mensagem")}${extra.length ? ` — ${extra.join("; ")}` : ""}`
+      );
+    }
+    if (!res.ok) {
+      throw new Error(`Data Manager API: HTTP ${res.status} sem detalhe de erro — ${JSON.stringify(data).slice(0, 200)}`);
+    }
+    return data as T;
+  }
 }
