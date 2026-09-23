@@ -184,7 +184,7 @@ usam um único `googleAds:mutate`) e respeitam o dry-run global — nunca dizem 
   os donos dessas tools aceitarem um orçamento existente.
 - **`google_run_gaql` em `src/prompts.ts:97`**: a verificação independente apontou que o prompt
   também cita a tool inexistente; `src/prompts.ts` é do lote account-auth. Corrigido só na
-  descrição de `update_budget`; o prompt fica para o integrador/lote account-auth.
+  descrição de `update_budget`; o prompt já não cita a tool (conferido na integração).
 - **Estratégias incompatíveis com orçamento compartilhado**: a API tem
   `BIDDING_STRATEGY_TYPE_INCOMPATIBLE_WITH_SHARED_BUDGET`, mas nem o proto nem a documentação da
   API listam quais estratégias. A tool não inventa a lista: o erro vem traduzido por campanha.

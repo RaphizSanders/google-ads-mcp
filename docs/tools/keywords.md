@@ -231,7 +231,7 @@ Só a descrição de `criterionId` passou a apontar `list_keywords`.
 
 - **Pausar palavras-chave pelo `bulk_update_status`** (proposta original: aceitar `adGroupCriteria`
   lá): a tool não é deste lote. O caso foi coberto pela tool nova `bulk_update_keyword_status`, que
-  além disso confere cada palavra-chave antes. O integrador pode apontar o `bulk_update_status` para ela.
+  além disso confere cada palavra-chave antes. Na integração, a descrição do `bulk_update_status` passou a apontar para ela.
 - **Criação de DSA (anúncios `ExpandedDynamicSearchAdInfo`, alvos `webpage`)**: não implementada de
   propósito — a criação acaba em janeiro de 2027. O caminho suportado é auditar e migrar para AI Max.
 - **Soma por página do DSA acima de 50.000 linhas termo × página**: fica limitada às de maior custo

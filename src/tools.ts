@@ -2637,6 +2637,7 @@ export function registerGoogleAdsTools(
         "Em escala exige confirm: true — quando mais de 100 itens mudariam (mais de 20 ao ATIVAR,",
         "que volta a gastar na hora), a primeira chamada só devolve o plano lido (quantos mudam,",
         "quais, status antes) e não grava. Chamadas menores gravam direto, como antes.",
+        "Palavras-chave: use bulk_update_keyword_status.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
