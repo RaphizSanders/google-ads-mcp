@@ -1066,38 +1066,7 @@ export function registerGoogleAdsTools(
 
   // ── Negative Keywords (READ) ───────────────────────────────────────
 
-  mcp.registerTool(
-    "list_negative_keywords",
-    {
-      description: "List negative keywords for a campaign or all campaigns.",
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        campaignId: z.string().optional().describe("Filter by campaign ID. If omitted, lists all."),
-        limit: z.number().optional().describe("Max results. Default: 100."),
-      },
-    },
-    async ({ customerId, campaignId, limit }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const campaignFilter = campaignId ? `AND campaign.id = ${campaignId}` : "";
-
-      const results = await client.searchStream(
-        customerId,
-        `SELECT campaign_criterion.criterion_id,
-                campaign_criterion.keyword.text,
-                campaign_criterion.keyword.match_type,
-                campaign.name, campaign.id
-         FROM campaign_criterion
-         WHERE campaign_criterion.type = 'KEYWORD'
-           AND campaign_criterion.negative = true
-           ${campaignFilter}
-         LIMIT ${limit ?? 100}`
-      );
-
-      return { content: [text(`${results.length} negative keyword(s).\n\n${formatJson(results)}`)] };
-    }
-  );
+  // list_negative_keywords: implementada em src/tools/negatives.ts (lote negatives).
 
   // ══════════════════════════════════════════════════════════════════
   // ══ WRITE OPERATIONS ═════════════════════════════════════════════
@@ -2153,142 +2122,11 @@ export function registerGoogleAdsTools(
     }
   );
 
-  mcp.registerTool(
-    "remove_negative_keyword",
-    {
-      description: [
-        "Remove palavras-chave negativas de uma campanha.",
-        "WRITE OPERATION — reversível: é só adicionar de novo com add_negative_keyword.",
-        "",
-        "Identifique por criterionIds (ver list_negative_keywords) ou por keywords [{text, matchType}].",
-        "Só remove negativas de nível de campanha; listas compartilhadas não são tocadas.",
-      ].join("\n"),
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        campaignId: z.string().describe("Campaign ID."),
-        criterionIds: flexArray(z.string()).optional().describe("IDs das negativas (campaign_criterion.criterion_id)."),
-        keywords: z
-          .array(z.object({ text: z.string(), matchType: z.enum(["EXACT", "PHRASE", "BROAD"]) }))
-          .optional()
-          .describe("Negativas por texto + correspondência."),
-      },
-    },
-    async ({ customerId, campaignId, criterionIds, keywords }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      if (!/^\d+$/.test(campaignId)) {
-        return { content: [text(`campaignId deve ser numérico, recebido "${campaignId}". Nada foi removido.`)], isError: true };
-      }
-      const ids = ensureArray<string>(criterionIds).map((id) => String(id).trim()).filter(Boolean);
-      const byText = keywords ?? [];
-      if (ids.length === 0 && byText.length === 0) {
-        return { content: [text("Informe criterionIds ou keywords. Nada foi removido.")], isError: true };
-      }
-      const badIds = ids.filter((id) => !/^\d+$/.test(id));
-      if (badIds.length > 0) {
-        return { content: [text(`criterionIds devem ser numéricos: ${badIds.join(", ")}. Nada foi removido.`)], isError: true };
-      }
-
-      const client = getClient();
-      const cid = customerId.replace(/-/g, "");
-      const rows = await client.searchStream(customerId,
-        `SELECT campaign.id, campaign_criterion.criterion_id, campaign_criterion.resource_name,
-                campaign_criterion.keyword.text, campaign_criterion.keyword.match_type
-         FROM campaign_criterion
-         WHERE campaign.id = ${campaignId}
-           AND campaign_criterion.type = 'KEYWORD'
-           AND campaign_criterion.negative = true`);
-      const negatives = rows.map((row) => {
-        const criterion = (row.campaignCriterion ?? {}) as Record<string, unknown>;
-        const keyword = (criterion.keyword ?? {}) as Record<string, unknown>;
-        return {
-          criterion_id: String(criterion.criterionId ?? ""),
-          resource_name: String(criterion.resourceName ?? ""),
-          text: String(keyword.text ?? ""),
-          match_type: String(keyword.matchType ?? ""),
-        };
-      });
-      const normalize = (value: string) => value.trim().toLowerCase();
-      const targets = new Map<string, (typeof negatives)[number]>();
-      const notFound: string[] = [];
-      for (const id of ids) {
-        const found = negatives.find((negative) => negative.criterion_id === id);
-        if (found) targets.set(found.resource_name, found);
-        else notFound.push(`criterionId ${id}`);
-      }
-      for (const wanted of byText) {
-        const found = negatives.find((negative) => normalize(negative.text) === normalize(wanted.text) && negative.match_type === wanted.matchType);
-        if (found) targets.set(found.resource_name, found);
-        else notFound.push(`-[${wanted.matchType}] "${wanted.text}"`);
-      }
-      const toRemove = [...targets.values()];
-      if (toRemove.length === 0) {
-        return {
-          content: [text(`Nenhuma das negativas pedidas existe na campanha ${campaignId}. Nada foi removido.\nNão encontradas: ${notFound.join(", ")}`)],
-          isError: true,
-        };
-      }
-
-      const response = await client.mutate(customerId, "campaignCriteria", toRemove.map((negative) => ({ remove: negative.resource_name })), { partialFailure: true });
-      const dryRun = client.isDryRun;
-      const results = (response.results as Array<Record<string, unknown>>) ?? [];
-      const { byIndex, unattributed } = partialFailureByOperation(response.partialFailureError, toRemove.length);
-      const removed: Array<Record<string, unknown>> = [];
-      const errors: Array<Record<string, unknown>> = [];
-      toRemove.forEach((negative, index) => {
-        const opErrors = byIndex.get(index);
-        const describe = { criterion_id: negative.criterion_id, keyword: `-[${negative.match_type}] "${negative.text}"` };
-        if (opErrors) errors.push({ ...describe, error: opErrors.join("; ") });
-        else if (!dryRun && !results[index]?.resourceName) errors.push({ ...describe, error: "a API não confirmou a remoção" });
-        else removed.push(describe);
-      });
-      for (const message of unattributed) errors.push({ error: message });
-
-      return {
-        content: [text(
-          (dryRun ? `Campanha ${campaignId} — DRY-RUN (validateOnly): nada foi removido. Validadas: ${removed.length}` : `Campanha ${campaignId}: ${removed.length} negativa(s) removida(s)`) +
-          ` | Não encontradas: ${notFound.length} | Com erro: ${errors.length}\n\n` +
-          formatJson({ [dryRun ? "validated" : "removed"]: removed, not_found: notFound, errors })
-        )],
-        isError: errors.length > 0,
-      };
-    }
-  );
+  // remove_negative_keyword: implementada em src/tools/negatives.ts (lote negatives).
 
   // ── Negative Keywords (WRITE) ──────────────────────────────────────
 
-  mcp.registerTool(
-    "add_negative_keyword",
-    {
-      description: "Add a negative keyword to a campaign.",
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        campaignId: z.string().describe("Campaign ID."),
-        keyword: z.string().describe("Negative keyword text."),
-        matchType: z.enum(["EXACT", "PHRASE", "BROAD"]).describe("Match type."),
-      },
-    },
-    async ({ customerId, campaignId, keyword, matchType }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const cid = customerId.replace(/-/g, "");
-
-      const result = await client.mutateCampaignCriteria(customerId, [
-        {
-          create: {
-            campaign: `customers/${cid}/campaigns/${campaignId}`,
-            negative: true,
-            keyword: { text: keyword, matchType },
-          },
-        },
-      ]);
-
-      return {
-        content: [text(`Negative keyword added: -[${matchType}] "${keyword}"\n\n${formatJson(result)}`)],
-      };
-    }
-  );
+  // add_negative_keyword: implementada em src/tools/negatives.ts (lote negatives).
 
   // ── Bulk Operations ────────────────────────────────────────────────
 
@@ -4598,33 +4436,7 @@ export function registerGoogleAdsTools(
     }
   );
 
-  mcp.registerTool(
-    "create_shared_negative_list",
-    {
-      description: "Create shared negative keyword list. WRITE OPERATION. Can attach to multiple campaigns.",
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        name: z.string().describe("List name."),
-        keywords: z.array(z.object({ text: z.string(), matchType: z.enum(["EXACT","PHRASE","BROAD"]) })).describe("Keywords."),
-        campaignIds: flexArray(z.string()).optional().describe("Campaign IDs to attach."),
-      },
-    },
-    async ({ customerId, name, keywords, campaignIds }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const cid = customerId.replace(/-/g, "");
-      const setResult = await client.mutate(customerId, "sharedSets", [{ create: { name, type: "NEGATIVE_KEYWORDS" } }]);
-      const setResource = ((setResult as Record<string, unknown>).results as Array<Record<string, unknown>>)?.[0]?.resourceName as string;
-      const kwOps = keywords.map(kw => ({ create: { sharedSet: setResource, keyword: { text: kw.text, matchType: kw.matchType } } }));
-      await client.mutate(customerId, "sharedCriteria", kwOps as unknown as import("./google-ads-client.js").MutateOperation[]);
-      if (campaignIds && campaignIds.length > 0) {
-        const attachOps = campaignIds.map(cmpId => ({ create: { campaign: `customers/${cid}/campaigns/${cmpId}`, sharedSet: setResource } }));
-        await client.mutate(customerId, "campaignSharedSets", attachOps as unknown as import("./google-ads-client.js").MutateOperation[]);
-      }
-      return { content: [text(`Shared list "${name}" with ${keywords.length} keywords.${campaignIds ? ` Attached to ${campaignIds.length} campaign(s).` : ""}\nResource: ${setResource}`)] };
-    }
-  );
+  // create_shared_negative_list: implementada em src/tools/negatives.ts (lote negatives).
 
   // ══ REMARKETING LISTS ══════════════════════════════════════════════
 
