@@ -10,12 +10,14 @@
     "dev": "tsc --watch & node --watch dist/index.js",
     "dev:local": "tsx src/index.ts",
     "dev:http": "PORT=3333 node dist/index.js",
-    "test": "npm run test:read-only && npm run test:allowlist && npm run test:conversion-enums && npm run test:campaign-images",
+    "test": "npm run test:read-only && npm run test:allowlist && npm run test:conversion-enums && npm run test:campaign-images && npm run test:ai-max && npm run test:operations",
     "test:read-only": "tsx --test tests/read-only.test.ts",
     "prepare": "npm run build",
     "test:allowlist": "tsx --test tests/allowlist.test.ts",
     "test:conversion-enums": "tsx --test tests/conversion-enums.test.ts",
-    "test:campaign-images": "tsx --test tests/campaign-image-assets.test.ts"
+    "test:campaign-images": "tsx --test tests/campaign-image-assets.test.ts",
+    "test:ai-max": "tsx --test tests/ai-max.test.ts",
+    "test:operations": "tsx --test tests/operations.test.ts"
   },
   "engines": {
     "node": ">=20"

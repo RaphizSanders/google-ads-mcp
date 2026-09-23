@@ -145,7 +145,9 @@ LIMIT N
 | \`ad_group_ad\` | Anúncios individuais |
 | \`keyword_view\` | Performance por keyword |
 | \`shopping_performance_view\` | Performance por produto |
-| \`search_term_view\` | Termos de busca reais |
+| \`search_term_view\` | Termos de busca reais (\`segments.search_term_match_source\` separa palavra-chave x AI Max) |
+| \`ai_max_search_term_ad_combination_view\` | AI Max: termo × landing page × titulos gerados (so segmento: date) |
+| \`expanded_landing_page_view\` | URL final real do clique; \`segments.landing_page_source\` = ADVERTISER ou AUTOMATIC (expansao do AI Max) |
 | \`geographic_view\` | Performance por localização |
 | \`age_range_view\` | Performance por faixa etária |
 | \`gender_view\` | Performance por gênero |
@@ -237,8 +239,11 @@ LIMIT 30
 - \`conversions_value\`: NÃO dividir (já em BRL)
 - \`ctr\`: Vem como decimal (0.05 = 5%). Multiplicar por 100 para exibir como %
 - Não usar WHERE com campo que não está no SELECT (exceto segments.date)
+- Recurso de SEGMENTAÇÃO (ex.: \`campaign\` em FROM campaign_asset ou expanded_landing_page_view): campo dele no WHERE precisa estar no SELECT. Recurso ATRIBUÍDO (ex.: \`campaign\` em search_term_view) não tem essa exigência — confira na field reference de cada recurso
 - ORDER BY só aceita campos do SELECT
 - LIMIT máximo: 10.000 por query
+- DURING aceita só: TODAY, YESTERDAY, LAST_7_DAYS, LAST_14_DAYS, LAST_30_DAYS, LAST_BUSINESS_WEEK, THIS_MONTH, LAST_MONTH, THIS_WEEK_SUN_TODAY, THIS_WEEK_MON_TODAY, LAST_WEEK_SUN_SAT, LAST_WEEK_MON_SUN. **Não existe LAST_60_DAYS nem LAST_90_DAYS** — use \`segments.date BETWEEN 'AAAA-MM-DD' AND 'AAAA-MM-DD'\`
+- Datas da campanha: \`campaign.start_date_time\` / \`campaign.end_date_time\` (os antigos \`start_date\`/\`end_date\` não existem mais)
 `;
 
 export const troubleshootingContent = `# Troubleshooting — Google Ads

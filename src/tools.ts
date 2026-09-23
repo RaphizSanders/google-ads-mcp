@@ -1,6 +1,8 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { GoogleAdsClient } from "./google-ads-client.js";
+import { GOOGLE_ADS_WRITE_TOOL_NAMES } from "./read-only.js";
 
 const text = (s: string) => ({ type: "text" as const, text: s });
 
@@ -13,12 +15,34 @@ function microsToMoney(micros: unknown): number {
   return Number(micros ?? 0) / 1_000_000;
 }
 
+/** "Últimos N dias" que o GAQL aceita em DURING — não existe LAST_60_DAYS nem LAST_90_DAYS. */
+const DURING_LAST_N_DAYS = new Set([7, 14, 30]);
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+function localIsoDate(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
 /** Build GAQL date clause from dateRange or days */
 function buildDateClause(dateRange?: { since: string; until: string }, days?: number): string {
   if (dateRange?.since && dateRange?.until) {
+    // As datas entram direto na string GAQL: só formato ISO passa
+    if (!ISO_DATE.test(dateRange.since) || !ISO_DATE.test(dateRange.until)) {
+      throw new Error(`dateRange inválido — use YYYY-MM-DD (recebido ${dateRange.since} → ${dateRange.until}).`);
+    }
     return `segments.date BETWEEN '${dateRange.since}' AND '${dateRange.until}'`;
   }
-  return `segments.date DURING LAST_${days ?? 30}_DAYS`;
+  const n = days ?? 30;
+  if (!Number.isInteger(n) || n < 1) throw new Error(`days inválido: ${days}. Use um inteiro positivo.`);
+  if (DURING_LAST_N_DAYS.has(n)) return `segments.date DURING LAST_${n}_DAYS`;
+  // Demais janelas viram BETWEEN, terminando ontem como os DURING LAST_N_DAYS.
+  // Usa a data local do servidor: perto da meia-noite pode diferir 1 dia do fuso da conta.
+  const until = new Date();
+  until.setDate(until.getDate() - 1);
+  const since = new Date();
+  since.setDate(since.getDate() - n);
+  return `segments.date BETWEEN '${localIsoDate(since)}' AND '${localIsoDate(until)}'`;
 }
 
 /* change_event nao aceita segments.date: o recurso filtra pelo proprio
@@ -155,6 +179,106 @@ function gaqlLiteral(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }
 
+// ── validateOnly por chamada ─────────────────────────────────────────
+
+/** Marca a chamada em curso como validateOnly; getClient devolve um client em dry-run. */
+const validateOnlyScope = new AsyncLocalStorage<boolean>();
+const VALIDATE_ONLY_BANNER = "VALIDATE-ONLY: modo validação (validate_only) — nada foi gravado na conta.";
+
+/**
+ * Tools que gravam em passos encadeados: o segundo passo usa o ID criado no primeiro.
+ * Em validate_only a API não devolve IDs, então o segundo passo falharia por um motivo
+ * falso. Nelas o validateOnly recusa a chamada sem enviar nada. O parâmetro continua
+ * no schema de propósito: sem ele, um validateOnly:true seria descartado pelo schema e
+ * a chamada gravaria de verdade.
+ */
+const CHAINED_WRITE_TOOLS = new Set([
+  "create_pmax_campaign",
+  "create_asset_group",
+  "create_display_campaign",
+  "create_shopping_campaign",
+  "create_demand_gen_campaign",
+  "create_video_ad",
+  "create_sitelink_extension",
+  "create_callout_extension",
+  "create_structured_snippet",
+  "create_call_extension",
+  "create_price_extension",
+  "create_promotion_extension",
+  "create_shared_negative_list",
+]);
+
+/**
+ * Acrescenta o parâmetro opcional validateOnly a toda tool de escrita. Com
+ * validateOnly=true a chamada roda num client em dry-run (validate_only na
+ * mutação) e a resposta ganha um aviso no topo. Tools de leitura não mudam.
+ */
+function withValidateOnlyParam<T extends object>(server: T): T {
+  return new Proxy(server, {
+    get(target, property, receiver) {
+      if (property !== "registerTool") return Reflect.get(target, property, receiver);
+      const registerTool = Reflect.get(target, property, target) as (...args: unknown[]) => unknown;
+      return (name: string, config: Record<string, unknown>, handler: (...args: unknown[]) => unknown) => {
+        if (!GOOGLE_ADS_WRITE_TOOL_NAMES.has(name as never)) {
+          return Reflect.apply(registerTool, target, [name, config, handler]);
+        }
+        const inputSchema = {
+          ...((config.inputSchema as Record<string, unknown>) ?? {}),
+          validateOnly: z.boolean().optional().describe(
+            "true = só valida na API (validate_only), sem gravar nada. Use para conferir antes de aplicar."
+          ),
+        };
+        const banner = { type: "text", text: VALIDATE_ONLY_BANNER };
+        const wrapped = async (args: Record<string, unknown>, ...rest: unknown[]) => {
+          if (args?.validateOnly !== true) return handler(args, ...rest);
+          if (CHAINED_WRITE_TOOLS.has(name)) {
+            return {
+              content: [banner, {
+                type: "text",
+                text: `validateOnly não é suportado em ${name}: a tool grava em passos encadeados (o segundo usa o ID ` +
+                  "criado no primeiro) e em validate_only a API não devolve IDs. Nada foi enviado.",
+              }],
+              isError: true,
+            };
+          }
+          try {
+            const result = (await validateOnlyScope.run(true, async () => handler(args, ...rest))) as
+              | { content?: unknown[] }
+              | undefined;
+            return { ...result, content: [banner, ...(result?.content ?? [])] };
+          } catch (err) {
+            return { content: [banner, { type: "text", text: `Erro: ${(err as Error).message}` }], isError: true };
+          }
+        };
+        return Reflect.apply(registerTool, target, [name, { ...config, inputSchema }, wrapped]);
+      };
+    },
+  });
+}
+
+// ── Lances ───────────────────────────────────────────────────────────
+
+/** Abaixo disso o lance quase certamente é engano (o incidente real foi R$ 0,01). */
+const LOW_BID_MICROS = 100_000;
+
+/** Estratégias em que o lance do grupo / da palavra-chave é o lance de fato. */
+const MANUAL_BID_STRATEGIES = new Set(["MANUAL_CPC", "ENHANCED_CPC", "MANUAL_CPM", "MANUAL_CPV"]);
+
+const money = (micros: unknown) => `R$ ${(num(micros) / 1_000_000).toFixed(2)}`;
+
+function isPositiveMicros(value: unknown): boolean {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
+/** Traduz a recusa da API para CPC manual em campanha nova. */
+function explainBiddingError(message: string, strategy: string | undefined): string {
+  if (strategy === "MANUAL_CPC" && /not allowed for the given context|OPERATION_NOT_PERMITTED_FOR_CONTEXT/i.test(message)) {
+    return `${message}\nA API recusou CPC manual para esta campanha. Use TARGET_SPEND (Maximizar cliques, ` +
+      "com cpcBidCeilingMicros como teto) ou uma estratégia de conversão.";
+  }
+  return message;
+}
+
 // ── Imagens em campanhas de Pesquisa (AD_IMAGE) ─────────────────────
 
 /** O Google aceita até 20 imagens por campanha de Pesquisa. */
@@ -209,6 +333,64 @@ async function fetchCampaignImageLinks(
     links.set(id, { status: String(link.status ?? ""), resourceName: String(link.resourceName ?? "") });
   }
   return links;
+}
+
+// ── AI Max ───────────────────────────────────────────────────────────
+
+/** Origem de um termo de pesquisa (segments.search_term_match_source, v25). */
+const SEARCH_TERM_MATCH_SOURCES = [
+  "ADVERTISER_PROVIDED_KEYWORD",
+  "AI_MAX_KEYWORDLESS",
+  "AI_MAX_BROAD_MATCH",
+  "DYNAMIC_SEARCH_ADS",
+  "PERFORMANCE_MAX",
+  "VERTICAL_ADS_DATA_FEED",
+] as const;
+const AI_MAX_MATCH_SOURCES = ["AI_MAX_KEYWORDLESS", "AI_MAX_BROAD_MATCH"];
+
+/** Limites de text_guidelines documentados no proto da Campaign (v25). */
+const MAX_TERM_EXCLUSIONS = 25;
+const MAX_TERM_EXCLUSION_CHARS = 30;
+const MAX_MESSAGING_RESTRICTIONS = 40;
+const MAX_MESSAGING_RESTRICTION_CHARS = 300;
+
+const round2 = (value: number) => Math.round(value * 100) / 100;
+
+/** Soma de métricas cruas; os derivados (CTR, CPC, CPA, ROAS) saem de metricsView. */
+interface MetricTotals {
+  impressions: number;
+  clicks: number;
+  costMicros: number;
+  conversions: number;
+  conversionsValue: number;
+}
+
+function emptyTotals(): MetricTotals {
+  return { impressions: 0, clicks: 0, costMicros: 0, conversions: 0, conversionsValue: 0 };
+}
+
+function addMetrics(totals: MetricTotals, metrics: Record<string, unknown> | undefined): MetricTotals {
+  totals.impressions += num(metrics?.impressions);
+  totals.clicks += num(metrics?.clicks);
+  totals.costMicros += num(metrics?.costMicros);
+  totals.conversions += num(metrics?.conversions);
+  totals.conversionsValue += num(metrics?.conversionsValue);
+  return totals;
+}
+
+function metricsView(totals: MetricTotals) {
+  const spend = totals.costMicros / 1_000_000;
+  return {
+    impressions: totals.impressions,
+    clicks: totals.clicks,
+    ctr_pct: totals.impressions ? round2((totals.clicks / totals.impressions) * 100) : 0,
+    spend: round2(spend),
+    cpc: totals.clicks ? round2(spend / totals.clicks) : null,
+    conversions: round2(totals.conversions),
+    cpa: totals.conversions ? round2(spend / totals.conversions) : null,
+    conversions_value: round2(totals.conversionsValue),
+    roas: spend ? round2(totals.conversionsValue / spend) : null,
+  };
 }
 
 /** Rótulo de proporção pelas regras de imagem em Pesquisa (1:1 e 1.91:1). */
@@ -418,6 +600,12 @@ export function registerGoogleAdsTools(
   allowedCustomerIds: string[],
   hosted = false
 ): void {
+  mcp = withValidateOnlyParam(mcp);
+  const baseGetClient = getClient;
+  getClient = () => {
+    const client = baseGetClient();
+    return validateOnlyScope.getStore() ? client.withDryRun() : client;
+  };
   const allowAllCustomers = allowedCustomerIds.includes("*");
   const allowedCustomerIdSet = new Set(
     allowedCustomerIds.filter((id) => id !== "*").map((id) => id.replace(/-/g, ""))
@@ -572,6 +760,7 @@ export function registerGoogleAdsTools(
         customerId,
         `SELECT campaign.id, campaign.name, campaign.advertising_channel_type,
                 campaign.status, campaign.bidding_strategy_type,
+                campaign.ai_max_setting.enable_ai_max,
                 metrics.cost_micros, metrics.impressions, metrics.clicks,
                 metrics.ctr, metrics.average_cpc, metrics.conversions,
                 metrics.conversions_value, metrics.all_conversions,
@@ -594,6 +783,7 @@ export function registerGoogleAdsTools(
           type: c?.advertisingChannelType,
           status: c?.status,
           bidding: c?.biddingStrategyType,
+          ai_max: Boolean((c?.aiMaxSetting as Record<string, unknown> | undefined)?.enableAiMax),
           spend: Math.round(spend * 100) / 100,
           impressions: num(m?.impressions),
           clicks: num(m?.clicks),
@@ -1015,31 +1205,56 @@ export function registerGoogleAdsTools(
       description: [
         "Get search terms report — actual queries that triggered your ads.",
         "Useful for finding new keyword ideas and negative keywords.",
+        "",
+        "Cada linha traz match_source — de onde veio o termo: ADVERTISER_PROVIDED_KEYWORD (palavra-chave",
+        "do anunciante), AI_MAX_KEYWORDLESS (AI Max, sem palavra-chave, a partir do site), AI_MAX_BROAD_MATCH",
+        "(AI Max expandindo a palavra-chave), DYNAMIC_SEARCH_ADS, PERFORMANCE_MAX, VERTICAL_ADS_DATA_FEED.",
+        "Use matchSources para filtrar. Para a análise completa do AI Max, use get_ai_max_report.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
         dateRange: dateRangeSchema.describe(DATE_RANGE_DESC),
         days: z.number().optional().describe(DAYS_DESC),
         campaignId: z.string().optional().describe("Filter by campaign ID."),
+        matchSources: flexArray(z.enum(SEARCH_TERM_MATCH_SOURCES)).optional().describe(
+          "Filtra pela origem do termo (ex: [\"AI_MAX_KEYWORDLESS\", \"AI_MAX_BROAD_MATCH\"] = só AI Max)."
+        ),
         limit: z.number().optional().describe("Max results. Default: 50."),
       },
     },
-    async ({ customerId, dateRange, days, campaignId, limit }) => {
+    async ({ customerId, dateRange, days, campaignId, matchSources, limit }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
+      if (campaignId !== undefined && !/^\d+$/.test(campaignId)) {
+        return { content: [text(`campaignId deve ser numérico, recebido "${campaignId}".`)], isError: true };
+      }
+      // flexArray aceita string JSON sem validar os itens: confere contra o enum antes de ir para o GAQL
+      const sources = matchSources === undefined ? [] : ensureArray<string>(matchSources).map(String);
+      const invalidSources = sources.filter((source) => !(SEARCH_TERM_MATCH_SOURCES as readonly string[]).includes(source));
+      if (invalidSources.length > 0) {
+        return {
+          content: [text(`matchSources inválido: ${invalidSources.join(", ")}. Use: ${SEARCH_TERM_MATCH_SOURCES.join(", ")}.`)],
+          isError: true,
+        };
+      }
       const client = getClient();
       const dateClause = buildDateClause(dateRange, days);
       const campaignFilter = campaignId ? `AND campaign.id = ${campaignId}` : "";
+      const sourceFilter = sources.length > 0
+        ? `AND segments.search_term_match_source IN (${sources.map((source) => `'${source}'`).join(", ")})`
+        : "";
 
       const results = await client.searchStream(
         customerId,
         `SELECT search_term_view.search_term, search_term_view.status,
+                segments.search_term_match_source,
                 campaign.name, ad_group.name,
                 metrics.impressions, metrics.clicks, metrics.cost_micros,
                 metrics.conversions, metrics.conversions_value
          FROM search_term_view
          WHERE ${dateClause}
            ${campaignFilter}
+           ${sourceFilter}
            AND metrics.impressions > 0
          ORDER BY metrics.cost_micros DESC
          LIMIT ${limit ?? 50}`
@@ -1054,6 +1269,7 @@ export function registerGoogleAdsTools(
         return {
           search_term: stv?.searchTerm,
           status: stv?.status,
+          match_source: (r.segments as Record<string, unknown> | undefined)?.searchTermMatchSource,
           campaign: c?.name,
           ad_group: ag?.name,
           impressions: num(m?.impressions),
@@ -1465,7 +1681,8 @@ export function registerGoogleAdsTools(
 
       const results = await client.searchStream(
         customerId,
-        `SELECT campaign_criterion.keyword.text,
+        `SELECT campaign_criterion.criterion_id,
+                campaign_criterion.keyword.text,
                 campaign_criterion.keyword.match_type,
                 campaign.name, campaign.id
          FROM campaign_criterion
@@ -1497,7 +1714,9 @@ export function registerGoogleAdsTools(
         "Budget is in MICROS (1,000,000 = R$1.00 / $1.00).",
         "",
         "Supported types: SEARCH, DISPLAY, PERFORMANCE_MAX, DEMAND_GEN. SHOPPING é recusado aqui (exige merchantId) — use create_shopping_campaign. VIDEO é recusado: a API não cria campanhas de vídeo novas.",
-        "Bidding strategies: MAXIMIZE_CONVERSIONS, MAXIMIZE_CONVERSION_VALUE, TARGET_CPA, TARGET_ROAS, MANUAL_CPC.",
+        "Bidding strategies: MAXIMIZE_CONVERSIONS, MAXIMIZE_CONVERSION_VALUE, TARGET_CPA, TARGET_ROAS,",
+        "TARGET_SPEND (Maximizar cliques — a certa para conta sem histórico de conversão), MANUAL_CPC.",
+        "Orçamento e campanha são criados numa única operação atômica: ou os dois, ou nenhum.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
@@ -1514,10 +1733,11 @@ export function registerGoogleAdsTools(
             "MAXIMIZE_CONVERSION_VALUE",
             "TARGET_CPA",
             "TARGET_ROAS",
+            "TARGET_SPEND",
             "MANUAL_CPC",
           ])
           .optional()
-          .describe("Bidding strategy. Default: MAXIMIZE_CONVERSIONS."),
+          .describe("Bidding strategy. Default: MAXIMIZE_CONVERSIONS. TARGET_SPEND = Maximizar cliques."),
         targetCpaMicros: z
           .number()
           .optional()
@@ -1526,6 +1746,10 @@ export function registerGoogleAdsTools(
           .number()
           .optional()
           .describe("Target ROAS as decimal (e.g. 5.0 = 500%). Only for TARGET_ROAS."),
+        cpcBidCeilingMicros: z
+          .number()
+          .optional()
+          .describe("Teto de CPC em MICROS (só TARGET_SPEND). Ex: 3000000 = R$3,00 por clique."),
         networkSettings: z
           .object({
             targetGoogleSearch: z.boolean().optional(),
@@ -1534,9 +1758,13 @@ export function registerGoogleAdsTools(
           })
           .optional()
           .describe("Network targeting. Default depends on channelType: SEARCH = Google Search only; DISPLAY = Display Network only; PERFORMANCE_MAX/VIDEO/DEMAND_GEN = omitted (API default). Pass explicitly to override."),
+        enableAiMax: z
+          .boolean()
+          .optional()
+          .describe("Só SEARCH: cria a campanha com AI Max ligado. Ajustes finos depois com set_ai_max_settings."),
       },
     },
-    async ({ customerId, name, channelType, dailyBudgetMicros, biddingStrategy, targetCpaMicros, targetRoas, networkSettings }) => {
+    async ({ customerId, name, channelType, dailyBudgetMicros, biddingStrategy, targetCpaMicros, targetRoas, networkSettings, enableAiMax, cpcBidCeilingMicros }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
@@ -1585,23 +1813,28 @@ export function registerGoogleAdsTools(
         return { content: [text("TARGET_ROAS exige targetRoas (ex: 5.0 = 500%).")], isError: true };
       }
 
-      // Step 1: Create budget
-      const budgetResult = await client.mutateCampaignBudgets(customerId, [
-        {
-          create: {
-            name: `Budget — ${name}`,
-            amountMicros: String(dailyBudgetMicros),
-            deliveryMethod: "STANDARD",
-            explicitlyShared: false,
-          },
-        },
-      ]);
-
-      const budgetResults = (budgetResult as Record<string, unknown>).results as Array<Record<string, unknown>>;
-      const budgetResourceName = budgetResults?.[0]?.resourceName as string;
-      if (!budgetResourceName) {
-        return { content: [text("Error: failed to create budget.")], isError: true };
+      // AI Max só existe em Pesquisa (e Shopping, que esta tool não cria). Recusa antes
+      // do orçamento para não deixar budget órfão.
+      if (enableAiMax && channelType !== "SEARCH") {
+        return {
+          content: [text(`enableAiMax só vale para campanhas SEARCH (recebido ${channelType}). Nada foi criado.`)],
+          isError: true,
+        };
       }
+
+      if (cpcBidCeilingMicros !== undefined) {
+        if ((biddingStrategy ?? "MAXIMIZE_CONVERSIONS") !== "TARGET_SPEND") {
+          return { content: [text("cpcBidCeilingMicros só vale com biddingStrategy TARGET_SPEND (Maximizar cliques). Nada foi criado.")], isError: true };
+        }
+        if (!isPositiveMicros(cpcBidCeilingMicros)) {
+          return { content: [text(`cpcBidCeilingMicros deve ser um inteiro positivo em micros (recebido ${cpcBidCeilingMicros}). Nada foi criado.`)], isError: true };
+        }
+      }
+
+      // Orçamento e campanha vão num único googleAds:mutate, com ID temporário para o
+      // orçamento: se a campanha for recusada, o orçamento não fica órfão, e em
+      // validateOnly/dry-run a API valida os dois de uma vez.
+      const budgetTmp = `customers/${cid}/campaignBudgets/-1`;
 
       // Step 2: Create campaign
       // networkSettings precisa ser coerente com o canal. O default antigo (só
@@ -1617,9 +1850,10 @@ export function registerGoogleAdsTools(
         name,
         status: "PAUSED",
         advertisingChannelType: channelType,
-        campaignBudget: budgetResourceName,
+        campaignBudget: budgetTmp,
         containsEuPoliticalAdvertising: EU_POLITICAL_DECLARATION,
         ...(effectiveNetworkSettings ? { networkSettings: effectiveNetworkSettings } : {}),
+        ...(enableAiMax ? { aiMaxSetting: { enableAiMax: true } } : {}),
       };
 
       // Bidding strategy (alvos já validados antes do orçamento)
@@ -1638,26 +1872,67 @@ export function registerGoogleAdsTools(
         }
         campaignData.maximizeConversionValue = { targetRoas };
       } else if (strategy === "MANUAL_CPC") {
-        campaignData.manualCpc = { enhancedCpcEnabled: true };
+        // Enhanced CPC foi desligado em Pesquisa/Display (31/03/2025): CPC manual puro
+        campaignData.manualCpc = {};
+      } else if (strategy === "TARGET_SPEND") {
+        campaignData.targetSpend = cpcBidCeilingMicros ? { cpcBidCeilingMicros: String(cpcBidCeilingMicros) } : {};
       }
 
-      const campaignResult = await client.mutateCampaigns(customerId, [
-        { create: campaignData },
-      ]);
-
-      const campaignResults = (campaignResult as Record<string, unknown>).results as Array<Record<string, unknown>>;
-      const campaignResourceName = campaignResults?.[0]?.resourceName as string;
+      let batchResult: Record<string, unknown>;
+      try {
+        batchResult = await client.batchMutate(customerId, [
+          {
+            campaignBudgetOperation: {
+              create: {
+                resourceName: budgetTmp,
+                name: `Budget — ${name}`,
+                amountMicros: String(dailyBudgetMicros),
+                deliveryMethod: "STANDARD",
+                explicitlyShared: false,
+              },
+            },
+          },
+          { campaignOperation: { create: campaignData } },
+        ]);
+      } catch (err) {
+        return {
+          content: [text(
+            "Nada foi criado (orçamento e campanha vão na mesma operação atômica).\n" +
+            `Erro: ${explainBiddingError((err as Error).message, strategy)}`
+          )],
+          isError: true,
+        };
+      }
+      const dryRun = client.isDryRun;
+      const responses = (batchResult.mutateOperationResponses as Array<Record<string, unknown>>) ?? [];
+      const campaignResourceName = (responses.find((r) => r.campaignResult)?.campaignResult as Record<string, unknown> | undefined)
+        ?.resourceName as string | undefined;
+      if (!dryRun && !campaignResourceName) {
+        return {
+          content: [text(`A API não confirmou a criação da campanha — confira na conta antes de repetir.\n\n${formatJson(batchResult)}`)],
+          isError: true,
+        };
+      }
+      const warnings: string[] = [];
+      if (strategy === "TARGET_SPEND" && !cpcBidCeilingMicros) {
+        warnings.push("Maximizar cliques sem teto: o Google pode pagar CPCs altos. Defina cpcBidCeilingMicros com update_campaign se precisar.");
+      }
+      if (strategy === "MANUAL_CPC") {
+        warnings.push("CPC manual: o lance real é o de cada grupo/palavra-chave — informe cpcBidMicros no create_ad_group.");
+      }
 
       return {
         content: [
           text(
-            `Campaign created (PAUSED):\n` +
+            (dryRun ? `DRY-RUN (validateOnly): orçamento e campanha validados pela API — nada foi criado.\n` : `Campaign created (PAUSED):\n`) +
               `- Name: ${name}\n` +
               `- Type: ${channelType}\n` +
               `- Budget: R$ ${(dailyBudgetMicros / 1_000_000).toFixed(2)}/day\n` +
-              `- Bidding: ${strategy}\n` +
-              `- Resource: ${campaignResourceName}\n\n` +
-              `Use update_campaign to ENABLE when ready.`
+              `- Bidding: ${strategy}${strategy === "TARGET_SPEND" && cpcBidCeilingMicros ? ` (teto ${money(cpcBidCeilingMicros)})` : ""}\n` +
+              (enableAiMax ? `- AI Max: ligado (ajustes finos com set_ai_max_settings)\n` : "") +
+              (campaignResourceName ? `- Resource: ${campaignResourceName}\n` : "") +
+              (warnings.length ? `\nAvisos:\n- ${warnings.join("\n- ")}\n` : "") +
+              (dryRun ? "" : `\nUse update_campaign to ENABLE when ready.`)
           ),
         ],
       };
@@ -1668,39 +1943,246 @@ export function registerGoogleAdsTools(
     "update_campaign",
     {
       description: [
-        "Update a campaign's settings (name, status, bidding strategy).",
-        "WRITE OPERATION — changes take effect immediately.",
+        "Atualiza nome, status, estratégia de lance (com os parâmetros) e redes de uma campanha.",
+        "WRITE OPERATION — vale na hora. Só os campos que mudam são enviados (updateMask exato).",
+        "",
+        "biddingStrategy: TARGET_SPEND (Maximizar cliques), MAXIMIZE_CONVERSIONS, MAXIMIZE_CONVERSION_VALUE,",
+        "TARGET_IMPRESSION_SHARE, MANUAL_CPC. Parâmetros:",
+        "- cpcBidCeilingMicros: teto de CPC (TARGET_SPEND ou TARGET_IMPRESSION_SHARE)",
+        "- targetCpaMicros: CPA alvo (MAXIMIZE_CONVERSIONS)",
+        "- targetRoas: ROAS alvo em decimal, 5.0 = 500% (MAXIMIZE_CONVERSION_VALUE)",
+        "- targetImpressionShareLocation + locationFractionMicros (TARGET_IMPRESSION_SHARE; 500000 = 50%)",
+        "Sem biddingStrategy, os parâmetros ajustam a estratégia que a campanha já usa.",
+        "Trocar de estratégia reinicia o aprendizado do lance automático.",
+        "",
+        "networkSettings: targetGoogleSearch, targetSearchNetwork (parceiros de pesquisa),",
+        "targetContentNetwork (expansão para Display).",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
         campaignId: z.string().describe("Campaign ID (numeric)."),
         name: z.string().optional().describe("New campaign name."),
         status: z.enum(["ENABLED", "PAUSED"]).optional().describe("New status."),
+        biddingStrategy: z
+          .enum(["TARGET_SPEND", "MAXIMIZE_CONVERSIONS", "MAXIMIZE_CONVERSION_VALUE", "TARGET_IMPRESSION_SHARE", "MANUAL_CPC"])
+          .optional()
+          .describe("Nova estratégia de lance. TARGET_SPEND = Maximizar cliques."),
+        cpcBidCeilingMicros: z.number().optional().describe("Teto de CPC em micros (TARGET_SPEND / TARGET_IMPRESSION_SHARE). 17000000 = R$17."),
+        targetCpaMicros: z.number().optional().describe("CPA alvo em micros (MAXIMIZE_CONVERSIONS)."),
+        targetRoas: z.number().optional().describe("ROAS alvo em decimal (MAXIMIZE_CONVERSION_VALUE). 5.0 = 500%."),
+        targetImpressionShareLocation: z
+          .enum(["ANYWHERE_ON_PAGE", "TOP_OF_PAGE", "ABSOLUTE_TOP_OF_PAGE"])
+          .optional()
+          .describe("TARGET_IMPRESSION_SHARE: onde aparecer."),
+        locationFractionMicros: z.number().optional().describe("TARGET_IMPRESSION_SHARE: parcela desejada em micros (500000 = 50%, 1000000 = 100%)."),
+        networkSettings: z
+          .object({
+            targetGoogleSearch: z.boolean().optional(),
+            targetSearchNetwork: z.boolean().optional(),
+            targetContentNetwork: z.boolean().optional(),
+          })
+          .optional()
+          .describe("Redes. Só as chaves informadas mudam."),
       },
     },
-    async ({ customerId, campaignId, name, status }) => {
+    async ({
+      customerId, campaignId, name, status, biddingStrategy, cpcBidCeilingMicros, targetCpaMicros, targetRoas,
+      targetImpressionShareLocation, locationFractionMicros, networkSettings,
+    }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
       const cid = customerId.replace(/-/g, "");
-
-      const update: Record<string, unknown> = {
-        resourceName: `customers/${cid}/campaigns/${campaignId}`,
-      };
-      const fields: string[] = [];
-      if (name) { update.name = name; fields.push("name"); }
-      if (status) { update.status = status; fields.push("status"); }
-
-      if (fields.length === 0) {
-        return { content: [text("Error: provide at least one field to update.")], isError: true };
+      if (!/^\d+$/.test(campaignId)) {
+        return { content: [text(`campaignId deve ser numérico, recebido "${campaignId}". Nada foi alterado.`)], isError: true };
       }
 
-      const result = await client.mutateCampaigns(customerId, [
-        { update, updateMask: fields.join(",") },
-      ]);
+      // Validação de entrada — antes de qualquer chamada
+      const problems: string[] = [];
+      for (const [label, value] of [["cpcBidCeilingMicros", cpcBidCeilingMicros], ["targetCpaMicros", targetCpaMicros]] as const) {
+        if (value !== undefined && !isPositiveMicros(value)) problems.push(`${label} deve ser inteiro positivo em micros (recebido ${value})`);
+      }
+      if (targetRoas !== undefined && !(targetRoas > 0)) problems.push(`targetRoas deve ser maior que zero (recebido ${targetRoas})`);
+      if (locationFractionMicros !== undefined && !(Number.isInteger(locationFractionMicros) && locationFractionMicros > 0 && locationFractionMicros <= 1_000_000)) {
+        problems.push(`locationFractionMicros deve ficar entre 1 e 1000000 (recebido ${locationFractionMicros})`);
+      }
+      if (problems.length > 0) {
+        return { content: [text(`Nada foi alterado:\n- ${problems.join("\n- ")}`)], isError: true };
+      }
 
+      const client = getClient();
+      const rows = await client.searchStream(customerId,
+        `SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type,
+                campaign.bidding_strategy_type, campaign.bidding_strategy,
+                campaign.target_spend.cpc_bid_ceiling_micros,
+                campaign.maximize_conversions.target_cpa_micros,
+                campaign.maximize_conversion_value.target_roas,
+                campaign.target_cpa.target_cpa_micros,
+                campaign.target_roas.target_roas,
+                campaign.target_impression_share.location,
+                campaign.target_impression_share.location_fraction_micros,
+                campaign.target_impression_share.cpc_bid_ceiling_micros,
+                campaign.network_settings.target_google_search,
+                campaign.network_settings.target_search_network,
+                campaign.network_settings.target_content_network
+         FROM campaign
+         WHERE campaign.id = ${campaignId}`);
+      const campaign = rows[0]?.campaign as Record<string, unknown> | undefined;
+      if (!campaign) {
+        return { content: [text(`Campanha ${campaignId} não encontrada na conta ${cid}. Nada foi alterado.`)], isError: true };
+      }
+      if (campaign.status === "REMOVED") {
+        return { content: [text(`Campanha ${campaignId} ("${campaign.name}") está removida. Nada foi alterado.`)], isError: true };
+      }
+
+      const currentType = String(campaign.biddingStrategyType ?? "");
+      const portfolio = typeof campaign.biddingStrategy === "string" && campaign.biddingStrategy !== "";
+      // Estratégia padrão → campo do oneof campaign_bidding_strategy (REST camelCase, updateMask snake_case).
+      // emptySwitch: o updateMask não pode nomear a mensagem (a API recusa com FIELD_HAS_SUBFIELDS);
+      // para trocar de estratégia sem parâmetro, nomeia-se uma folha dela — a API zera a folha
+      // e o oneof passa para a estratégia nova. TARGET_CPA/TARGET_ROAS são as estratégias
+      // padrão antigas: só dá para ajustar o alvo delas, não trocar para elas.
+      const STRATEGY_FIELDS: Record<string, { json: string; path: string; emptySwitch?: string }> = {
+        TARGET_SPEND: { json: "targetSpend", path: "target_spend", emptySwitch: "target_spend.cpc_bid_ceiling_micros" },
+        MAXIMIZE_CONVERSIONS: { json: "maximizeConversions", path: "maximize_conversions", emptySwitch: "maximize_conversions.target_cpa_micros" },
+        MAXIMIZE_CONVERSION_VALUE: { json: "maximizeConversionValue", path: "maximize_conversion_value", emptySwitch: "maximize_conversion_value.target_roas" },
+        TARGET_IMPRESSION_SHARE: { json: "targetImpressionShare", path: "target_impression_share" },
+        MANUAL_CPC: { json: "manualCpc", path: "manual_cpc", emptySwitch: "manual_cpc.enhanced_cpc_enabled" },
+        TARGET_CPA: { json: "targetCpa", path: "target_cpa" },
+        TARGET_ROAS: { json: "targetRoas", path: "target_roas" },
+      };
+      const strategyAfter = biddingStrategy ?? (portfolio ? "PORTFOLIO" : currentType);
+      const switching = biddingStrategy !== undefined && (biddingStrategy !== currentType || portfolio);
+
+      // Cada parâmetro pertence a uma estratégia
+      const params: Array<{ key: string; value: unknown; strategies: string[]; path: string; jsonValue: unknown }> = [];
+      if (cpcBidCeilingMicros !== undefined) {
+        params.push({ key: "cpcBidCeilingMicros", value: cpcBidCeilingMicros, strategies: ["TARGET_SPEND", "TARGET_IMPRESSION_SHARE"], path: "cpc_bid_ceiling_micros", jsonValue: String(cpcBidCeilingMicros) });
+      }
+      if (targetCpaMicros !== undefined) {
+        params.push({ key: "targetCpaMicros", value: targetCpaMicros, strategies: ["MAXIMIZE_CONVERSIONS", "TARGET_CPA"], path: "target_cpa_micros", jsonValue: String(targetCpaMicros) });
+      }
+      if (targetRoas !== undefined) {
+        params.push({ key: "targetRoas", value: targetRoas, strategies: ["MAXIMIZE_CONVERSION_VALUE", "TARGET_ROAS"], path: "target_roas", jsonValue: targetRoas });
+      }
+      if (targetImpressionShareLocation !== undefined) {
+        params.push({ key: "location", value: targetImpressionShareLocation, strategies: ["TARGET_IMPRESSION_SHARE"], path: "location", jsonValue: targetImpressionShareLocation });
+      }
+      if (locationFractionMicros !== undefined) {
+        params.push({ key: "locationFractionMicros", value: locationFractionMicros, strategies: ["TARGET_IMPRESSION_SHARE"], path: "location_fraction_micros", jsonValue: String(locationFractionMicros) });
+      }
+      if (params.length > 0 && strategyAfter === "PORTFOLIO") {
+        return {
+          content: [text(`Campanha ${campaignId} usa uma estratégia de portfólio (${campaign.biddingStrategy}). Os parâmetros ficam no portfólio; para mudar só esta campanha, informe biddingStrategy. Nada foi alterado.`)],
+          isError: true,
+        };
+      }
+      const misplaced = params.filter((param) => !param.strategies.includes(strategyAfter));
+      if (misplaced.length > 0) {
+        return {
+          content: [text(
+            `Nada foi alterado — parâmetro(s) incompatível(is) com a estratégia ${strategyAfter}:\n` +
+            misplaced.map((param) => `- ${param.key} vale para ${param.strategies.join(" / ")}`).join("\n")
+          )],
+          isError: true,
+        };
+      }
+      if (switching && biddingStrategy === "TARGET_IMPRESSION_SHARE" && (targetImpressionShareLocation === undefined || locationFractionMicros === undefined)) {
+        return {
+          content: [text("TARGET_IMPRESSION_SHARE exige targetImpressionShareLocation e locationFractionMicros. Nada foi alterado.")],
+          isError: true,
+        };
+      }
+
+      const update: Record<string, unknown> = { resourceName: `customers/${cid}/campaigns/${campaignId}` };
+      const mask: string[] = [];
+      const changes: Array<{ setting: string; before: unknown; after: unknown }> = [];
+      const warnings: string[] = [];
+
+      if (name !== undefined && name !== campaign.name) {
+        update.name = name; mask.push("name"); changes.push({ setting: "name", before: campaign.name, after: name });
+      }
+      if (status !== undefined && status !== campaign.status) {
+        update.status = status; mask.push("status"); changes.push({ setting: "status", before: campaign.status, after: status });
+      }
+
+      // Valor atual de cada parâmetro, para não reenviar o que já está igual
+      const currentParam = (strategy: string, key: string): unknown => {
+        const field = STRATEGY_FIELDS[strategy];
+        if (!field) return undefined;
+        const block = (campaign[field.json] ?? {}) as Record<string, unknown>;
+        return block[key];
+      };
+      const field = STRATEGY_FIELDS[strategyAfter];
+      if (switching && field) {
+        const message: Record<string, unknown> = {};
+        for (const param of params) message[param.key] = param.jsonValue;
+        update[field.json] = message;
+        if (params.length > 0) for (const param of params) mask.push(`${field.path}.${param.path}`);
+        else mask.push(field.emptySwitch ?? field.path);
+        changes.push({ setting: "biddingStrategy", before: portfolio ? `PORTFOLIO (${campaign.biddingStrategy})` : currentType, after: biddingStrategy });
+        for (const param of params) changes.push({ setting: param.key, before: undefined, after: param.value });
+        warnings.push("Troca de estratégia reinicia o período de aprendizado do lance automático.");
+      } else if (field && params.length > 0) {
+        const message: Record<string, unknown> = {};
+        for (const param of params) {
+          const before = currentParam(strategyAfter, param.key);
+          if (before !== undefined && String(before) === String(param.jsonValue)) continue;
+          message[param.key] = param.jsonValue;
+          mask.push(`${field.path}.${param.path}`);
+          changes.push({ setting: param.key, before, after: param.value });
+        }
+        if (Object.keys(message).length > 0) update[field.json] = message;
+      }
+      if (strategyAfter === "TARGET_SPEND" && cpcBidCeilingMicros === undefined && switching) {
+        warnings.push("Maximizar cliques sem teto: o Google pode pagar CPCs altos. Considere cpcBidCeilingMicros.");
+      }
+      if (switching && biddingStrategy === "MANUAL_CPC") {
+        warnings.push("CPC manual: o lance real passa a ser o de cada grupo/palavra-chave. Confira com update_ad_group / update_keyword.");
+      }
+      if (cpcBidCeilingMicros !== undefined && cpcBidCeilingMicros < LOW_BID_MICROS) {
+        warnings.push(`Teto de CPC muito baixo (${money(cpcBidCeilingMicros)}): a campanha pode não ganhar leilões.`);
+      }
+
+      if (networkSettings) {
+        const currentNetwork = (campaign.networkSettings ?? {}) as Record<string, unknown>;
+        const NETWORK_PATHS: Record<string, string> = {
+          targetGoogleSearch: "network_settings.target_google_search",
+          targetSearchNetwork: "network_settings.target_search_network",
+          targetContentNetwork: "network_settings.target_content_network",
+        };
+        const networkUpdate: Record<string, boolean> = {};
+        for (const [key, path] of Object.entries(NETWORK_PATHS)) {
+          const value = (networkSettings as Record<string, boolean | undefined>)[key];
+          if (value === undefined || Boolean(currentNetwork[key]) === value) continue;
+          networkUpdate[key] = value;
+          mask.push(path);
+          changes.push({ setting: key, before: Boolean(currentNetwork[key]), after: value });
+        }
+        if (Object.keys(networkUpdate).length > 0) update.networkSettings = networkUpdate;
+      }
+
+      const campaignLine = `Campanha ${campaignId} ("${campaign.name}")`;
+      if (mask.length === 0) {
+        return { content: [text(`${campaignLine}: nada a mudar — os valores pedidos já estão aplicados. Nenhuma escrita foi enviada.`)] };
+      }
+
+      const dryRun = client.isDryRun;
+      try {
+        await client.mutateCampaigns(customerId, [{ update, updateMask: mask.join(",") }]);
+      } catch (err) {
+        return {
+          content: [text(
+            `${campaignLine}: a API não aceitou a alteração.\nErro: ${explainBiddingError((err as Error).message, biddingStrategy)}\n\n` +
+            formatJson({ attempted: changes, update_mask: mask })
+          )],
+          isError: true,
+        };
+      }
       return {
-        content: [text(`Campaign ${campaignId} updated: ${fields.join(", ")}.\n\n${formatJson(result)}`)],
+        content: [text(
+          (dryRun ? `${campaignLine} — DRY-RUN (validateOnly): validado, nada foi gravado.` : `${campaignLine} — ${changes.length} alteração(ões) aplicada(s).`) +
+          `\n\n${formatJson({ changes, warnings, update_mask: mask })}`
+        )],
       };
     }
   );
@@ -1772,7 +2254,11 @@ export function registerGoogleAdsTools(
         cpcBidMicros: z
           .number()
           .optional()
-          .describe("Default CPC bid in MICROS. Only for MANUAL_CPC campaigns."),
+          .describe("CPC do grupo em MICROS. OBRIGATÓRIO quando a campanha usa CPC manual (sem ele o grupo nasce sem lance). Ex: 2500000 = R$2,50."),
+        cpmBidMicros: z
+          .number()
+          .optional()
+          .describe("CPM do grupo em MICROS. Obrigatório quando a campanha usa CPM manual."),
         type: z
           .enum([
             "SEARCH_STANDARD",
@@ -1790,7 +2276,7 @@ export function registerGoogleAdsTools(
           .describe("OPTIONAL override. Default: derived from the campaign's channel type."),
       },
     },
-    async ({ customerId, campaignId, name, cpcBidMicros, type }) => {
+    async ({ customerId, campaignId, name, cpcBidMicros, cpmBidMicros, type }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
@@ -1804,7 +2290,7 @@ export function registerGoogleAdsTools(
       // O type do ad group precisa casar com o canal da campanha — SEARCH_STANDARD dentro
       // de campanha DISPLAY/VIDEO/SHOPPING é recusado pela API. Consulta o canal antes.
       const campRows = await client.searchStream(customerId,
-        `SELECT campaign.id, campaign.advertising_channel_type FROM campaign WHERE campaign.id = ${campaignId} AND campaign.status != 'REMOVED'`);
+        `SELECT campaign.id, campaign.advertising_channel_type, campaign.bidding_strategy_type FROM campaign WHERE campaign.id = ${campaignId} AND campaign.status != 'REMOVED'`);
       const camp = (campRows[0]?.campaign ?? {}) as Record<string, unknown>;
       const channel = camp.advertisingChannelType as string | undefined;
       if (!channel) {
@@ -1849,15 +2335,40 @@ export function registerGoogleAdsTools(
         adGroupData.type = adGroupType;
       }
 
-      if (cpcBidMicros) {
-        adGroupData.cpcBidMicros = String(cpcBidMicros);
+      // Lance manual sem valor faz o grupo nascer sem lance útil (o caso real: grupos com
+      // R$ 0,01 e zero impressão). Nunca envia placeholder: exige o valor ou recusa.
+      const biddingType = String(camp.biddingStrategyType ?? "");
+      for (const [label, value] of [["cpcBidMicros", cpcBidMicros], ["cpmBidMicros", cpmBidMicros]] as const) {
+        if (value !== undefined && !isPositiveMicros(value)) {
+          return { content: [text(`${label} deve ser inteiro positivo em micros (recebido ${value}). Nada foi criado.`)], isError: true };
+        }
       }
+      if ((biddingType === "MANUAL_CPC" || biddingType === "ENHANCED_CPC") && cpcBidMicros === undefined) {
+        return {
+          content: [text(`A campanha ${campaignId} usa CPC manual: informe cpcBidMicros (o lance real do grupo). Nada foi criado.`)],
+          isError: true,
+        };
+      }
+      if (biddingType === "MANUAL_CPM" && cpmBidMicros === undefined) {
+        return {
+          content: [text(`A campanha ${campaignId} usa CPM manual: informe cpmBidMicros. Nada foi criado.`)],
+          isError: true,
+        };
+      }
+      const bidWarnings: string[] = [];
+      if (cpcBidMicros !== undefined) {
+        adGroupData.cpcBidMicros = String(cpcBidMicros);
+        if (cpcBidMicros < LOW_BID_MICROS) bidWarnings.push(`CPC muito baixo (${money(cpcBidMicros)}): o grupo pode não ganhar leilões.`);
+        if (biddingType && !MANUAL_BID_STRATEGIES.has(biddingType)) bidWarnings.push(`A campanha usa ${biddingType}: o lance automático ignora o CPC do grupo.`);
+      }
+      if (cpmBidMicros !== undefined) adGroupData.cpmBidMicros = String(cpmBidMicros);
 
       const result = await client.mutateAdGroups(customerId, [{ create: adGroupData }]);
       return {
         content: [
           text(
             `Ad group created (PAUSED): ${name}\n` +
+              (bidWarnings.length ? `Avisos: ${bidWarnings.join(" ")}\n` : "") +
               `- Campaign channel: ${channel}\n` +
               `- Ad group type: ${adGroupType ?? "(default do canal)"}\n\n${formatJson(result)}`
           ),
@@ -1869,35 +2380,111 @@ export function registerGoogleAdsTools(
   mcp.registerTool(
     "update_ad_group",
     {
-      description: "Update an ad group's name or status.",
+      description: [
+        "Atualiza nome, status, lances e a correspondência de termos do AI Max de um grupo de anúncios.",
+        "WRITE OPERATION — só os campos que mudam são enviados (updateMask exato).",
+        "",
+        "Lances (micros): cpcBidMicros (CPC do grupo — é o lance real em CPC manual e o padrão das",
+        "palavras-chave sem lance próprio), cpmBidMicros (Display/Vídeo em CPM manual),",
+        "targetCpaMicros (CPA alvo do grupo em estratégias de conversão).",
+        "disableSearchTermMatching (AI Max): true desliga a correspondência de termos neste grupo.",
+      ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
         adGroupId: z.string().describe("Ad group ID (numeric)."),
         name: z.string().optional().describe("New name."),
         status: z.enum(["ENABLED", "PAUSED"]).optional().describe("New status."),
+        cpcBidMicros: z.number().optional().describe("CPC do grupo em micros. 2500000 = R$2,50."),
+        cpmBidMicros: z.number().optional().describe("CPM do grupo em micros (Display/Vídeo)."),
+        targetCpaMicros: z.number().optional().describe("CPA alvo do grupo em micros."),
+        disableSearchTermMatching: z.boolean().optional().describe(
+          "AI Max: true desliga a correspondência de termos neste grupo; false religa."
+        ),
       },
     },
-    async ({ customerId, adGroupId, name, status }) => {
+    async ({ customerId, adGroupId, name, status, cpcBidMicros, cpmBidMicros, targetCpaMicros, disableSearchTermMatching }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const cid = customerId.replace(/-/g, "");
-
-      const update: Record<string, unknown> = {
-        resourceName: `customers/${cid}/adGroups/${adGroupId}`,
-      };
-      const fields: string[] = [];
-      if (name) { update.name = name; fields.push("name"); }
-      if (status) { update.status = status; fields.push("status"); }
-
-      if (fields.length === 0) {
+      if (!/^\d+$/.test(adGroupId)) {
+        return { content: [text(`adGroupId deve ser numérico, recebido "${adGroupId}".`)], isError: true };
+      }
+      const problems = ([["cpcBidMicros", cpcBidMicros], ["cpmBidMicros", cpmBidMicros], ["targetCpaMicros", targetCpaMicros]] as const)
+        .filter(([, value]) => value !== undefined && !isPositiveMicros(value))
+        .map(([label, value]) => `${label} deve ser inteiro positivo em micros (recebido ${value})`);
+      if (problems.length > 0) {
+        return { content: [text(`Nada foi alterado:\n- ${problems.join("\n- ")}`)], isError: true };
+      }
+      if ([name, status, cpcBidMicros, cpmBidMicros, targetCpaMicros, disableSearchTermMatching].every((value) => value === undefined)) {
         return { content: [text("Error: provide at least one field.")], isError: true };
       }
 
-      const result = await client.mutateAdGroups(customerId, [
-        { update, updateMask: fields.join(",") },
-      ]);
-      return { content: [text(`Ad group ${adGroupId} updated.\n\n${formatJson(result)}`)] };
+      const client = getClient();
+      const cid = customerId.replace(/-/g, "");
+      const rows = await client.searchStream(customerId,
+        `SELECT ad_group.id, ad_group.name, ad_group.status,
+                ad_group.cpc_bid_micros, ad_group.cpm_bid_micros, ad_group.target_cpa_micros,
+                ad_group.ai_max_ad_group_setting.disable_search_term_matching,
+                campaign.id, campaign.bidding_strategy_type,
+                campaign.maximize_conversions.target_cpa_micros
+         FROM ad_group
+         WHERE ad_group.id = ${adGroupId}`);
+      const adGroup = rows[0]?.adGroup as Record<string, unknown> | undefined;
+      if (!adGroup) {
+        return { content: [text(`Grupo de anúncios ${adGroupId} não encontrado na conta ${cid}. Nada foi alterado.`)], isError: true };
+      }
+      const strategy = String((rows[0]?.campaign as Record<string, unknown> | undefined)?.biddingStrategyType ?? "");
+      const currentDisable = Boolean((adGroup.aiMaxAdGroupSetting as Record<string, unknown> | undefined)?.disableSearchTermMatching);
+
+      const update: Record<string, unknown> = { resourceName: `customers/${cid}/adGroups/${adGroupId}` };
+      const fields: string[] = [];
+      const changes: Array<{ setting: string; before: unknown; after: unknown }> = [];
+      const warnings: string[] = [];
+      const set = (key: string, path: string, value: unknown, before: unknown, sent: unknown = value) => {
+        if (value === undefined || String(before ?? "") === String(value)) return;
+        update[key] = sent;
+        fields.push(path);
+        changes.push({ setting: key, before, after: value });
+      };
+      set("name", "name", name, adGroup.name);
+      set("status", "status", status, adGroup.status);
+      set("cpcBidMicros", "cpc_bid_micros", cpcBidMicros, adGroup.cpcBidMicros, cpcBidMicros !== undefined ? String(cpcBidMicros) : undefined);
+      set("cpmBidMicros", "cpm_bid_micros", cpmBidMicros, adGroup.cpmBidMicros, cpmBidMicros !== undefined ? String(cpmBidMicros) : undefined);
+      set("targetCpaMicros", "target_cpa_micros", targetCpaMicros, adGroup.targetCpaMicros, targetCpaMicros !== undefined ? String(targetCpaMicros) : undefined);
+      if (disableSearchTermMatching !== undefined && disableSearchTermMatching !== currentDisable) {
+        update.aiMaxAdGroupSetting = { disableSearchTermMatching };
+        fields.push("ai_max_ad_group_setting.disable_search_term_matching");
+        changes.push({ setting: "disableSearchTermMatching", before: currentDisable, after: disableSearchTermMatching });
+      }
+
+      if (cpcBidMicros !== undefined && cpcBidMicros < LOW_BID_MICROS) {
+        warnings.push(`CPC muito baixo (${money(cpcBidMicros)}): as palavras-chave sem lance próprio herdam esse valor e podem não ganhar leilões.`);
+      }
+      if (cpcBidMicros !== undefined && strategy && !MANUAL_BID_STRATEGIES.has(strategy)) {
+        warnings.push(`A campanha usa ${strategy}: o lance automático ignora o CPC do grupo.`);
+      }
+      // Pelo proto, o CPA alvo do grupo só vale em TargetCpa ou em MaximizeConversions COM CPA alvo na campanha
+      const campaignTargetCpa = num(
+        ((rows[0]?.campaign as Record<string, unknown> | undefined)?.maximizeConversions as Record<string, unknown> | undefined)?.targetCpaMicros
+      );
+      if (targetCpaMicros !== undefined && strategy && strategy !== "TARGET_CPA" && !(strategy === "MAXIMIZE_CONVERSIONS" && campaignTargetCpa > 0)) {
+        warnings.push(
+          strategy === "MAXIMIZE_CONVERSIONS"
+            ? "A campanha usa Maximizar conversões SEM CPA alvo: o CPA alvo do grupo é ignorado. Defina targetCpaMicros na campanha (update_campaign)."
+            : `A campanha usa ${strategy}: o CPA alvo do grupo só vale em Maximizar conversões com CPA alvo.`
+        );
+      }
+
+      if (fields.length === 0) {
+        return { content: [text(`Grupo ${adGroupId}: nada a mudar — os valores pedidos já estão aplicados. Nenhuma escrita foi enviada.`)] };
+      }
+      const result = await client.mutateAdGroups(customerId, [{ update, updateMask: fields.join(",") }]);
+      const dryRun = client.isDryRun;
+      return {
+        content: [text(
+          (dryRun ? `Grupo ${adGroupId} — DRY-RUN (validateOnly): validado, nada foi gravado.` : `Ad group ${adGroupId} updated.`) +
+          `\n\n${formatJson({ changes, warnings, update_mask: fields, result })}`
+        )],
+      };
     }
   );
 
@@ -2056,6 +2643,216 @@ export function registerGoogleAdsTools(
       ]);
 
       return { content: [text(`Keyword ${criterionId} removed.\n\n${formatJson(result)}`)] };
+    }
+  );
+
+  mcp.registerTool(
+    "update_keyword",
+    {
+      description: [
+        "Ajusta uma palavra-chave existente sem apagá-la (mantém o histórico).",
+        "WRITE OPERATION — só os campos que mudam são enviados.",
+        "",
+        "- cpcBidMicros: lance da palavra-chave em micros (sobrepõe o CPC do grupo)",
+        "- status: ENABLED ou PAUSED",
+        "- finalUrl: URL final própria da palavra-chave; \"\" remove e volta a usar a do anúncio",
+        "O texto e a correspondência não mudam: para isso, crie outra e remova esta.",
+      ].join("\n"),
+      inputSchema: {
+        customerId: z.string().describe("Customer ID."),
+        adGroupId: z.string().describe("ID do grupo de anúncios."),
+        criterionId: z.string().describe("ID da palavra-chave (criterion_id, ver get_keyword_performance)."),
+        cpcBidMicros: z.number().optional().describe("Lance em micros. 2500000 = R$2,50."),
+        status: z.enum(["ENABLED", "PAUSED"]).optional().describe("ENABLED ou PAUSED."),
+        finalUrl: z.string().optional().describe("URL final (http/https); \"\" remove."),
+      },
+    },
+    async ({ customerId, adGroupId, criterionId, cpcBidMicros, status, finalUrl }) => {
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
+      if (blocked) return { content: [blocked], isError: true };
+      if (!/^\d+$/.test(adGroupId) || !/^\d+$/.test(criterionId)) {
+        return { content: [text("adGroupId e criterionId devem ser numéricos. Nada foi alterado.")], isError: true };
+      }
+      if (cpcBidMicros !== undefined && !isPositiveMicros(cpcBidMicros)) {
+        return { content: [text(`cpcBidMicros deve ser inteiro positivo em micros (recebido ${cpcBidMicros}). Nada foi alterado.`)], isError: true };
+      }
+      const url = finalUrl?.trim();
+      if (url && !/^https?:\/\/\S+$/i.test(url)) {
+        return { content: [text(`finalUrl inválida: "${finalUrl}". Use uma URL http(s) completa, ou "" para remover.`)], isError: true };
+      }
+      if (cpcBidMicros === undefined && status === undefined && finalUrl === undefined) {
+        return { content: [text("Informe ao menos um ajuste: cpcBidMicros, status ou finalUrl.")], isError: true };
+      }
+
+      const client = getClient();
+      const cid = customerId.replace(/-/g, "");
+      const rows = await client.searchStream(customerId,
+        `SELECT ad_group_criterion.criterion_id, ad_group_criterion.keyword.text,
+                ad_group_criterion.keyword.match_type, ad_group_criterion.status,
+                ad_group_criterion.negative, ad_group_criterion.cpc_bid_micros,
+                ad_group_criterion.effective_cpc_bid_micros, ad_group_criterion.final_urls,
+                ad_group.id, campaign.bidding_strategy_type
+         FROM ad_group_criterion
+         WHERE ad_group.id = ${adGroupId}
+           AND ad_group_criterion.criterion_id = ${criterionId}
+           AND ad_group_criterion.type = 'KEYWORD'`);
+      const criterion = rows[0]?.adGroupCriterion as Record<string, unknown> | undefined;
+      if (!criterion) {
+        return { content: [text(`Palavra-chave ${criterionId} não encontrada no grupo ${adGroupId} da conta ${cid}. Nada foi alterado.`)], isError: true };
+      }
+      const keyword = (criterion.keyword ?? {}) as Record<string, unknown>;
+      const label = `"${keyword.text}" [${keyword.matchType}]`;
+      if (criterion.status === "REMOVED") {
+        return { content: [text(`A palavra-chave ${label} está removida. Nada foi alterado.`)], isError: true };
+      }
+      if (criterion.negative && (cpcBidMicros !== undefined || finalUrl !== undefined)) {
+        return { content: [text(`${label} é negativa: não tem lance nem URL final. Nada foi alterado.`)], isError: true };
+      }
+      const strategy = String((rows[0]?.campaign as Record<string, unknown> | undefined)?.biddingStrategyType ?? "");
+
+      const update: Record<string, unknown> = { resourceName: `customers/${cid}/adGroupCriteria/${adGroupId}~${criterionId}` };
+      const mask: string[] = [];
+      const changes: Array<{ setting: string; before: unknown; after: unknown }> = [];
+      const warnings: string[] = [];
+      if (cpcBidMicros !== undefined && String(criterion.cpcBidMicros ?? "") !== String(cpcBidMicros)) {
+        update.cpcBidMicros = String(cpcBidMicros);
+        mask.push("cpc_bid_micros");
+        changes.push({ setting: "cpcBidMicros", before: criterion.cpcBidMicros ?? `(herda do grupo: ${money(criterion.effectiveCpcBidMicros)})`, after: cpcBidMicros });
+      }
+      if (status !== undefined && status !== criterion.status) {
+        update.status = status;
+        mask.push("status");
+        changes.push({ setting: "status", before: criterion.status, after: status });
+      }
+      if (finalUrl !== undefined) {
+        const before = ((criterion.finalUrls as string[]) ?? []);
+        const after = url ? [url] : [];
+        if (before.join("|") !== after.join("|")) {
+          update.finalUrls = after;
+          mask.push("final_urls");
+          changes.push({ setting: "finalUrls", before, after });
+        }
+      }
+      if (cpcBidMicros !== undefined && cpcBidMicros < LOW_BID_MICROS) {
+        warnings.push(`Lance muito baixo (${money(cpcBidMicros)}): a palavra-chave pode não ganhar leilões.`);
+      }
+      if (cpcBidMicros !== undefined && strategy && !MANUAL_BID_STRATEGIES.has(strategy)) {
+        warnings.push(`A campanha usa ${strategy}: o lance automático ignora o lance da palavra-chave.`);
+      }
+
+      if (mask.length === 0) {
+        return { content: [text(`${label}: nada a mudar — os valores pedidos já estão aplicados. Nenhuma escrita foi enviada.`)] };
+      }
+      const result = await client.mutateAdGroupCriteria(customerId, [{ update, updateMask: mask.join(",") }]);
+      const dryRun = client.isDryRun;
+      return {
+        content: [text(
+          (dryRun ? `${label} — DRY-RUN (validateOnly): validado, nada foi gravado.` : `${label} atualizada.`) +
+          `\n\n${formatJson({ changes, warnings, update_mask: mask, result })}`
+        )],
+      };
+    }
+  );
+
+  mcp.registerTool(
+    "remove_negative_keyword",
+    {
+      description: [
+        "Remove palavras-chave negativas de uma campanha.",
+        "WRITE OPERATION — reversível: é só adicionar de novo com add_negative_keyword.",
+        "",
+        "Identifique por criterionIds (ver list_negative_keywords) ou por keywords [{text, matchType}].",
+        "Só remove negativas de nível de campanha; listas compartilhadas não são tocadas.",
+      ].join("\n"),
+      inputSchema: {
+        customerId: z.string().describe("Customer ID."),
+        campaignId: z.string().describe("Campaign ID."),
+        criterionIds: flexArray(z.string()).optional().describe("IDs das negativas (campaign_criterion.criterion_id)."),
+        keywords: z
+          .array(z.object({ text: z.string(), matchType: z.enum(["EXACT", "PHRASE", "BROAD"]) }))
+          .optional()
+          .describe("Negativas por texto + correspondência."),
+      },
+    },
+    async ({ customerId, campaignId, criterionIds, keywords }) => {
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
+      if (blocked) return { content: [blocked], isError: true };
+      if (!/^\d+$/.test(campaignId)) {
+        return { content: [text(`campaignId deve ser numérico, recebido "${campaignId}". Nada foi removido.`)], isError: true };
+      }
+      const ids = ensureArray<string>(criterionIds).map((id) => String(id).trim()).filter(Boolean);
+      const byText = keywords ?? [];
+      if (ids.length === 0 && byText.length === 0) {
+        return { content: [text("Informe criterionIds ou keywords. Nada foi removido.")], isError: true };
+      }
+      const badIds = ids.filter((id) => !/^\d+$/.test(id));
+      if (badIds.length > 0) {
+        return { content: [text(`criterionIds devem ser numéricos: ${badIds.join(", ")}. Nada foi removido.`)], isError: true };
+      }
+
+      const client = getClient();
+      const cid = customerId.replace(/-/g, "");
+      const rows = await client.searchStream(customerId,
+        `SELECT campaign.id, campaign_criterion.criterion_id, campaign_criterion.resource_name,
+                campaign_criterion.keyword.text, campaign_criterion.keyword.match_type
+         FROM campaign_criterion
+         WHERE campaign.id = ${campaignId}
+           AND campaign_criterion.type = 'KEYWORD'
+           AND campaign_criterion.negative = true`);
+      const negatives = rows.map((row) => {
+        const criterion = (row.campaignCriterion ?? {}) as Record<string, unknown>;
+        const keyword = (criterion.keyword ?? {}) as Record<string, unknown>;
+        return {
+          criterion_id: String(criterion.criterionId ?? ""),
+          resource_name: String(criterion.resourceName ?? ""),
+          text: String(keyword.text ?? ""),
+          match_type: String(keyword.matchType ?? ""),
+        };
+      });
+      const normalize = (value: string) => value.trim().toLowerCase();
+      const targets = new Map<string, (typeof negatives)[number]>();
+      const notFound: string[] = [];
+      for (const id of ids) {
+        const found = negatives.find((negative) => negative.criterion_id === id);
+        if (found) targets.set(found.resource_name, found);
+        else notFound.push(`criterionId ${id}`);
+      }
+      for (const wanted of byText) {
+        const found = negatives.find((negative) => normalize(negative.text) === normalize(wanted.text) && negative.match_type === wanted.matchType);
+        if (found) targets.set(found.resource_name, found);
+        else notFound.push(`-[${wanted.matchType}] "${wanted.text}"`);
+      }
+      const toRemove = [...targets.values()];
+      if (toRemove.length === 0) {
+        return {
+          content: [text(`Nenhuma das negativas pedidas existe na campanha ${campaignId}. Nada foi removido.\nNão encontradas: ${notFound.join(", ")}`)],
+          isError: true,
+        };
+      }
+
+      const response = await client.mutate(customerId, "campaignCriteria", toRemove.map((negative) => ({ remove: negative.resource_name })), { partialFailure: true });
+      const dryRun = client.isDryRun;
+      const results = (response.results as Array<Record<string, unknown>>) ?? [];
+      const { byIndex, unattributed } = partialFailureByOperation(response.partialFailureError, toRemove.length);
+      const removed: Array<Record<string, unknown>> = [];
+      const errors: Array<Record<string, unknown>> = [];
+      toRemove.forEach((negative, index) => {
+        const opErrors = byIndex.get(index);
+        const describe = { criterion_id: negative.criterion_id, keyword: `-[${negative.match_type}] "${negative.text}"` };
+        if (opErrors) errors.push({ ...describe, error: opErrors.join("; ") });
+        else if (!dryRun && !results[index]?.resourceName) errors.push({ ...describe, error: "a API não confirmou a remoção" });
+        else removed.push(describe);
+      });
+      for (const message of unattributed) errors.push({ error: message });
+
+      return {
+        content: [text(
+          (dryRun ? `Campanha ${campaignId} — DRY-RUN (validateOnly): nada foi removido. Validadas: ${removed.length}` : `Campanha ${campaignId}: ${removed.length} negativa(s) removida(s)`) +
+          ` | Não encontradas: ${notFound.length} | Com erro: ${errors.length}\n\n` +
+          formatJson({ [dryRun ? "validated" : "removed"]: removed, not_found: notFound, errors })
+        )],
+        isError: errors.length > 0,
+      };
     }
   );
 
@@ -2614,6 +3411,425 @@ export function registerGoogleAdsTools(
     }
   );
 
+  // ── AI Max (Pesquisa e Shopping) ───────────────────────────────────
+
+  mcp.registerTool(
+    "set_ai_max_settings",
+    {
+      description: [
+        "Liga/desliga o AI Max numa campanha e ajusta os controles dele.",
+        "WRITE OPERATION — altera só as configurações informadas; não mexe em orçamento, lances,",
+        "segmentação nem palavras-chave.",
+        "",
+        "- enableAiMax: liga/desliga o AI Max (Pesquisa e Shopping).",
+        "- textCustomization: personalização de texto (TEXT_ASSET_AUTOMATION). Só Pesquisa — em Shopping",
+        "  ela vem sempre ligada junto com o AI Max.",
+        "- finalUrlExpansion: expansão de URL final (FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION).",
+        "- termExclusions: palavras que os textos gerados não podem usar. SUBSTITUI a lista; [] limpa.",
+        "  Máx. 25, até 30 caracteres cada.",
+        "- messagingRestrictions: instruções do que os textos gerados não podem dizer. SUBSTITUI a lista;",
+        "  [] limpa. Máx. 40, até 300 caracteres cada.",
+        "",
+        "A correspondência de termos é por grupo de anúncios: update_ad_group com disableSearchTermMatching.",
+        "Com AI Max ligado, a API trata as palavras-chave como correspondência ampla.",
+        "Valor igual ao atual não é reenviado. Com GOOGLE_ADS_DRY_RUN=true a API só valida.",
+        "Para medir o efeito: get_ai_max_report.",
+      ].join("\n"),
+      inputSchema: {
+        customerId: z.string().describe("Customer ID."),
+        campaignId: z.string().describe("ID numérico da campanha (Pesquisa ou Shopping)."),
+        enableAiMax: z.boolean().optional().describe("true liga, false desliga o AI Max."),
+        textCustomization: z.boolean().optional().describe("Personalização de texto: true = OPTED_IN, false = OPTED_OUT."),
+        finalUrlExpansion: z.boolean().optional().describe("Expansão de URL final: true = OPTED_IN, false = OPTED_OUT."),
+        termExclusions: flexArray(z.string()).optional().describe(
+          "Lista COMPLETA de termos excluídos dos textos gerados (substitui a atual; [] limpa)."
+        ),
+        messagingRestrictions: flexArray(z.string()).optional().describe(
+          "Lista COMPLETA de restrições de mensagem (substitui a atual; [] limpa). Ex: \"não mencionar frete grátis\"."
+        ),
+      },
+    },
+    async ({ customerId, campaignId, enableAiMax, textCustomization, finalUrlExpansion, termExclusions, messagingRestrictions }) => {
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
+      if (blocked) return { content: [blocked], isError: true };
+      const cid = customerId.replace(/-/g, "");
+      if (!/^\d+$/.test(cid)) {
+        return { content: [text(`customerId inválido: "${customerId}". Nada foi alterado.`)], isError: true };
+      }
+      if (!/^\d+$/.test(campaignId)) {
+        return { content: [text(`campaignId deve ser numérico, recebido "${campaignId}". Nada foi alterado.`)], isError: true };
+      }
+
+      // flexArray aceita string JSON sem validar os itens: um objeto viraria "[object Object]"
+      // e substituiria a lista inteira. Só texto passa ({restrictionText} vira o texto).
+      const problems: string[] = [];
+      const cleanList = (value: unknown, label: string, acceptRestrictionObjects: boolean) => {
+        const seen = new Set<string>();
+        const out: string[] = [];
+        for (const entry of ensureArray<unknown>(value)) {
+          const raw =
+            typeof entry === "string" ? entry
+            : acceptRestrictionObjects && entry && typeof entry === "object" && typeof (entry as Record<string, unknown>).restrictionText === "string"
+              ? String((entry as Record<string, unknown>).restrictionText)
+              : undefined;
+          if (raw === undefined) {
+            problems.push(`${label}: item inválido ${JSON.stringify(entry)} — use só texto`);
+            continue;
+          }
+          const item = raw.trim();
+          if (item && !seen.has(item)) { seen.add(item); out.push(item); }
+        }
+        return out;
+      };
+      const terms = termExclusions === undefined ? undefined : cleanList(termExclusions, "termExclusions", false);
+      const restrictions = messagingRestrictions === undefined ? undefined : cleanList(messagingRestrictions, "messagingRestrictions", true);
+
+      // Limites documentados no proto — recusados antes de qualquer chamada
+      if (terms && terms.length > MAX_TERM_EXCLUSIONS) {
+        problems.push(`termExclusions: ${terms.length} termos (máx. ${MAX_TERM_EXCLUSIONS})`);
+      }
+      for (const term of terms ?? []) {
+        if (term.length > MAX_TERM_EXCLUSION_CHARS) {
+          problems.push(`termExclusions: "${term}" tem ${term.length} caracteres (máx. ${MAX_TERM_EXCLUSION_CHARS})`);
+        }
+      }
+      if (restrictions && restrictions.length > MAX_MESSAGING_RESTRICTIONS) {
+        problems.push(`messagingRestrictions: ${restrictions.length} restrições (máx. ${MAX_MESSAGING_RESTRICTIONS})`);
+      }
+      for (const restriction of restrictions ?? []) {
+        if (restriction.length > MAX_MESSAGING_RESTRICTION_CHARS) {
+          problems.push(`messagingRestrictions: uma restrição tem ${restriction.length} caracteres (máx. ${MAX_MESSAGING_RESTRICTION_CHARS})`);
+        }
+      }
+      if (problems.length > 0) {
+        return { content: [text(`Nada foi alterado:\n- ${problems.join("\n- ")}`)], isError: true };
+      }
+      if ([enableAiMax, textCustomization, finalUrlExpansion, terms, restrictions].every((value) => value === undefined)) {
+        return { content: [text("Informe ao menos um ajuste (enableAiMax, textCustomization, finalUrlExpansion, termExclusions ou messagingRestrictions).")], isError: true };
+      }
+
+      const client = getClient();
+      const rows = await client.searchStream(customerId,
+        `SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type,
+                campaign.ai_max_setting.enable_ai_max, campaign.ai_max_setting.bundling_required,
+                campaign.asset_automation_settings,
+                campaign.text_guidelines.term_exclusions, campaign.text_guidelines.messaging_restrictions
+         FROM campaign
+         WHERE campaign.id = ${campaignId}`);
+      const campaign = rows[0]?.campaign as Record<string, unknown> | undefined;
+      if (!campaign) {
+        return { content: [text(`Campanha ${campaignId} não encontrada na conta ${cid}. Nada foi alterado.`)], isError: true };
+      }
+      const channel = String(campaign.advertisingChannelType ?? "");
+      if (channel !== "SEARCH" && channel !== "SHOPPING") {
+        return {
+          content: [text(`Campanha ${campaignId} ("${campaign.name}") é ${channel}. AI Max só existe em Pesquisa e Shopping. Nada foi alterado.`)],
+          isError: true,
+        };
+      }
+      if (campaign.status === "REMOVED") {
+        return { content: [text(`Campanha ${campaignId} ("${campaign.name}") está removida. Nada foi alterado.`)], isError: true };
+      }
+      if (channel === "SHOPPING" && textCustomization !== undefined) {
+        return {
+          content: [text("Em Shopping a personalização de texto vem sempre ligada junto com o AI Max; não há como ajustá-la separadamente. Nada foi alterado.")],
+          isError: true,
+        };
+      }
+
+      const aiMax = (campaign.aiMaxSetting ?? {}) as Record<string, unknown>;
+      const guidelines = (campaign.textGuidelines ?? {}) as Record<string, unknown>;
+      const current = {
+        enableAiMax: Boolean(aiMax.enableAiMax),
+        bundlingRequired: aiMax.bundlingRequired as string | undefined,
+        automation: ((campaign.assetAutomationSettings as Array<Record<string, unknown>>) ?? []).map((setting) => ({
+          assetAutomationType: String(setting.assetAutomationType ?? ""),
+          assetAutomationStatus: String(setting.assetAutomationStatus ?? ""),
+        })),
+        termExclusions: ((guidelines.termExclusions as string[]) ?? []).map(String),
+        messagingRestrictions: ((guidelines.messagingRestrictions as Array<Record<string, unknown>>) ?? [])
+          .map((restriction) => String(restriction.restrictionText ?? "")),
+      };
+      const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((item, i) => item === b[i]);
+
+      const update: Record<string, unknown> = { resourceName: `customers/${cid}/campaigns/${campaignId}` };
+      const mask: string[] = [];
+      const changes: Array<{ setting: string; before: unknown; after: unknown }> = [];
+      const unchanged: string[] = [];
+
+      if (enableAiMax !== undefined) {
+        if (enableAiMax === current.enableAiMax) {
+          unchanged.push(`AI Max (${enableAiMax ? "ligado" : "desligado"})`);
+        } else {
+          update.aiMaxSetting = { enableAiMax };
+          mask.push("ai_max_setting.enable_ai_max");
+          changes.push({ setting: "AI Max", before: current.enableAiMax, after: enableAiMax });
+        }
+      }
+
+      // asset_automation_settings é repetido: o updateMask substitui a lista inteira,
+      // então os tipos que não estamos mexendo são reenviados como estão.
+      let automation = current.automation.map((setting) => ({ ...setting }));
+      let automationChanged = false;
+      const automationRequests: Array<[string, boolean | undefined, string]> = [
+        ["TEXT_ASSET_AUTOMATION", textCustomization, "Personalização de texto"],
+        ["FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION", finalUrlExpansion, "Expansão de URL final"],
+      ];
+      for (const [type, value, label] of automationRequests) {
+        if (value === undefined) continue;
+        const status = value ? "OPTED_IN" : "OPTED_OUT";
+        const before = current.automation.find((setting) => setting.assetAutomationType === type)?.assetAutomationStatus;
+        if (before === status) {
+          unchanged.push(`${label} (${status})`);
+          continue;
+        }
+        automation = automation
+          .filter((setting) => setting.assetAutomationType !== type)
+          .concat([{ assetAutomationType: type, assetAutomationStatus: status }]);
+        automationChanged = true;
+        changes.push({ setting: label, before: before ?? "padrão da API (não definido)", after: status });
+      }
+      if (automationChanged) {
+        update.assetAutomationSettings = automation;
+        mask.push("asset_automation_settings");
+      }
+
+      const textGuidelines: Record<string, unknown> = {};
+      if (terms !== undefined) {
+        if (sameList(terms, current.termExclusions)) {
+          unchanged.push("Termos excluídos");
+        } else {
+          textGuidelines.termExclusions = terms;
+          mask.push("text_guidelines.term_exclusions");
+          changes.push({ setting: "Termos excluídos", before: current.termExclusions, after: terms });
+        }
+      }
+      if (restrictions !== undefined) {
+        if (sameList(restrictions, current.messagingRestrictions)) {
+          unchanged.push("Restrições de mensagem");
+        } else {
+          textGuidelines.messagingRestrictions = restrictions.map((restrictionText) => ({
+            restrictionText,
+            restrictionType: "RESTRICTION_BASED_EXCLUSION",
+          }));
+          mask.push("text_guidelines.messaging_restrictions");
+          changes.push({ setting: "Restrições de mensagem", before: current.messagingRestrictions, after: restrictions });
+        }
+      }
+      if (Object.keys(textGuidelines).length > 0) update.textGuidelines = textGuidelines;
+
+      const campaignLine = `Campanha ${campaignId} ("${campaign.name}", ${channel})`;
+      const warnings: string[] = [];
+      const aiMaxAfter = enableAiMax ?? current.enableAiMax;
+      const touchesControls = automationChanged || Object.keys(textGuidelines).length > 0;
+      if (!aiMaxAfter && touchesControls && current.bundlingRequired === "REQUIRED") {
+        warnings.push("Esta campanha exige AI Max ligado para mudar personalização de texto e diretrizes (bundling_required = REQUIRED); a API deve recusar com AI_MAX_MUST_BE_ENABLED.");
+      }
+      if (enableAiMax === false && current.enableAiMax && current.bundlingRequired === "REQUIRED") {
+        warnings.push("Com bundling_required = REQUIRED, desligar o AI Max também para de veicular a personalização de texto e as listas de marca desta campanha.");
+      }
+
+      if (mask.length === 0) {
+        return {
+          content: [text(
+            `${campaignLine}: nada a mudar — os valores pedidos já estão aplicados. Nenhuma escrita foi enviada.\n\n` +
+            formatJson({ unchanged, current })
+          )],
+        };
+      }
+
+      const dryRun = client.isDryRun;
+      try {
+        await client.mutateCampaigns(customerId, [{ update, updateMask: mask.join(",") }]);
+      } catch (err) {
+        return {
+          content: [text(
+            `${campaignLine}: a API não aceitou a alteração.\nErro: ${(err as Error).message}\n` +
+            "Confira o estado atual antes de repetir (get_ai_max_report ou run_gaql em campaign.ai_max_setting).\n\n" +
+            formatJson({ attempted: changes, update_mask: mask, warnings })
+          )],
+          isError: true,
+        };
+      }
+
+      const header = dryRun
+        ? `${campaignLine} — DRY-RUN (validateOnly): a API validou, nada foi gravado.`
+        : `${campaignLine} — ${changes.length} ajuste(s) aplicado(s).`;
+      return {
+        content: [text(
+          `${header}\n\n` +
+          formatJson({ changes, unchanged, warnings, update_mask: mask }) +
+          (dryRun ? "\n\nPara gravar de verdade, rode sem GOOGLE_ADS_DRY_RUN." : "\n\nMeça o efeito com get_ai_max_report.")
+        )],
+      };
+    }
+  );
+
+  mcp.registerTool(
+    "get_ai_max_report",
+    {
+      description: [
+        "Relatório do AI Max em campanhas de Pesquisa. READ OPERATION.",
+        "",
+        "view='search_terms' (default): termos que vieram do AI Max — AI_MAX_KEYWORDLESS (sem palavra-chave,",
+        "  a partir do site/landing pages) e AI_MAX_BROAD_MATCH (expansão da palavra-chave) —, mais um resumo",
+        "  por origem comparando com os termos das palavras-chave do anunciante.",
+        "view='combinations': termo × landing page × títulos que o AI Max montou",
+        "  (ai_max_search_term_ad_combination_view). Título que não conversa com o termo = falta asset.",
+        "view='landing_pages': URLs finais do tráfego em campanhas com AI Max, separando as definidas pelo",
+        "  anunciante (ADVERTISER) das escolhidas automaticamente pela expansão de URL (AUTOMATIC).",
+        "",
+        "ATENÇÃO: as views se sobrepõem — nunca some métricas entre elas. Termos de baixo volume ficam fora",
+        "por privacidade, então os totais ficam abaixo do total da campanha.",
+      ].join("\n"),
+      inputSchema: {
+        customerId: z.string().describe("Customer ID."),
+        campaignId: z.string().optional().describe("Filtra por campanha."),
+        view: z.enum(["search_terms", "combinations", "landing_pages"]).optional().describe("Default: search_terms."),
+        dateRange: dateRangeSchema.describe(DATE_RANGE_DESC),
+        days: z.number().optional().describe(DAYS_DESC),
+        limit: z.number().optional().describe("Máx. de linhas listadas (o resumo considera todas). Default: 50."),
+        format: formatSchema,
+      },
+    },
+    async ({ customerId, campaignId, view, dateRange, days, limit, format }) => {
+      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
+      if (blocked) return { content: [blocked], isError: true };
+      if (campaignId !== undefined && !/^\d+$/.test(campaignId)) {
+        return { content: [text(`campaignId deve ser numérico, recebido "${campaignId}".`)], isError: true };
+      }
+      const client = getClient();
+      const dateClause = buildDateClause(dateRange, days);
+      const maxRows = Math.max(1, Math.min(Math.floor(limit ?? 50), 10000));
+      const mode = view ?? "search_terms";
+      const caveat = "Não some métricas entre as views do AI Max (elas se sobrepõem). Termos de baixo volume ficam fora por privacidade.";
+      const render = (rows: Array<Record<string, unknown>>, header: string, extra: Record<string, unknown>) => {
+        if (format === "table") return { content: [text(formatAsTable(rows))] };
+        if (format === "csv") return { content: [text(formatAsCsv(rows))] };
+        return { content: [text(`${header}\n${caveat}\n\n${formatJson({ ...extra, rows })}`)] };
+      };
+
+      if (mode === "combinations") {
+        // campaign e ad_group são recursos atribuídos desta view: podem ir no WHERE sem estar no SELECT
+        const results = await client.searchStream(customerId,
+          `SELECT campaign.id, campaign.name, ad_group.id, ad_group.name,
+                  ai_max_search_term_ad_combination_view.search_term,
+                  ai_max_search_term_ad_combination_view.landing_page,
+                  ai_max_search_term_ad_combination_view.headline,
+                  metrics.impressions, metrics.clicks, metrics.cost_micros,
+                  metrics.conversions, metrics.conversions_value
+           FROM ai_max_search_term_ad_combination_view
+           WHERE ${dateClause}
+             ${campaignId ? `AND campaign.id = ${campaignId}` : ""}
+           ORDER BY metrics.cost_micros DESC
+           LIMIT ${maxRows}`);
+        const rows = results.map((r) => {
+          const combo = (r.aiMaxSearchTermAdCombinationView ?? {}) as Record<string, unknown>;
+          return {
+            campaign: (r.campaign as Record<string, unknown> | undefined)?.name,
+            ad_group: (r.adGroup as Record<string, unknown> | undefined)?.name,
+            search_term: combo.searchTerm,
+            landing_page: combo.landingPage,
+            headline: combo.headline,
+            ...metricsView(addMetrics(emptyTotals(), r.metrics as Record<string, unknown>)),
+          };
+        });
+        return render(rows, `${rows.length} combinação(ões) termo × landing page × título do AI Max.`, {});
+      }
+
+      if (mode === "landing_pages") {
+        // campaign é recurso de SEGMENTAÇÃO em expanded_landing_page_view: todo campo dele
+        // usado no WHERE também está no SELECT
+        const campaignFilter = campaignId
+          ? `AND campaign.id = ${campaignId}`
+          : "AND campaign.ai_max_setting.enable_ai_max = TRUE";
+        const results = await client.searchStream(customerId,
+          `SELECT campaign.id, campaign.name, campaign.ai_max_setting.enable_ai_max,
+                  expanded_landing_page_view.expanded_final_url,
+                  segments.landing_page_source,
+                  metrics.impressions, metrics.clicks, metrics.cost_micros,
+                  metrics.conversions, metrics.conversions_value
+           FROM expanded_landing_page_view
+           WHERE ${dateClause}
+             ${campaignFilter}`);
+        const bySource = new Map<string, MetricTotals>();
+        const rows = results.map((r) => {
+          const source = String((r.segments as Record<string, unknown> | undefined)?.landingPageSource ?? "UNKNOWN");
+          bySource.set(source, addMetrics(bySource.get(source) ?? emptyTotals(), r.metrics as Record<string, unknown>));
+          return {
+            campaign: (r.campaign as Record<string, unknown> | undefined)?.name,
+            final_url: (r.expandedLandingPageView as Record<string, unknown> | undefined)?.expandedFinalUrl,
+            source,
+            costMicros: num((r.metrics as Record<string, unknown> | undefined)?.costMicros),
+            ...metricsView(addMetrics(emptyTotals(), r.metrics as Record<string, unknown>)),
+          };
+        }).sort((a, b) => b.costMicros - a.costMicros).slice(0, maxRows).map(({ costMicros: _cost, ...row }) => row);
+        const summary = Object.fromEntries([...bySource.entries()].map(([source, totals]) => [source, metricsView(totals)]));
+        return render(
+          rows,
+          `${rows.length} URL(s) final(is). AUTOMATIC = escolhida pela expansão de URL do AI Max; ADVERTISER = definida por você.`,
+          { summary_by_source: summary }
+        );
+      }
+
+      // search_terms: uma consulta cobre as linhas e o resumo por origem
+      const results = await client.searchStream(customerId,
+        `SELECT campaign.id, campaign.name, ad_group.name,
+                search_term_view.search_term, segments.search_term_match_source,
+                metrics.impressions, metrics.clicks, metrics.cost_micros,
+                metrics.conversions, metrics.conversions_value
+         FROM search_term_view
+         WHERE ${dateClause}
+           ${campaignId ? `AND campaign.id = ${campaignId}` : ""}
+           AND metrics.impressions > 0`);
+      const bySource = new Map<string, MetricTotals>();
+      const aiMaxRows: Array<Record<string, unknown> & { costMicros: number }> = [];
+      for (const r of results) {
+        const source = String((r.segments as Record<string, unknown> | undefined)?.searchTermMatchSource ?? "UNKNOWN");
+        const metrics = r.metrics as Record<string, unknown> | undefined;
+        bySource.set(source, addMetrics(bySource.get(source) ?? emptyTotals(), metrics));
+        if (!AI_MAX_MATCH_SOURCES.includes(source)) continue;
+        aiMaxRows.push({
+          campaign: (r.campaign as Record<string, unknown> | undefined)?.name,
+          ad_group: (r.adGroup as Record<string, unknown> | undefined)?.name,
+          search_term: (r.searchTermView as Record<string, unknown> | undefined)?.searchTerm,
+          match_source: source,
+          costMicros: num(metrics?.costMicros),
+          ...metricsView(addMetrics(emptyTotals(), metrics)),
+        });
+      }
+      const rows = aiMaxRows
+        .sort((a, b) => b.costMicros - a.costMicros)
+        .slice(0, maxRows)
+        .map(({ costMicros: _cost, ...row }) => row);
+      const summary = Object.fromEntries([...bySource.entries()].map(([source, totals]) => [source, metricsView(totals)]));
+      const aiMaxTotal = AI_MAX_MATCH_SOURCES.reduce(
+        (totals, source) => {
+          const part = bySource.get(source);
+          if (!part) return totals;
+          totals.impressions += part.impressions;
+          totals.clicks += part.clicks;
+          totals.costMicros += part.costMicros;
+          totals.conversions += part.conversions;
+          totals.conversionsValue += part.conversionsValue;
+          return totals;
+        },
+        emptyTotals()
+      );
+      const allTotal = [...bySource.values()].reduce((totals, part) => {
+        totals.costMicros += part.costMicros;
+        return totals;
+      }, emptyTotals());
+      const aiMaxShare = allTotal.costMicros ? round2((aiMaxTotal.costMicros / allTotal.costMicros) * 100) : 0;
+      return render(
+        rows,
+        `${aiMaxRows.length} termo(s) vindos do AI Max (${rows.length} listado(s)). ` +
+          `AI Max = ${aiMaxShare}% do gasto dos termos reportados no período.`,
+        { summary_by_source: summary, ai_max_total: metricsView(aiMaxTotal) }
+      );
+    }
+  );
+
   mcp.registerTool(
     "create_pmax_campaign",
     {
@@ -3068,7 +4284,7 @@ export function registerGoogleAdsTools(
       };
       if (strategy === "MAXIMIZE_CONVERSION_VALUE") campaignData.maximizeConversionValue = {};
       else if (strategy === "TARGET_CPA") campaignData.maximizeConversions = { targetCpaMicros: String(targetCpaMicros) };
-      else if (strategy === "MANUAL_CPC") campaignData.manualCpc = { enhancedCpcEnabled: true };
+      else if (strategy === "MANUAL_CPC") campaignData.manualCpc = {}; // sem Enhanced CPC (descontinuado)
       // else final: MAXIMIZE_CONVERSIONS (default) e qualquer valor novo do enum —
       // garante que campaignData nunca sai sem estratégia de lance.
       else campaignData.maximizeConversions = {};
@@ -3331,7 +4547,7 @@ export function registerGoogleAdsTools(
         networkSettings: { targetGoogleSearch: true, targetSearchNetwork: true, targetContentNetwork: false },
       };
       if (strategy === "MAXIMIZE_CONVERSIONS") campaignData.maximizeConversions = {};
-      else if (strategy === "MANUAL_CPC") campaignData.manualCpc = { enhancedCpcEnabled: true };
+      else if (strategy === "MANUAL_CPC") campaignData.manualCpc = {}; // sem Enhanced CPC (descontinuado)
       else if (strategy === "TARGET_ROAS") campaignData.maximizeConversionValue = { targetRoas };
       // else final: MAXIMIZE_CONVERSION_VALUE (default) e qualquer valor novo do enum —
       // garante que campaignData nunca sai sem estratégia de lance.
@@ -5242,27 +6458,76 @@ export function registerGoogleAdsTools(
     async ({ customerId, campaignId, goals }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
+      if (!/^\d+$/.test(campaignId)) {
+        return { content: [text(`campaignId deve ser numérico, recebido "${campaignId}". Nada foi alterado.`)], isError: true };
+      }
       const client = getClient();
       const cid = customerId.replace(/-/g, "");
 
-      const operations = goals.map((g) => {
-        const category = resolveEnumAlias(g.category, CONVERSION_CATEGORY_ALIASES);
-        const origin = g.origin ?? "WEBSITE";
+      // Só existem as metas (categoria × origem) que a conta tem: um par inexistente
+      // dava "Resource was not found". Lê as da campanha e muta só as que existem.
+      const rows = await client.searchStream(customerId,
+        `SELECT campaign.id, campaign_conversion_goal.category, campaign_conversion_goal.origin,
+                campaign_conversion_goal.biddable
+         FROM campaign_conversion_goal
+         WHERE campaign.id = ${campaignId}`);
+      const existing = new Map<string, boolean>();
+      for (const row of rows) {
+        const goal = (row.campaignConversionGoal ?? {}) as Record<string, unknown>;
+        existing.set(`${goal.category}~${goal.origin}`, Boolean(goal.biddable));
+      }
+      if (existing.size === 0) {
         return {
-          update: {
-            resourceName: `customers/${cid}/campaignConversionGoals/${campaignId}~${category}~${origin}`,
-            biddable: g.biddable,
-          },
-          updateMask: "biddable",
+          content: [text(`A campanha ${campaignId} não tem metas de conversão na conta ${cid} (ou não existe). Nada foi alterado.`)],
+          isError: true,
         };
-      });
+      }
 
+      const requested = goals.map((g) => ({
+        category: resolveEnumAlias(g.category, CONVERSION_CATEGORY_ALIASES),
+        origin: g.origin ?? "WEBSITE",
+        biddable: g.biddable,
+      }));
+      const unknown = requested.filter((g) => !existing.has(`${g.category}~${g.origin}`));
+      if (unknown.length > 0) {
+        const valid = [...existing.entries()].map(([key, biddable]) => {
+          const [category, origin] = key.split("~");
+          return `${category} (${origin}): ${biddable ? "lance" : "observação"}`;
+        });
+        return {
+          content: [text(
+            `Nada foi alterado — par(es) categoria/origem que não existem nesta campanha:\n` +
+            unknown.map((g) => `- ${g.category} (${g.origin})`).join("\n") +
+            `\n\nPares válidos da campanha ${campaignId}:\n- ${valid.join("\n- ")}`
+          )],
+          isError: true,
+        };
+      }
+
+      const toChange = requested.filter((g) => existing.get(`${g.category}~${g.origin}`) !== g.biddable);
+      const unchanged = requested.filter((g) => !toChange.includes(g)).map((g) => `${g.category} (${g.origin})`);
+      if (toChange.length === 0) {
+        return { content: [text(`Campanha ${campaignId}: nada a mudar — as metas já estão assim. Nenhuma escrita foi enviada.`)] };
+      }
+      const operations = toChange.map((g) => ({
+        update: {
+          resourceName: `customers/${cid}/campaignConversionGoals/${campaignId}~${g.category}~${g.origin}`,
+          biddable: g.biddable,
+        },
+        updateMask: "biddable",
+      }));
       const result = await client.mutateCampaignConversionGoals(customerId, operations);
-
-      const summary = goals
-        .map((g) => `${resolveEnumAlias(g.category, CONVERSION_CATEGORY_ALIASES)} (${g.origin ?? "WEBSITE"}): ${g.biddable ? "lance" : "observação"}`)
+      const dryRun = client.isDryRun;
+      const summary = toChange
+        .map((g) => `${g.category} (${g.origin}): ${existing.get(`${g.category}~${g.origin}`) ? "lance" : "observação"} → ${g.biddable ? "lance" : "observação"}`)
         .join("\n");
-      return { content: [text(`Metas de conversão da campanha ${campaignId} atualizadas:\n${summary}\n\n${formatJson(result)}`)] };
+      return {
+        content: [text(
+          (dryRun ? `Campanha ${campaignId} — DRY-RUN (validateOnly): validado, nada foi gravado.\n` : `Metas de conversão da campanha ${campaignId} atualizadas:\n`) +
+          `${summary}` + (unchanged.length ? `\nSem mudança: ${unchanged.join(", ")}` : "") +
+          `\n\n${formatJson(result)}`
+        )],
+      };
     }
   );
 

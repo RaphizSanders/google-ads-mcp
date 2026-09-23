@@ -29,7 +29,7 @@ Funciona em modo **local** (stdio) e **remoto** (HTTP/SSE), com suporte a deploy
 | `MCP_API_KEY` | Em qualquer modo HTTP | Chave de autenticacao (`Authorization: Bearer`). Obrigatoria sempre que `PORT` estiver definido — sem ela o endpoint aceitaria qualquer requisicao. Nao se aplica ao stdio |
 | `MCP_ALLOWED_HOSTS` | Em qualquer modo HTTP | Hostnames aceitos, separados por vírgula e sem porta. Ativa proteção contra DNS rebinding |
 | `ALLOWED_CUSTOMER_IDS` | Em qualquer modo HTTP | Escopo de contas. **`*`** = toda conta alcancavel pelo MCC do login (agencia/gestor com um MCC so). Ou uma lista nao vazia de IDs de 10 digitos separados por virgula (um cliente por servico). Ausencia ou vazio derruba o boot — vazio e engano de configuracao, nao curinga; e `*` nao se mistura com IDs. Em stdio segue opcional. |
-| `GOOGLE_ADS_READ_ONLY` | Nao | Modo somente leitura (`true`/`1`). Remove as 57 tools mutáveis do catálogo e bloqueia mutações no cliente. Ausente mantém compatibilidade com o comportamento atual |
+| `GOOGLE_ADS_READ_ONLY` | Nao | Modo somente leitura (`true`/`1`). Remove as 60 tools mutáveis do catálogo e bloqueia mutações no cliente. Ausente mantém compatibilidade com o comportamento atual |
 | `GOOGLE_ADS_DRY_RUN` | Nao | Dry-run (`true`/`1`). Envia `validateOnly=true` nos endpoints `:mutate` e nos uploads de conversão: a API valida o payload inteiro e devolve os mesmos erros de uma gravação real, sem alterar a conta. `apply_recommendation`/`dismiss_recommendation` não aceitam `validateOnly` e são **recusados** em dry-run (fail-closed). Tools encadeadas (orçamento→campanha, asset→vínculo) validam só o primeiro passo — a API não devolve `results` em `validateOnly`, então o passo seguinte falha com mensagem de "resource ausente", não por defeito de payload. Desligado por padrão |
 | `PORT` | Nao | Se definido, inicia servidor HTTP. Sem `PORT`, usa stdio |
 
@@ -89,8 +89,8 @@ processo recusa iniciar sem os tres, em modo de leitura ou de escrita. O modo st
 
 Para integrações analíticas, defina `GOOGLE_ADS_READ_ONLY=true`. Nesse modo:
 
-- `tools/list` publica somente as 34 tools classificadas como leitura;
-- as 57 tools de criação, edição, upload e exclusão não são registradas;
+- `tools/list` publica somente as 35 tools classificadas como leitura;
+- as 60 tools de criação, edição, upload e exclusão não são registradas;
 - chamadas diretas à camada de mutação também são recusadas antes de qualquer acesso à API;
 - uma tool nova e ainda não classificada permanece bloqueada por padrão.
 
@@ -115,7 +115,7 @@ buscar aqui. Por isso uma allowlist vazia mantém o significado original de "sem
 
 ---
 
-## Tools (91 total — atualizado 2026-09-18)
+## Tools (95 total — atualizado 2026-09-23)
 
 ### Descoberta de contas
 
@@ -129,7 +129,7 @@ buscar aqui. Por isso uma allowlist vazia mantém o significado original de "sem
 
 | Tool | Descricao |
 |------|-----------|
-| `get_campaign_performance` | Metricas por campanha: spend, ROAS, conversoes, CTR, CPC, CPA |
+| `get_campaign_performance` | Metricas por campanha: spend, ROAS, conversoes, CTR, CPC, CPA — e se a campanha esta com AI Max (`ai_max`) |
 | `get_ad_group_performance` | Metricas por ad group |
 | `get_ad_performance` | Metricas por anuncio |
 | `get_keyword_performance` | Metricas por keyword com quality score |
@@ -137,9 +137,10 @@ buscar aqui. Por isso uma allowlist vazia mantém o significado original de "sem
 | `get_device_breakdown` | Metricas por dispositivo (Mobile, Desktop, Tablet, TV) |
 | `get_daily_trend` | Tendencia diaria de metricas |
 | `get_geo_performance` | Performance por localizacao geografica |
-| `get_search_terms` | Termos de busca reais que acionaram anuncios |
+| `get_search_terms` | Termos de busca reais que acionaram anuncios, com a origem de cada termo (`match_source`: palavra-chave do anunciante, AI Max sem palavra-chave, AI Max broad match, DSA, PMax) e filtro por origem |
 | `get_purchase_conversions` | Conversoes de COMPRA (filtra por categoria PURCHASE) |
 | `get_performance_alerts` | Alertas: ROAS baixo, gasto sem conversao |
+| `get_ai_max_report` | Relatorio do AI Max: termos vindos do AI Max com resumo por origem, combinacoes termo × landing page × titulo, e URLs finais do anunciante vs. escolhidas pela expansao de URL |
 | `compare_periods` | Compara dois periodos com deltas absolutos e percentuais |
 | `get_change_history` | Historico de alteracoes na conta |
 | `get_asset_group_performance` | Metricas de asset groups (PMax) |
@@ -167,7 +168,7 @@ buscar aqui. Por isso uma allowlist vazia mantém o significado original de "sem
 
 | Tool | Descricao |
 |------|-----------|
-| `create_campaign` | Cria campanha (Search, Display, PMax, Video, Demand Gen) com budget. Criada PAUSED. Shopping: use `create_shopping_campaign` (exige merchantId). networkSettings derivado por canal |
+| `create_campaign` | Cria campanha (Search, Display, PMax, Demand Gen) com budget numa unica operacao atomica — orcamento e campanha, ou nenhum. Aceita `TARGET_SPEND` (Maximizar cliques) com `cpcBidCeilingMicros`; `MANUAL_CPC` sem Enhanced CPC (descontinuado em 31/03/2025). `enableAiMax` cria campanha de Pesquisa com AI Max ligado. Criada PAUSED. |
 | `create_pmax_campaign` | Cria campanha PMax completa: budget + campaign + asset group + listing group. Suporta Merchant Center. |
 | `create_display_campaign` | Cria campanha Display |
 | `create_video_campaign` | **Não suportado pela API**: o Google Ads não cria nem altera campanhas de video via API (`campaigns:mutate` e `adGroups:mutate` recusam). A tool retorna erro explicativo sem tocar na conta. Video programatico = `create_demand_gen_campaign`; em campanha de video criada no Google Ads, so `create_video_ad` (anuncio em ad group VIDEO_RESPONSIVE existente) e aceito |
@@ -178,8 +179,8 @@ buscar aqui. Por isso uma allowlist vazia mantém o significado original de "sem
 
 | Tool | Descricao |
 |------|-----------|
-| `create_ad_group` | Cria ad group |
-| `update_ad_group` | Edita nome, status, CPC de ad group |
+| `create_ad_group` | Cria ad group. Em campanha de CPC/CPM manual exige `cpcBidMicros`/`cpmBidMicros` — nunca cria grupo sem lance |
+| `update_ad_group` | Edita nome, status, lances do grupo (`cpcBidMicros`, `cpmBidMicros`, `targetCpaMicros`) e a correspondencia de termos do AI Max (`disableSearchTermMatching`). Avisa lance muito baixo ou ignorado pela estrategia |
 | `create_ad` | Cria RSA (Responsive Search Ad) com headlines e descriptions |
 | `create_responsive_display_ad` | Cria ad responsivo de Display com imagens |
 | `create_video_ad` | Cria responsive video ad (YouTube) em ad group VIDEO_RESPONSIVE. Exige headline, description, callToAction, businessName e logoAssetId (asset IMAGE 1:1); reaproveita o asset do video se ja existir |
@@ -192,7 +193,9 @@ buscar aqui. Por isso uma allowlist vazia mantém o significado original de "sem
 |------|-----------|
 | `create_keyword` | Adiciona keyword a um ad group |
 | `remove_keyword` | Remove keyword |
+| `update_keyword` | Ajusta lance (`cpcBidMicros`), status (pausar/ativar) e URL final de uma palavra-chave sem apaga-la |
 | `add_negative_keyword` | Adiciona keyword negativa |
+| `remove_negative_keyword` | Remove negativas da campanha por ID (`list_negative_keywords` mostra o `criterion_id`) ou por texto + correspondencia |
 | `list_negative_keywords` | Lista keywords negativas |
 | `create_shared_negative_list` | Cria lista de negativos compartilhada entre campanhas |
 
@@ -232,7 +235,8 @@ buscar aqui. Por isso uma allowlist vazia mantém o significado original de "sem
 
 | Tool | Descricao |
 |------|-----------|
-| `update_campaign` | Edita nome, status, budget, bidding strategy |
+| `update_campaign` | Edita nome, status, estrategia de lance (`TARGET_SPEND`/Maximizar cliques, `MAXIMIZE_CONVERSIONS`, `MAXIMIZE_CONVERSION_VALUE`, `TARGET_IMPRESSION_SHARE`, `MANUAL_CPC`) com seus parametros (teto de CPC, CPA/ROAS alvo, parcela de impressoes) e redes (`networkSettings`). So o que muda vai no `updateMask` |
+| `set_ai_max_settings` | Liga/desliga o AI Max (Pesquisa e Shopping), personalizacao de texto, expansao de URL final, termos excluidos e restricoes de mensagem |
 | `update_budget` | Altera budget diario ou vitalicio |
 | `bulk_update_status` | Pausa ou ativa multiplos objetos |
 | `delete_campaign` | Remove campanha (com confirmacao) |
@@ -367,6 +371,19 @@ create_campaign (SEARCH) → create_ad_group → create_ad (RSA) → create_keyw
 → create_sitelink_extension → create_callout_extension
 ```
 
+### AI Max em campanha de Pesquisa
+
+```
+set_ai_max_settings (enableAiMax + controles)
+→ update_ad_group (disableSearchTermMatching nos grupos que nao devem expandir, ex.: marca)
+→ get_ai_max_report (termos, combinacoes, landing pages)
+```
+
+- **O que cada controle faz:** `enableAiMax` liga o AI Max; `textCustomization` e `finalUrlExpansion` sao as automacoes `TEXT_ASSET_AUTOMATION` e `FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION`; `termExclusions` (ate 25, 30 caracteres) e `messagingRestrictions` (ate 40, 300 caracteres) orientam os textos gerados. As duas listas **substituem** a atual (`[]` limpa).
+- **Escrita minima:** o `updateMask` leva so os campos que mudam; valor igual ao atual nao e reenviado; os tipos de automacao nao pedidos sao preservados. Nao mexe em orcamento, lances, segmentacao nem palavras-chave.
+- **Com AI Max ligado** a API trata as palavras-chave como correspondencia ampla e trava `keyword_match_type`. Em Shopping, a personalizacao de texto vem sempre ligada com o AI Max.
+- **Leitura dos relatorios:** `search_term_view` com `match_source` e `ai_max_search_term_ad_combination_view` se sobrepoem — nunca some metricas entre elas. Termos de baixo volume ficam fora por privacidade, entao os totais ficam abaixo do total da campanha.
+
 ### Imagens em campanha de Pesquisa
 
 ```
@@ -444,6 +461,7 @@ create_remarketing_list (URL /cart, excluir /thank-you, 30 dias)
 - **`MCP_API_KEY`**: Protege o endpoint HTTP.
 - **`ALLOWED_CUSTOMER_IDS`**: Escopo de contas. Obrigatoria sob HTTP (ausente/vazia derruba o boot), opcional em stdio. Use `*` para servir todo o MCC (agencia) ou a lista de IDs para isolar um cliente por servico.
 - **`GOOGLE_ADS_DRY_RUN`**: Valida payloads de escrita contra a API sem gravar (`validateOnly`).
+- **`validateOnly` por chamada**: toda tool de escrita aceita `validateOnly: true` — a API valida a operacao inteira (`validate_only`) e nada e gravado; a resposta comeca com `VALIDATE-ONLY`. Endpoints sem `validate_only` (aplicar/dispensar recomendacao) e tools que gravam em passos encadeados (o segundo usa o ID criado no primeiro — criacao de Display/Shopping/Demand Gen/PMax, extensoes, listas de negativas) recusam a chamada nesse modo, sem enviar nada. O `create_campaign` valida orcamento + campanha de uma vez (operacao atomica).
 - **Delete com confirmacao**: `confirm: true` obrigatorio para remocao.
 - **OAuth auto-refresh**: Token renova automaticamente, persiste no arquivo.
 

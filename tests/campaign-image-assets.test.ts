@@ -17,30 +17,13 @@ import test from "node:test";
 import { GoogleAdsClient } from "../src/google-ads-client.js";
 import { createReadOnlyToolServer } from "../src/read-only.js";
 import { registerGoogleAdsTools } from "../src/tools.js";
+import { assertGaqlRules } from "./gaql-rules.js";
 
 type Row = Record<string, unknown>;
 type Handler = (args: Record<string, unknown>) => Promise<{ content: Array<{ text?: string }>; isError?: boolean }>;
 
 const CID = "1234567890";
 const CAMPAIGN_ID = "111";
-
-// ── Regra de GAQL que a API aplica e um client falso esconderia ───────
-
-/**
- * Em FROM campaign_asset, `campaign` é recurso de SEGMENTAÇÃO: um campo dele
- * usado no WHERE precisa estar no SELECT, senão a API recusa a query
- * (EXPECTED_REFERENCED_FIELD_IN_SELECT_CLAUSE). Um fake que aceita qualquer
- * query deixou passar exatamente esse bug — então toda query dos testes passa
- * por aqui.
- */
-function assertGaqlSegmentRule(query: string) {
-  if (!/FROM\s+campaign_asset\b/.test(query)) return;
-  const select = query.slice(0, query.search(/\bFROM\b/));
-  const where = query.split(/\bWHERE\b/)[1] ?? "";
-  for (const [field] of where.matchAll(/\bcampaign\.[a-z_.]+/g)) {
-    assert.ok(select.includes(field), `${field} no WHERE sem estar no SELECT — a API recusa: ${query}`);
-  }
-}
 
 // ── Client falso ──────────────────────────────────────────────────────
 
@@ -67,7 +50,7 @@ function fakeClient(opts: FakeOptions = {}) {
     isDryRun: opts.dryRun ?? false,
     async searchStream(_customerId: string, query: string): Promise<Row[]> {
       calls.queries.push(query);
-      assertGaqlSegmentRule(query);
+      assertGaqlRules(query);
       if (opts.failQueriesAfterMutate && calls.mutations.length > 0) throw new Error("fetch failed");
       if (query.includes("FROM campaign_asset")) {
         if (opts.listRows) return opts.listRows;
@@ -442,7 +425,7 @@ test("dry-run de ponta a ponta: a tool com o client real envia validateOnly e re
   const net = interceptFetch((url, body) => {
     if (url.endsWith(":searchStream")) {
       const query = String(body.query);
-      assertGaqlSegmentRule(query);
+      assertGaqlRules(query);
       if (query.includes("FROM campaign_asset")) return [{ results: [] }];
       if (query.includes("FROM asset")) return [{ results: [{ asset: image("501") }] }];
       return [{ results: [{ campaign: { id: CAMPAIGN_ID, name: "Pesquisa", status: "ENABLED", advertisingChannelType: "SEARCH" } }] }];

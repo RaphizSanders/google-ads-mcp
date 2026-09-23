@@ -333,6 +333,17 @@ export class GoogleAdsClient {
     return this.dryRun;
   }
 
+  /**
+   * Cópia deste client com dry-run ligado (validateOnly), para uma chamada só.
+   * Compartilha credenciais e o estado do token com o original; read-only continua
+   * valendo, porque só o dry-run é sobrescrito.
+   */
+  withDryRun(): GoogleAdsClient {
+    const clone = Object.create(this) as GoogleAdsClient;
+    clone.dryRun = true;
+    return clone;
+  }
+
   private assertWriteAllowed(): void {
     if (this.readOnly) {
       throw new Error("Google Ads MCP is running in read-only mode; mutation blocked.");
