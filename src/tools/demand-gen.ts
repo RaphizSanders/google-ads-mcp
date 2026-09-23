@@ -280,6 +280,22 @@ async function loadCampaign(client: GoogleAdsClient, customerId: string, campaig
 /** upgraded_targeting é IMMUTABLE e o padrão da API é true (proto da Campaign, v25). */
 const usesUpgradedTargeting = (campaign: Row) => obj(campaign.demandGenCampaignSettings).upgradedTargeting !== false;
 
+const AUDIENCE_GROUPED_DESC =
+  "IMUTÁVEL. true = o grupo segmenta por Audience (audienceResourceName); false = só segmentos avulsos " +
+  "(listas, interesses). Padrão: true quando há audienceResourceName; senão não é enviado (padrão da API).";
+
+/**
+ * audience_setting.use_audience_grouped (IMMUTABLE): sem ele = true, a API recusa o critério
+ * AdGroupCriterion.audience no grupo (guia "Create and manage audiences", Demand Gen).
+ */
+function audienceGroupedPlan(useAudienceGrouped: boolean | undefined, hasAudience: boolean, label: string): { payload: Row; error?: string } {
+  if (hasAudience && useAudienceGrouped === false) {
+    return { payload: {}, error: `${label}: público (Audience) exige useAudienceGrouped=true — com false o grupo só aceita segmentos avulsos.` };
+  }
+  const value = useAudienceGrouped ?? (hasAudience ? true : undefined);
+  return { payload: value === undefined ? {} : { audienceSetting: { useAudienceGrouped: value } } };
+}
+
 /** Campanhas com critério de localização/idioma no nível da campanha (Demand Gen: campanha OU grupo, nunca os dois). */
 async function campaignsWithGeoLanguage(client: GoogleAdsClient, customerId: string, campaignIds: string[]): Promise<Map<string, number>> {
   const counts = new Map<string, number>();
@@ -774,6 +790,7 @@ export function registerDemandGenTools(ctx: ToolContext): void {
             optimizedTargeting: z.boolean().optional().describe("Segmentação otimizada (expansão de público)."),
             excludeDemographicExpansion: z.boolean().optional().describe("Com segmentação otimizada: não expandir dados demográficos."),
             audienceResourceName: z.string().optional().describe("Público (customers/{id}/audiences/{id}) — ex.: criado com create_audience_from_lists a partir de um lookalike."),
+            useAudienceGrouped: z.boolean().optional().describe(AUDIENCE_GROUPED_DESC),
           })
           .optional()
           .describe("Primeiro grupo de anúncios, criado na mesma operação (nasce ENABLED dentro da campanha PAUSED, como no exemplo oficial)."),
@@ -804,6 +821,7 @@ export function registerDemandGenTools(ctx: ToolContext): void {
       const upgraded = upgradedTargeting !== false;
       let channels: ChannelChoice | undefined;
       let audience: { resourceName?: string; id?: string } | undefined;
+      let audienceGrouped: Row = {};
       if (adGroup) {
         if (!adGroup.name?.trim()) problems.push("adGroup.name vazio.");
         const parsed = parseChannelChoice(adGroup.channelStrategy, adGroup.selectedChannels);
@@ -814,6 +832,9 @@ export function registerDemandGenTools(ctx: ToolContext): void {
           if (ref.error) problems.push(`adGroup.audienceResourceName: ${ref.error}`);
           else audience = ref;
         }
+        const grouped = audienceGroupedPlan(adGroup.useAudienceGrouped, Boolean(adGroup.audienceResourceName), "adGroup");
+        if (grouped.error) problems.push(grouped.error);
+        audienceGrouped = grouped.payload;
       }
       const hasGeo = locations.length + excluded.length + languages.length > 0;
       if (hasGeo && upgraded && !adGroup) {
@@ -891,6 +912,7 @@ export function registerDemandGenTools(ctx: ToolContext): void {
               ...(channels ? { demandGenAdGroupSettings: { channelControls: channelControlsPayload(channels) } } : {}),
               ...(adGroup.optimizedTargeting !== undefined ? { optimizedTargetingEnabled: adGroup.optimizedTargeting } : {}),
               ...(adGroup.excludeDemographicExpansion !== undefined ? { excludeDemographicExpansion: adGroup.excludeDemographicExpansion } : {}),
+              ...audienceGrouped,
             },
           },
         });
@@ -1187,12 +1209,13 @@ export function registerDemandGenTools(ctx: ToolContext): void {
         excludedLocationIds: flexArray(z.string()).optional().describe("geo_target_constant IDs a excluir."),
         languageIds: flexArray(z.string()).optional().describe("language_constant IDs."),
         audienceResourceName: z.string().optional().describe("Público (customers/{id}/audiences/{id})."),
+        useAudienceGrouped: z.boolean().optional().describe(AUDIENCE_GROUPED_DESC),
       },
     },
     async ({
       customerId, campaignId, name, status, channelStrategy, selectedChannels, optimizedTargeting,
       excludeDemographicExpansion, targetCpcMicros, targetCpaMicros, targetRoas, locationIds, excludedLocationIds,
-      languageIds, audienceResourceName,
+      languageIds, audienceResourceName, useAudienceGrouped,
     }) => {
       const blocked = checkCustomerAccess(customerId, ctx.allowedCustomerIds, ctx.hosted);
       if (blocked) return { content: [blocked], isError: true };
@@ -1216,6 +1239,8 @@ export function registerDemandGenTools(ctx: ToolContext): void {
       problems.push(...idProblems("locationIds", locations), ...idProblems("excludedLocationIds", excluded), ...idProblems("languageIds", languages));
       const audience = audienceResourceName ? parseAudienceRef(audienceResourceName, cid) : undefined;
       if (audience?.error) problems.push(`audienceResourceName: ${audience.error}`);
+      const grouped = audienceGroupedPlan(useAudienceGrouped, Boolean(audienceResourceName), "audienceResourceName");
+      if (grouped.error) problems.push(grouped.error);
       if (problems.length) return fail(`Nada foi criado:\n${bullets(problems)}`);
 
       const client = ctx.getClient();
@@ -1268,6 +1293,7 @@ export function registerDemandGenTools(ctx: ToolContext): void {
               ...(targetCpcMicros !== undefined ? { targetCpcMicros: String(targetCpcMicros) } : {}),
               ...(targetCpaMicros !== undefined ? { targetCpaMicros: String(targetCpaMicros) } : {}),
               ...(targetRoas !== undefined ? { targetRoas } : {}),
+              ...grouped.payload,
             },
           },
         },
@@ -1433,7 +1459,7 @@ export function registerDemandGenTools(ctx: ToolContext): void {
         locationIds: flexArray(z.string()).optional().describe("geo_target_constant IDs a segmentar."),
         excludedLocationIds: flexArray(z.string()).optional().describe("geo_target_constant IDs a excluir."),
         languageIds: flexArray(z.string()).optional().describe("language_constant IDs."),
-        audienceResourceName: z.string().optional().describe("Público (customers/{id}/audiences/{id}); o grupo aceita um."),
+        audienceResourceName: z.string().optional().describe("Público (customers/{id}/audiences/{id}); o grupo aceita um e precisa ter sido criado com useAudienceGrouped=true (imutável)."),
         replace: z.boolean().optional().describe("true = substitui as dimensões informadas. Exige confirm=true."),
         confirm: z.boolean().optional().describe("Confirma a remoção de critérios quando replace=true."),
       },
@@ -1464,8 +1490,9 @@ export function registerDemandGenTools(ctx: ToolContext): void {
       const client = ctx.getClient();
       const where = campaignId ? `campaign.id = ${campaignId}` : `ad_group.id IN (${groups.join(", ")})`;
       const adGroupRows = await client.searchStream(customerId,
-        `SELECT ad_group.id, ad_group.name, ad_group.status, campaign.id, campaign.name,
-                campaign.advertising_channel_type, campaign.demand_gen_campaign_settings.upgraded_targeting
+        `SELECT ad_group.id, ad_group.name, ad_group.status, ad_group.audience_setting.use_audience_grouped,
+                campaign.id, campaign.name, campaign.advertising_channel_type,
+                campaign.demand_gen_campaign_settings.upgraded_targeting
          FROM ad_group
          WHERE ${where} AND ad_group.status != 'REMOVED'`);
       const found = adGroupRows.map((row) => ({ adGroup: obj(row.adGroup), campaign: obj(row.campaign) }));
@@ -1475,6 +1502,16 @@ export function registerDemandGenTools(ctx: ToolContext): void {
       const notDemandGen = found.filter((item) => item.campaign.advertisingChannelType !== "DEMAND_GEN");
       if (notDemandGen.length) {
         return fail(`Só grupos de campanhas DEMAND_GEN: ${notDemandGen.map((item) => `${String(item.adGroup.id)} (${String(item.campaign.advertisingChannelType)})`).join(", ")}. Nada foi alterado.`);
+      }
+      if (audience) {
+        const segmentOnly = found.filter((item) => obj(item.adGroup.audienceSetting).useAudienceGrouped !== true);
+        if (segmentOnly.length) {
+          return fail(
+            `Grupo(s) sem use_audience_grouped: ${segmentOnly.map((item) => String(item.adGroup.id)).join(", ")}. ` +
+              "Esse ajuste é imutável e a API só aceita público (Audience) em grupo criado com ele = true — crie um grupo novo " +
+              "com create_demand_gen_ad_group (audienceResourceName) ou use segmentos avulsos (add_audience_segment_targeting). Nada foi alterado."
+          );
+        }
       }
       const legacy = found.filter((item) => !usesUpgradedTargeting(item.campaign));
       if (legacy.length && (locations.length || excluded.length || languages.length)) {

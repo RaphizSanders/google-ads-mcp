@@ -2038,10 +2038,10 @@ export function registerGoogleAdsTools(
         "WRITE OPERATION — created PAUSED by default.",
         "",
         "The ad group type is DERIVED from the campaign's advertising_channel_type:",
-        "SEARCH = SEARCH_STANDARD, DISPLAY = DISPLAY_STANDARD,",
-        "SHOPPING = SHOPPING_PRODUCT_ADS, VIDEO = VIDEO_RESPONSIVE.",
-        "Other channels (e.g. DEMAND_GEN) are created without an explicit type.",
+        "SEARCH = SEARCH_STANDARD, DISPLAY = DISPLAY_STANDARD, SHOPPING = SHOPPING_PRODUCT_ADS.",
         "PERFORMANCE_MAX campaigns do NOT use ad groups — use create_asset_group.",
+        "DEMAND_GEN: use create_demand_gen_ad_group (canais, lances do grupo e público agrupado, que é imutável).",
+        "VIDEO: a API não cria grupos em campanha de vídeo — vídeo programático é create_demand_gen_campaign.",
         "",
         "SEARCH_DYNAMIC_ADS (DSA) só é aceito em campanha SEARCH com domínio de DSA configurado",
         "(dynamic_search_ads_setting); o grupo não aceita palavras-chave positivas e este servidor não cria",
@@ -2066,12 +2066,6 @@ export function registerGoogleAdsTools(
             "SEARCH_DYNAMIC_ADS",
             "DISPLAY_STANDARD",
             "SHOPPING_PRODUCT_ADS",
-            "VIDEO_RESPONSIVE",
-            "VIDEO_BUMPER",
-            "VIDEO_TRUE_VIEW_IN_STREAM",
-            "VIDEO_TRUE_VIEW_IN_DISPLAY",
-            "VIDEO_NON_SKIPPABLE_IN_STREAM",
-            "VIDEO_EFFICIENT_REACH",
           ])
           .optional()
           .describe("OPTIONAL override. Default: derived from the campaign's channel type. SEARCH_DYNAMIC_ADS exige campanha SEARCH com domínio de DSA."),
@@ -2118,14 +2112,21 @@ export function registerGoogleAdsTools(
           isError: true,
         };
       }
+      // Grupo Demand Gen tem canais, lances próprios e audience_setting.use_audience_grouped
+      // (IMMUTABLE, exigido para segmentar por Audience) — tudo isso só a tool dedicada envia.
+      if (channel === "DEMAND_GEN") {
+        return {
+          content: [text(`A campanha ${campaignId} é DEMAND_GEN: use create_demand_gen_ad_group (canais, lances do grupo e público agrupado, que não muda depois de criado). Nada foi criado.`)],
+          isError: true,
+        };
+      }
 
-      // Canais sem mapeamento fixo (ex.: DEMAND_GEN) ficam SEM `type`: a API atribui o padrão
+      // Canais sem mapeamento fixo ficam SEM `type`: a API atribui o padrão
       // do canal. Enviar um type errado é pior do que omitir.
       const AD_GROUP_TYPE_BY_CHANNEL: Record<string, string> = {
         SEARCH: "SEARCH_STANDARD",
         DISPLAY: "DISPLAY_STANDARD",
         SHOPPING: "SHOPPING_PRODUCT_ADS",
-        VIDEO: "VIDEO_RESPONSIVE",
       };
       const adGroupType: string | undefined = type ?? AD_GROUP_TYPE_BY_CHANNEL[channel];
 
@@ -2135,12 +2136,6 @@ export function registerGoogleAdsTools(
         SEARCH_DYNAMIC_ADS: "SEARCH",
         DISPLAY_STANDARD: "DISPLAY",
         SHOPPING_PRODUCT_ADS: "SHOPPING",
-        VIDEO_RESPONSIVE: "VIDEO",
-        VIDEO_BUMPER: "VIDEO",
-        VIDEO_TRUE_VIEW_IN_STREAM: "VIDEO",
-        VIDEO_TRUE_VIEW_IN_DISPLAY: "VIDEO",
-        VIDEO_NON_SKIPPABLE_IN_STREAM: "VIDEO",
-        VIDEO_EFFICIENT_REACH: "VIDEO",
       };
       if (type && CHANNEL_BY_AD_GROUP_TYPE[type] && CHANNEL_BY_AD_GROUP_TYPE[type] !== channel) {
         return {

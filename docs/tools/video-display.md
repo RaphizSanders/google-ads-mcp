@@ -179,7 +179,7 @@ ficou criado). Dry-run relatado corretamente.
 
 - **Item 26 — `create_ad_group`** ainda lista `VIDEO_*` no enum `type`, e **`src/resources.ts`**
   (linha "VIDEO: YouTube ads (in-stream, bumper, discovery)") segue desatualizado: nenhum dos dois
-  é deste lote (ownership). Sugestão ao integrador: tirar `VIDEO_*` do enum de `create_ad_group`
+  é deste lote (ownership). Resolvido na integração: `VIDEO_*` saiu do enum de `create_ad_group`. Sugestão original: tirar `VIDEO_*` do enum de `create_ad_group`
   (o lote dono) e trocar a linha do resources por "VIDEO: só leitura/relatório na API; criar vídeo
   via Demand Gen".
 - **Item 12 — `upload_image_asset`**: a orientação de tamanhos da descrição ("1200x1200 (logo)")

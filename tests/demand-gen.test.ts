@@ -258,6 +258,7 @@ test("create_demand_gen_campaign: orçamento, campanha, grupo e critérios num �
   assert.equal(campaign.status, "PAUSED");
   assert.equal(campaign.campaignBudget, budget.resourceName);
   assert.deepEqual(campaign.targetCpc, { targetCpcMicros: "1500000" });
+  assert.deepEqual(createOf(ops[2]).audienceSetting, { useAudienceGrouped: true }, "público no grupo exige use_audience_grouped");
   assert.equal(campaign.manualCpc, undefined);
   assert.equal(campaign.maximizeConversions, undefined);
   const adGroup = createOf(ops[2]);
@@ -533,7 +534,25 @@ test("create_demand_gen_ad_group: grupo sem type, canais, lance e critérios num
   const criteria = ops.slice(1).map(createOf);
   assert.equal(criteria[1].negative, true);
   assert.deepEqual(criteria[3].audience, { audience: `customers/${CID}/audiences/44` });
+  assert.deepEqual(adGroup.audienceSetting, { useAudienceGrouped: true }, "sem ele a API recusa o critério de público");
   assert.doesNotMatch(textOf(result), /Avisos/);
+});
+
+test("create_demand_gen_ad_group: use_audience_grouped só vai quando pedido ou com público", async () => {
+  const plain = fakeClient({ campaigns: [dgCampaign()] });
+  const r1 = await call(plain.client, "create_demand_gen_ad_group", { campaignId: DG_CAMPAIGN, name: "g" });
+  assert.equal(r1.isError, undefined, textOf(r1));
+  assert.equal(createOf(plain.calls.batches[0].operations[0]).audienceSetting, undefined);
+
+  const ready = fakeClient({ campaigns: [dgCampaign()] });
+  await call(ready.client, "create_demand_gen_ad_group", { campaignId: DG_CAMPAIGN, name: "g", useAudienceGrouped: true });
+  assert.deepEqual(createOf(ready.calls.batches[0].operations[0]).audienceSetting, { useAudienceGrouped: true });
+
+  const clash = fakeClient({ campaigns: [dgCampaign()] });
+  const r3 = await call(clash.client, "create_demand_gen_ad_group", { campaignId: DG_CAMPAIGN, name: "g", audienceResourceName: "44", useAudienceGrouped: false });
+  assert.equal(r3.isError, true);
+  assert.match(textOf(r3), /useAudienceGrouped=true/);
+  assert.equal(clash.calls.queries.length, 0, "recusa antes de ler a conta");
 });
 
 test("create_demand_gen_ad_group: recusas de leitura (canal, upgraded targeting, campanha com local, nome repetido)", async () => {
@@ -684,16 +703,23 @@ test("set_demand_gen_ad_group_targeting: replace exige confirm; com confirm remo
 });
 
 test("set_demand_gen_ad_group_targeting: campanha inteira, público e recusas", async () => {
-  const second = dgAdGroup({ id: "801", name: "Gmail" });
-  const all = fakeClient({ adGroups: [dgAdGroup(), second], audiences: [{ id: "44", status: "ENABLED" }] });
+  const grouped = { audienceSetting: { useAudienceGrouped: true } };
+  const second = dgAdGroup({ id: "801", name: "Gmail", ...grouped });
+  const all = fakeClient({ adGroups: [dgAdGroup(grouped), second], audiences: [{ id: "44", status: "ENABLED" }] });
   const r1 = await call(all.client, "set_demand_gen_ad_group_targeting", { campaignId: DG_CAMPAIGN, audienceResourceName: "44" });
   assert.equal(r1.isError, undefined, textOf(r1));
   assert.deepEqual(all.calls.mutates[0].operations.map((op) => (op.create as Row).adGroup), [
     `customers/${CID}/adGroups/${DG_AD_GROUP}`, `customers/${CID}/adGroups/801`,
   ]);
 
+  const segmentOnly = fakeClient({ adGroups: [dgAdGroup(grouped), dgAdGroup({ id: "801" })], audiences: [{ id: "44", status: "ENABLED" }] });
+  const r0 = await call(segmentOnly.client, "set_demand_gen_ad_group_targeting", { campaignId: DG_CAMPAIGN, audienceResourceName: "44" });
+  assert.equal(r0.isError, true);
+  assert.match(textOf(r0), /sem use_audience_grouped: 801\./);
+  assert.equal(segmentOnly.calls.mutates.length, 0);
+
   const conflict = fakeClient({
-    adGroups: [dgAdGroup()], audiences: [{ id: "44", status: "ENABLED" }],
+    adGroups: [dgAdGroup(grouped)], audiences: [{ id: "44", status: "ENABLED" }],
     adGroupCriteria: [{ adGroup: { id: DG_AD_GROUP }, adGroupCriterion: { resourceName: "x~9", type: "AUDIENCE", audience: { audience: `customers/${CID}/audiences/33` } } }],
   });
   const r2 = await call(conflict.client, "set_demand_gen_ad_group_targeting", { adGroupIds: [DG_AD_GROUP], audienceResourceName: "44" });

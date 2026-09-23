@@ -241,8 +241,10 @@ get started", "Deprecations"; Ajuda do Google Ads 10537509 (segmentação otimiz
 
 ## Pendências fora da posse deste lote (para o integrador)
 
-- `create_ad_group` ganhar `useAudienceGrouped` (default true em DEMAND_GEN): a tool não é deste lote.
-  Sem isso, grupos Demand Gen criados por aqui só aceitam segmentos avulsos, não Audience.
+- ~~`create_ad_group` ganhar `useAudienceGrouped`~~ — resolvido na integração: `create_ad_group` recusa DEMAND_GEN e
+  aponta para `create_demand_gen_ad_group`, que envia `audience_setting.use_audience_grouped=true` sempre que o grupo
+  nasce com público (ou quando pedido com `useAudienceGrouped`); `set_demand_gen_ad_group_targeting` recusa público em
+  grupo criado sem ele (o ajuste é imutável).
 - O compositor de Audience (`create_audience_from_lists`, item 49) aceitar CUSTOM_AUDIENCE: a tool não é
   deste lote. O critério direto por custom audience já existe em `add_audience_segment_targeting`.
 - README principal: tabelas de públicos/remarketing ainda descrevem as versões antigas.

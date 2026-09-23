@@ -1123,6 +1123,19 @@ test("create_ad_group: type de outro canal é recusado; dry-run não diz que cri
   assert.doesNotMatch(textOf(r2), /Ad group created/);
 });
 
+test("create_ad_group: Demand Gen vai para a tool dedicada; tipos de vídeo nem entram no schema", async () => {
+  const dg = fakeClient({ rows: { campaign: [{ campaign: { id: CAMPAIGN_ID, advertisingChannelType: "DEMAND_GEN", biddingStrategyType: "MAXIMIZE_CONVERSIONS" } }] } });
+  const r1 = await call(dg.client, "create_ad_group", { campaignId: CAMPAIGN_ID, name: "G" });
+  assert.equal(r1.isError, true);
+  assert.match(textOf(r1), /create_demand_gen_ad_group/);
+  assert.equal(dg.calls.writes.length, 0);
+
+  const { configs } = register(fakeClient().client);
+  const typeParam = (configs.get("create_ad_group")!.inputSchema as Record<string, { unwrap(): { options: string[] } }>).type;
+  assert.ok(typeParam, "create_ad_group mantém o override de type");
+  assert.deepEqual(typeParam.unwrap().options, ["SEARCH_STANDARD", "SEARCH_DYNAMIC_ADS", "DISPLAY_STANDARD", "SHOPPING_PRODUCT_ADS"]);
+});
+
 // ── Catálogo e read-only ──────────────────────────────────────────────
 
 test("read-only publica as leituras do lote e omite as escritas", () => {

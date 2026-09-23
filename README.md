@@ -2,7 +2,7 @@
 
 Servidor MCP (Model Context Protocol) que transforma qualquer agente de IA em um gestor completo de trafego e performance para Google Ads.
 
-Suporta o fluxo completo: **analise de performance**, **criacao de campanhas** (Search, Display, Video, Shopping, PMax, Demand Gen), **gestao de budget**, **controle de status**, **audiencias**, **extensoes de anuncio**, **catalogo de produtos** e **conversoes**.
+Suporta o fluxo completo: **analise de performance**, **criacao de campanhas** (Search, Display, Shopping, PMax, Demand Gen; Video só leitura/relatório — a API não cria nem edita campanhas de Vídeo), **gestao de budget**, **controle de status**, **audiencias**, **extensoes de anuncio**, **catalogo de produtos** e **conversoes**.
 
 Funciona em modo **local** (stdio) e **remoto** (HTTP/SSE), com suporte a deploy no **Railway**.
 
@@ -182,7 +182,7 @@ As **95 do núcleo** estão nesta seção; as **250 das áreas** (segmentação,
 
 | Tool | Descricao |
 |------|-----------|
-| `create_ad_group` | Cria ad group. Em campanha de CPC/CPM manual exige `cpcBidMicros`/`cpmBidMicros` — nunca cria grupo sem lance |
+| `create_ad_group` | Cria ad group (Search, Display, Shopping). Em campanha de CPC/CPM manual exige `cpcBidMicros`/`cpmBidMicros` — nunca cria grupo sem lance. Demand Gen vai para `create_demand_gen_ad_group`; PMax, `create_asset_group`; Vídeo é recusado (a API não cria) |
 | `update_ad_group` | Edita nome, status, lances do grupo (`cpcBidMicros`, `cpmBidMicros`, `targetCpaMicros`) e a correspondencia de termos do AI Max (`disableSearchTermMatching`). Avisa lance muito baixo ou ignorado pela estrategia |
 | `create_ad` | Cria RSA (Responsive Search Ad) com headlines e descriptions |
 | `create_responsive_display_ad` | Cria ad responsivo de Display com imagens |
@@ -902,7 +902,7 @@ create_remarketing_list (URL /cart, excluir /thank-you, 30 dias)
 - **`MCP_API_KEY`**: Protege o endpoint HTTP.
 - **`ALLOWED_CUSTOMER_IDS`**: Escopo de contas. Obrigatoria sob HTTP (ausente/vazia derruba o boot), opcional em stdio. Use `*` para servir todo o MCC (agencia) ou a lista de IDs para isolar um cliente por servico.
 - **`GOOGLE_ADS_DRY_RUN`**: Valida payloads de escrita contra a API sem gravar (`validateOnly`).
-- **`validateOnly` por chamada**: toda tool de escrita aceita `validateOnly: true` — a API valida a operacao inteira (`validate_only`) e nada e gravado; a resposta comeca com `VALIDATE-ONLY`. Endpoints sem `validate_only` (aplicar/dispensar recomendacao) e tools que gravam em passos encadeados (o segundo usa o ID criado no primeiro — criacao de Display/Shopping/Demand Gen/PMax, extensoes, listas de negativas) recusam a chamada nesse modo, sem enviar nada. O `create_campaign` valida orcamento + campanha de uma vez (operacao atomica).
+- **`validateOnly` por chamada**: toda tool de escrita aceita `validateOnly: true` — a API valida a operacao inteira (`validate_only`) e nada e gravado; a resposta comeca com `VALIDATE-ONLY`. As criacoes de campanha (Search, Display, Shopping, Demand Gen, PMax), asset groups, extensoes e listas de negativas vao num unico `googleAds:mutate` atomico com IDs temporarios, entao o `validateOnly` valida o pedido inteiro. Recusam o modo, sem enviar nada: endpoints sem `validate_only` (`apply_recommendation`, `dismiss_recommendation`) e as poucas tools que ainda gravam em passos dependentes (`create_video_ad`, `create_batch_job`, `create_location_sync_asset_set`, `upload_customer_match_members`).
 - **Delete com confirmacao**: `confirm: true` obrigatorio para remocao.
 - **OAuth auto-refresh**: Token renova automaticamente, persiste no arquivo.
 
