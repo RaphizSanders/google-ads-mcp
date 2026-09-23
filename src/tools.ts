@@ -882,65 +882,8 @@ export function registerGoogleAdsTools(
 
   // get_ad_creatives: registrada em src/tools/rsa-ads.ts (lote rsa-ads).
 
-  // ── Assets: Image Assets ───────────────────────────────────────────
-
-  mcp.registerTool(
-    "get_image_assets",
-    {
-      description: "Get image assets from the account's asset library with download URLs.",
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        limit: z.number().optional().describe("Max results. Default: 50."),
-      },
-    },
-    async ({ customerId, limit }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-
-      const results = await client.searchStream(
-        customerId,
-        `SELECT asset.id, asset.name, asset.type, asset.image_asset.full_size.url,
-                asset.image_asset.file_size, asset.resource_name
-         FROM asset
-         WHERE asset.type = 'IMAGE'
-         LIMIT ${limit ?? 50}`
-      );
-
-      return { content: [text(`${results.length} image asset(s).\n\n${formatJson(results)}`)] };
-    }
-  );
-
-  // ── Assets: Video Assets ───────────────────────────────────────────
-
-  mcp.registerTool(
-    "get_video_assets",
-    {
-      description: "Get YouTube video assets linked to the account.",
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        limit: z.number().optional().describe("Max results. Default: 20."),
-      },
-    },
-    async ({ customerId, limit }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-
-      const results = await client.searchStream(
-        customerId,
-        `SELECT asset.id, asset.name, asset.type,
-                asset.youtube_video_asset.youtube_video_id,
-                asset.youtube_video_asset.youtube_video_title,
-                asset.resource_name
-         FROM asset
-         WHERE asset.type = 'YOUTUBE_VIDEO'
-         LIMIT ${limit ?? 20}`
-      );
-
-      return { content: [text(`${results.length} video asset(s).\n\n${formatJson(results)}`)] };
-    }
-  );
+  // ── Assets: Image/Video Assets ─────────────────────────────────────
+  // get_image_assets e get_video_assets: src/tools/asset-library.ts (lote asset-library).
 
   // ── Conversions ────────────────────────────────────────────────────
 
@@ -2167,84 +2110,7 @@ export function registerGoogleAdsTools(
   // ══ PMAX + ASSET GROUPS + UPLOAD ══════════════════════════════════
   // ══════════════════════════════════════════════════════════════════
 
-  mcp.registerTool(
-    "upload_image_asset",
-    {
-      description: [
-        "Upload an image (base64) to the account's asset library.",
-        "WRITE OPERATION — creates a reusable image asset.",
-        "Returns the asset resource_name to use in asset groups or ads.",
-        "Para usar a imagem numa campanha de Pesquisa: link_campaign_image_assets,",
-        "depois confirme com list_campaign_image_assets.",
-        "",
-        "Supported formats: JPG, PNG, GIF. Max 5MB.",
-        "Recommended sizes: 1200x628 (landscape), 1200x1200 (square), 1200x1200 (logo).",
-      ].join("\n"),
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        name: z.string().describe("Asset name (descriptive, e.g. 'Banner Março 2026')."),
-        imageBase64: z.string().describe("Image file content as base64 string."),
-      },
-    },
-    async ({ customerId, name, imageBase64 }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-
-      const result = await client.mutateAssets(customerId, [
-        {
-          create: {
-            name,
-            type: "IMAGE",
-            imageAsset: { data: imageBase64 },
-          },
-        },
-      ]);
-
-      const results = (result as Record<string, unknown>).results as Array<Record<string, unknown>> | undefined;
-      const resourceName = results?.[0]?.resourceName as string;
-
-      return {
-        content: [text(`Image asset created: ${name}\nResource: ${resourceName}\n\n${formatJson(result)}`)],
-      };
-    }
-  );
-
-  mcp.registerTool(
-    "upload_video_asset",
-    {
-      description: [
-        "Link a YouTube video as an asset in the account.",
-        "WRITE OPERATION — creates a reusable video asset.",
-        "The video must already be uploaded to YouTube.",
-      ].join("\n"),
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        youtubeVideoId: z.string().describe("YouTube video ID (e.g. 'dQw4w9WgXcQ')."),
-      },
-    },
-    async ({ customerId, youtubeVideoId }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-
-      const result = await client.mutateAssets(customerId, [
-        {
-          create: {
-            type: "YOUTUBE_VIDEO",
-            youtubeVideoAsset: { youtubeVideoId },
-          },
-        },
-      ]);
-
-      const results = (result as Record<string, unknown>).results as Array<Record<string, unknown>> | undefined;
-      const resourceName = results?.[0]?.resourceName as string;
-
-      return {
-        content: [text(`Video asset linked: ${youtubeVideoId}\nResource: ${resourceName}\n\n${formatJson(result)}`)],
-      };
-    }
-  );
+  // upload_image_asset e upload_video_asset: src/tools/asset-library.ts (lote asset-library).
 
   // ── Imagens em campanhas de Pesquisa (AD_IMAGE) ────────────────────
 
