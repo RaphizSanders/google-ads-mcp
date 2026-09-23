@@ -3263,50 +3263,263 @@ export function registerGoogleAdsTools(
     "create_responsive_display_ad",
     {
       description: [
-        "Create a Responsive Display Ad in an ad group.",
-        "WRITE OPERATION — created PAUSED by default.",
+        "Cria um anúncio responsivo de Display (RESPONSIVE_DISPLAY_AD) num grupo de campanha DISPLAY.",
+        "WRITE OPERATION — criado PAUSADO.",
         "",
-        "Requires landscape image, square image, logo, headlines, long headline, descriptions.",
-        "Google will auto-generate combinations for different placements.",
+        "Obrigatórios (ResponsiveDisplayAdInfo, v25): marketingImageAssets (paisagem 1.91:1, mín. 600x314) e",
+        "squareMarketingImageAssets (1:1, mín. 300x300) — até 15 somadas —, headlines (1-5, até 30 caracteres),",
+        "longHeadline (até 90), descriptions (1-5, até 90) e businessName (até 25).",
+        "Logo é OPCIONAL: landscapeLogoAssets (4:1, mín. 512x128 — ex.: 1200x300) e squareLogoAssets (1:1, mín.",
+        "128x128 — ex.: 1200x1200), até 5 somados. logoAssets (legado) é roteado pela proporção real de cada imagem.",
+        "",
+        "Antes de gravar confere o grupo (existe nesta conta, campanha DISPLAY) e cada imagem (existe, é IMAGE, tem a",
+        "proporção ±1% e o tamanho mínimo do campo). Opcionais: youtubeVideoIds (até 5, já registrados como asset com",
+        "upload_video_asset), callToAction (até 30), mainColor + accentColor (#RRGGBB, os dois juntos),",
+        "allowFlexibleColor (false exige as duas cores), formatSetting (ALL_FORMATS, NON_NATIVE, NATIVE — NATIVE exige",
+        "cor flexível), promoText, pricePrefix, enableAssetEnhancements e enableAutogenVideo (control_spec).",
+        "Com GOOGLE_ADS_DRY_RUN/validateOnly a API só valida e nada é gravado.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
-        adGroupId: z.string().describe("Ad group ID."),
-        finalUrl: z.string().describe("Landing page URL."),
-        headlines: flexArray(z.string()).describe("1-5 headlines (max 30 chars)."),
-        longHeadline: z.string().describe("Long headline (max 90 chars)."),
-        descriptions: flexArray(z.string()).describe("1-5 descriptions (max 90 chars)."),
-        businessName: z.string().describe("Business name."),
-        marketingImageAssets: flexArray(z.string()).describe("Resource names of landscape images."),
-        squareMarketingImageAssets: flexArray(z.string()).describe("Resource names of square images."),
-        logoAssets: flexArray(z.string()).describe("Resource names of logos."),
+        adGroupId: z.string().describe("ID do grupo de anúncios (campanha DISPLAY)."),
+        finalUrl: z.string().describe("URL final (http/https)."),
+        headlines: flexArray(z.string()).describe("1-5 títulos curtos (até 30 caracteres)."),
+        longHeadline: z.string().describe("Título longo (até 90 caracteres)."),
+        descriptions: flexArray(z.string()).describe("1-5 descrições (até 90 caracteres)."),
+        businessName: z.string().describe("Nome da empresa/marca (até 25 caracteres)."),
+        marketingImageAssets: flexArray(z.string()).describe("Imagens paisagem 1.91:1 (mín. 600x314): IDs ou customers/{cid}/assets/{id}."),
+        squareMarketingImageAssets: flexArray(z.string()).describe("Imagens quadradas 1:1 (mín. 300x300): IDs ou resource names."),
+        landscapeLogoAssets: flexArray(z.string()).optional().describe("Logos paisagem 4:1 (mín. 512x128, ex.: 1200x300). Opcional."),
+        squareLogoAssets: flexArray(z.string()).optional().describe("Logos quadrados 1:1 (mín. 128x128, ex.: 1200x1200). Opcional."),
+        logoAssets: flexArray(z.string()).optional().describe(
+          "LEGADO — logos sem proporção declarada: cada um vai para 4:1 ou 1:1 conforme a imagem real; outra proporção é recusada."
+        ),
+        youtubeVideoIds: flexArray(z.string()).optional().describe("Até 5 IDs de vídeo do YouTube já registrados como asset (upload_video_asset)."),
+        callToAction: z.string().optional().describe("Texto do botão (call_to_action_text, até 30 caracteres)."),
+        mainColor: z.string().optional().describe("Cor principal #RRGGBB (exige accentColor)."),
+        accentColor: z.string().optional().describe("Cor de destaque #RRGGBB (exige mainColor)."),
+        allowFlexibleColor: z.boolean().optional().describe("Permite ao Google variar as cores. Default da API: true. false exige mainColor e accentColor."),
+        formatSetting: z.enum(["ALL_FORMATS", "NON_NATIVE", "NATIVE"]).optional().describe("Formatos de veiculação. Default da API: ALL_FORMATS."),
+        promoText: z.string().optional().describe("Texto promocional para formatos dinâmicos (ex.: 'Frete grátis')."),
+        pricePrefix: z.string().optional().describe("Prefixo de preço (ex.: 'a partir de')."),
+        enableAssetEnhancements: z.boolean().optional().describe("control_spec.enable_asset_enhancements (melhorias automáticas de assets)."),
+        enableAutogenVideo: z.boolean().optional().describe("control_spec.enable_autogen_video (vídeo gerado automaticamente)."),
       },
     },
-    async ({ customerId, adGroupId, finalUrl, headlines, longHeadline, descriptions, businessName, marketingImageAssets, squareMarketingImageAssets, logoAssets }) => {
+    async ({
+      customerId, adGroupId, finalUrl, headlines, longHeadline, descriptions, businessName,
+      marketingImageAssets, squareMarketingImageAssets, landscapeLogoAssets, squareLogoAssets, logoAssets,
+      youtubeVideoIds, callToAction, mainColor, accentColor, allowFlexibleColor, formatSetting, promoText, pricePrefix,
+      enableAssetEnhancements, enableAutogenVideo,
+    }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
+      const fail = (message: string) => ({ content: [text(message)], isError: true });
       const cid = customerId.replace(/-/g, "");
+      if (!/^\d+$/.test(cid)) return fail(`customerId inválido: "${customerId}". Nada foi gravado.`);
+      if (!/^\d+$/.test(String(adGroupId))) return fail(`adGroupId deve ser numérico, recebido "${adGroupId}". Nada foi gravado.`);
 
+      // 1. Textos, cores e formato — antes de qualquer chamada à API
+      const problems: string[] = [];
+      const clean = (list: unknown) => ensureArray<string>(list).map((s) => String(s).trim()).filter(Boolean);
+      const heads = clean(headlines);
+      const descs = clean(descriptions);
+      const longHead = String(longHeadline ?? "").trim();
+      const business = String(businessName ?? "").trim();
+      if (heads.length < 1 || heads.length > 5) problems.push(`headlines: de 1 a 5 (recebidos ${heads.length}).`);
+      for (const h of heads) if (h.length > 30) problems.push(`headline "${h}" tem ${h.length} caracteres (máx. 30).`);
+      if (!longHead) problems.push("longHeadline é obrigatório.");
+      else if (longHead.length > 90) problems.push(`longHeadline tem ${longHead.length} caracteres (máx. 90).`);
+      if (descs.length < 1 || descs.length > 5) problems.push(`descriptions: de 1 a 5 (recebidas ${descs.length}).`);
+      for (const d of descs) if (d.length > 90) problems.push(`description "${d}" tem ${d.length} caracteres (máx. 90).`);
+      if (!business) problems.push("businessName é obrigatório.");
+      else if (business.length > 25) problems.push(`businessName tem ${business.length} caracteres (máx. 25).`);
+      let validUrl = false;
+      try {
+        validUrl = ["http:", "https:"].includes(new URL(finalUrl).protocol);
+      } catch {
+        validUrl = false;
+      }
+      if (!validUrl) problems.push(`finalUrl inválida: "${finalUrl}" (use http:// ou https://).`);
+      if (callToAction !== undefined && callToAction.trim().length > 30) problems.push(`callToAction tem ${callToAction.trim().length} caracteres (máx. 30).`);
+      const hex = /^#[0-9A-Fa-f]{6}$/;
+      if (mainColor !== undefined && !hex.test(mainColor)) problems.push(`mainColor "${mainColor}" inválida (use #RRGGBB).`);
+      if (accentColor !== undefined && !hex.test(accentColor)) problems.push(`accentColor "${accentColor}" inválida (use #RRGGBB).`);
+      if ((mainColor === undefined) !== (accentColor === undefined)) problems.push("mainColor e accentColor vão juntas: informe as duas ou nenhuma.");
+      if (allowFlexibleColor === false && (mainColor === undefined || accentColor === undefined)) {
+        problems.push("allowFlexibleColor: false exige mainColor e accentColor (sem cores a API exige cor flexível).");
+      }
+      if (formatSetting === "NATIVE" && allowFlexibleColor === false) {
+        problems.push("formatSetting NATIVE não aceita allowFlexibleColor: false (no nativo a cor é do publisher).");
+      }
+
+      // 2. Referências de imagem: formato e conta
+      type Slot = "marketing" | "square" | "logo" | "squareLogo" | "auto";
+      const requested: Array<{ slot: Slot; assetId: string; resourceName: string }> = [];
+      const addRefs = (slot: Slot, list: unknown) => {
+        for (const ref of clean(list)) {
+          const parsed = parseImageAssetRef(ref, cid);
+          if ("error" in parsed) problems.push(parsed.error);
+          else requested.push({ slot, ...parsed });
+        }
+      };
+      addRefs("marketing", marketingImageAssets);
+      addRefs("square", squareMarketingImageAssets);
+      addRefs("logo", landscapeLogoAssets);
+      addRefs("squareLogo", squareLogoAssets);
+      addRefs("auto", logoAssets);
+      if (!requested.some((r) => r.slot === "marketing")) problems.push("marketingImageAssets: ao menos uma imagem paisagem 1.91:1 é obrigatória.");
+      if (!requested.some((r) => r.slot === "square")) problems.push("squareMarketingImageAssets: ao menos uma imagem quadrada 1:1 é obrigatória.");
+      const videoIds = [...new Set(clean(youtubeVideoIds))];
+      for (const id of videoIds) if (!/^[A-Za-z0-9_-]{11}$/.test(id)) problems.push(`youtubeVideoIds: "${id}" não é ID de vídeo do YouTube (11 caracteres).`);
+      if (videoIds.length > 5) problems.push(`youtubeVideoIds: no máximo 5 (recebidos ${videoIds.length}).`);
+      if (problems.length) return fail(`Nada foi gravado:\n- ${problems.join("\n- ")}`);
+
+      const client = getClient();
+
+      // 3. Grupo: existe nesta conta, não removido, em campanha DISPLAY
+      const groupRows = await client.searchStream(customerId,
+        `SELECT ad_group.id, ad_group.name, ad_group.status, ad_group.type,
+                campaign.id, campaign.name, campaign.advertising_channel_type
+         FROM ad_group
+         WHERE ad_group.id = ${adGroupId}`);
+      const group = (groupRows[0]?.adGroup ?? {}) as Record<string, unknown>;
+      const campaign = (groupRows[0]?.campaign ?? {}) as Record<string, unknown>;
+      if (!groupRows[0]) return fail(`Grupo de anúncios ${adGroupId} não encontrado na conta ${cid}. Nada foi gravado.`);
+      if (group.status === "REMOVED") return fail(`Grupo ${adGroupId} ("${group.name}") está removido. Nada foi gravado.`);
+      if (campaign.advertisingChannelType !== "DISPLAY") {
+        return fail(
+          `O grupo ${adGroupId} é de campanha ${campaign.advertisingChannelType} ("${campaign.name}"). ` +
+          "Anúncio responsivo de Display vai em campanha DISPLAY. Nada foi gravado."
+        );
+      }
+
+      // 4. Imagens: existem, são IMAGE, proporção (±1%) e tamanho mínimo do campo
+      const specs = {
+        marketing: { ratio: 1.91, minW: 600, minH: 314, label: "paisagem 1.91:1 (mín. 600x314)", field: "marketingImages" },
+        square: { ratio: 1, minW: 300, minH: 300, label: "quadrada 1:1 (mín. 300x300)", field: "squareMarketingImages" },
+        logo: { ratio: 4, minW: 512, minH: 128, label: "logo 4:1 (mín. 512x128)", field: "logoImages" },
+        squareLogo: { ratio: 1, minW: 128, minH: 128, label: "logo 1:1 (mín. 128x128)", field: "squareLogoImages" },
+      } as const;
+      const ids = [...new Set(requested.map((r) => r.assetId))];
+      const assetRows = await client.searchStream(customerId,
+        `SELECT asset.id, asset.name, asset.type,
+                asset.image_asset.full_size.width_pixels, asset.image_asset.full_size.height_pixels
+         FROM asset
+         WHERE asset.id IN (${ids.join(", ")})`);
+      const assets = new Map<string, Record<string, unknown>>();
+      for (const row of assetRows) {
+        const asset = (row.asset ?? {}) as Record<string, unknown>;
+        assets.set(String(asset.id), asset);
+      }
+      const matches = (w: number, h: number, ratio: number) => Math.abs(w / h / ratio - 1) <= 0.01;
+      const placed: Record<keyof typeof specs, string[]> = { marketing: [], square: [], logo: [], squareLogo: [] };
+      const routing: Array<Record<string, unknown>> = [];
+      const warnings: string[] = [];
+      for (const item of requested) {
+        const asset = assets.get(item.assetId);
+        if (!asset) { problems.push(`asset ${item.assetId} não existe na conta ${cid}.`); continue; }
+        if (asset.type !== "IMAGE") { problems.push(`asset ${item.assetId} ("${asset.name ?? ""}") é ${asset.type}, não IMAGE.`); continue; }
+        const full = (((asset.imageAsset ?? {}) as Record<string, unknown>).fullSize ?? {}) as Record<string, unknown>;
+        const w = num(full.widthPixels);
+        const h = num(full.heightPixels);
+        let slot: keyof typeof specs;
+        if (item.slot === "auto") {
+          if (w && h && matches(w, h, 4)) slot = "logo";
+          else if (w && h && matches(w, h, 1)) slot = "squareLogo";
+          else {
+            problems.push(`logo ${item.assetId} tem ${w && h ? `${w}x${h}` : "dimensões desconhecidas"} — logo precisa ser 4:1 (logo_images) ou 1:1 (square_logo_images).`);
+            continue;
+          }
+        } else {
+          slot = item.slot;
+        }
+        const spec = specs[slot];
+        if (!w || !h) {
+          warnings.push(`asset ${item.assetId}: a API não informou as dimensões; a proporção ${spec.label} não foi conferida.`);
+        } else if (!matches(w, h, spec.ratio) || w < spec.minW || h < spec.minH) {
+          problems.push(`asset ${item.assetId} (${w}x${h}) não serve como ${spec.label}.`);
+          continue;
+        }
+        if (!placed[slot].includes(item.resourceName)) placed[slot].push(item.resourceName);
+        routing.push({ asset_id: item.assetId, dimensions: w && h ? `${w}x${h}` : undefined, field: spec.field, ...(item.slot === "auto" ? { from: "logoAssets" } : {}) });
+      }
+      if (placed.marketing.length + placed.square.length > 15) problems.push(`imagens de marketing (paisagem + quadradas): no máximo 15, recebidas ${placed.marketing.length + placed.square.length}.`);
+      if (placed.logo.length + placed.squareLogo.length > 5) problems.push(`logos (4:1 + 1:1): no máximo 5, recebidos ${placed.logo.length + placed.squareLogo.length}.`);
+      if (problems.length) return fail(`Nada foi gravado:\n- ${problems.join("\n- ")}`);
+
+      // 5. Vídeos do YouTube: precisam já ser asset YOUTUBE_VIDEO da conta
+      const videoAssets: string[] = [];
+      if (videoIds.length) {
+        const videoRows = await client.searchStream(customerId,
+          `SELECT asset.id, asset.resource_name, asset.youtube_video_asset.youtube_video_id
+           FROM asset
+           WHERE asset.type = 'YOUTUBE_VIDEO'
+             AND asset.youtube_video_asset.youtube_video_id IN (${videoIds.map((id) => `'${gaqlLiteral(id)}'`).join(", ")})`);
+        const byVideo = new Map<string, string>();
+        for (const row of videoRows) {
+          const asset = (row.asset ?? {}) as Record<string, unknown>;
+          const id = String(((asset.youtubeVideoAsset ?? {}) as Record<string, unknown>).youtubeVideoId ?? "");
+          if (id && !byVideo.has(id)) byVideo.set(id, String(asset.resourceName ?? ""));
+        }
+        const missing = videoIds.filter((id) => !byVideo.get(id));
+        if (missing.length) {
+          return fail(`Vídeo(s) sem asset na conta ${cid}: ${missing.join(", ")}. Registre antes com upload_video_asset. Nada foi gravado.`);
+        }
+        videoAssets.push(...videoIds.map((id) => byVideo.get(id)!));
+      }
+
+      // 6. Anúncio
+      const rda: Record<string, unknown> = {
+        headlines: heads.map((t) => ({ text: t })),
+        longHeadline: { text: longHead },
+        descriptions: descs.map((t) => ({ text: t })),
+        businessName: business,
+        marketingImages: placed.marketing.map((asset) => ({ asset })),
+        squareMarketingImages: placed.square.map((asset) => ({ asset })),
+      };
+      if (placed.logo.length) rda.logoImages = placed.logo.map((asset) => ({ asset }));
+      if (placed.squareLogo.length) rda.squareLogoImages = placed.squareLogo.map((asset) => ({ asset }));
+      if (videoAssets.length) rda.youtubeVideos = videoAssets.map((asset) => ({ asset }));
+      if (callToAction?.trim()) rda.callToActionText = callToAction.trim();
+      if (mainColor && accentColor) {
+        rda.mainColor = mainColor;
+        rda.accentColor = accentColor;
+      }
+      if (allowFlexibleColor !== undefined) rda.allowFlexibleColor = allowFlexibleColor;
+      if (formatSetting) rda.formatSetting = formatSetting;
+      if (promoText?.trim()) rda.promoText = promoText.trim();
+      if (pricePrefix?.trim()) rda.pricePrefix = pricePrefix.trim();
+      if (enableAssetEnhancements !== undefined || enableAutogenVideo !== undefined) {
+        rda.controlSpec = {
+          ...(enableAssetEnhancements !== undefined ? { enableAssetEnhancements } : {}),
+          ...(enableAutogenVideo !== undefined ? { enableAutogenVideo } : {}),
+        };
+      }
       const adData: Record<string, unknown> = {
         adGroup: `customers/${cid}/adGroups/${adGroupId}`,
         status: "PAUSED",
-        ad: {
-          finalUrls: [finalUrl],
-          responsiveDisplayAd: {
-            headlines: headlines.map(h => ({ text: h })),
-            longHeadline: { text: longHeadline },
-            descriptions: descriptions.map(d => ({ text: d })),
-            businessName,
-            marketingImages: marketingImageAssets.map(r => ({ asset: r })),
-            squareMarketingImages: squareMarketingImageAssets.map(r => ({ asset: r })),
-            logoImages: logoAssets.map(r => ({ asset: r })),
-          },
-        },
+        ad: { finalUrls: [finalUrl], responsiveDisplayAd: rda },
       };
 
-      const result = await client.mutateAdGroupAds(customerId, [{ create: adData }]);
-      return { content: [text(`Responsive Display Ad created (PAUSED).\n\n${formatJson(result)}`)] };
+      let result: Record<string, unknown>;
+      try {
+        result = await client.mutateAdGroupAds(customerId, [{ create: adData }]);
+      } catch (err) {
+        return fail(`A API recusou o anúncio responsivo de Display: ${(err as Error).message}\nNada foi criado.`);
+      }
+      const summary = {
+        ad_group: { id: String(adGroupId), name: group.name, campaign: campaign.name },
+        images: routing,
+        videos: videoAssets,
+        warnings,
+      };
+      if (client.isDryRun) {
+        return { content: [text(`DRY-RUN (validateOnly): anúncio responsivo de Display validado pela API — nada foi gravado.\n\n${formatJson(summary)}`)] };
+      }
+      const resource = ((result.results as Array<Record<string, unknown>>) ?? [])[0]?.resourceName;
+      if (!resource) return fail(`A API não confirmou a criação (resposta sem resourceName).\n\n${formatJson(result)}`);
+      return { content: [text(`Anúncio responsivo de Display criado (PAUSADO): ${resource}\n\n${formatJson(summary)}`)] };
     }
   );
 
@@ -3314,67 +3527,35 @@ export function registerGoogleAdsTools(
     "create_video_campaign",
     {
       description: [
-        "Create a Video (YouTube) campaign — NÃO SUPORTADO PELA API: campaigns:mutate recusa campanhas VIDEO novas",
-        "('Mutates are not allowed for the requested resource'). A tool retorna erro explicativo sem tocar na conta.",
-        "Para vídeo programático use create_demand_gen_campaign. Em campanha de vídeo criada no Google Ads,",
-        "só create_video_ad (anúncio em ad group VIDEO_RESPONSIVE existente) é aceito pela API.",
-        "WRITE OPERATION — created PAUSED by default.",
+        "NÃO CRIA CAMPANHA — a API do Google Ads não permite criar nem alterar campanhas de Vídeo: elas são só",
+        "leitura e relatório (docs 'Video campaigns'; mutações respondem VideoCampaignError.MUTATE_REQUIRES_RESERVATION",
+        "ou MutateError.MUTATE_NOT_ALLOWED). A tool sempre recusa, sem tocar na conta (nenhum orçamento é criado).",
         "",
-        "After creating, use create_video_ad to add video ads.",
-        "Supports in-stream (skippable), bumper (6s non-skippable), and video discovery.",
+        "Caminho suportado para vídeo por API: create_demand_gen_campaign — Demand Gen entrega vídeo no YouTube",
+        "(in-stream, in-feed e Shorts), Discover e Gmail, com anúncio de vídeo responsivo de Demand Gen.",
+        "Medir campanhas de Vídeo existentes: get_video_performance. Subir o arquivo do vídeo: upload_youtube_video.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
-        name: z.string().describe("Campaign name."),
-        dailyBudgetMicros: z.number().describe("Daily budget in MICROS."),
-        biddingStrategy: z.enum(["MAXIMIZE_CONVERSIONS", "TARGET_CPA", "MANUAL_CPV"]).optional()
-          .describe("Default: MAXIMIZE_CONVERSIONS. MANUAL_CPV for awareness."),
-        targetCpaMicros: z.number().optional().describe("Alvo de CPA em MICROS (ex: 50000000 = R$50). Obrigatório com TARGET_CPA."),
+        name: z.string().optional().describe("Ignorado — a campanha não é criada."),
       },
     },
-    async ({ customerId, name, dailyBudgetMicros, biddingStrategy, targetCpaMicros }) => {
+    async ({ customerId }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-
-      // A API do Google Ads não cria campanhas de VIDEO novas: campaigns:mutate responde
-      // "Mutates are not allowed for the requested resource" em todas as variantes
-      // (com/sem networkSettings, subtype VIDEO_ACTION). Recusar antes do orçamento
-      // evita um budget órfão a cada tentativa.
+      // Recusa antes de qualquer chamada: tentar criar orçamento + campanha VIDEO deixava
+      // um orçamento órfão a cada tentativa, e a API recusa a campanha em todas as variantes.
       return {
         content: [
           text(
-            "create_video_campaign: a API do Google Ads não permite criar nem alterar campanhas de vídeo " +
-              "(só leitura, e anúncios em ad groups VIDEO_RESPONSIVE já existentes via create_video_ad). " +
-              `Para vídeo programático use create_demand_gen_campaign. Nada foi alterado na conta ${customerId}.`,
+            "create_video_campaign: a API do Google Ads não permite criar nem alterar campanhas de Vídeo " +
+              "(só leitura e relatório — VideoCampaignError.MUTATE_REQUIRES_RESERVATION). " +
+              "Para vídeo por API use create_demand_gen_campaign (YouTube in-stream, in-feed e Shorts, Discover e Gmail). " +
+              `Para medir campanhas de Vídeo existentes use get_video_performance. Nada foi alterado na conta ${customerId}.`,
           ),
         ],
         isError: true,
       };
-
-      // Valida ANTES de criar o orçamento: TARGET_CPA sem alvo subia a campanha sem
-      // CPA-alvo nenhum (o ramo virava MAXIMIZE_CONVERSIONS puro) e dizia sucesso.
-      const strategy = biddingStrategy ?? "MAXIMIZE_CONVERSIONS";
-      if (strategy === "TARGET_CPA" && !targetCpaMicros) {
-        return { content: [text("TARGET_CPA exige targetCpaMicros (ex: 50000000 = R$50 por conversão).")], isError: true };
-      }
-
-      const budgetResult = await client.mutateCampaignBudgets(customerId, [
-        { create: { name: `Budget — ${name}`, amountMicros: String(dailyBudgetMicros), deliveryMethod: "STANDARD", explicitlyShared: false } },
-      ]);
-      const budgetResource = ((budgetResult as Record<string, unknown>).results as Array<Record<string, unknown>>)?.[0]?.resourceName as string;
-
-      const campaignData: Record<string, unknown> = {
-        name, status: "PAUSED", advertisingChannelType: "VIDEO", campaignBudget: budgetResource, containsEuPoliticalAdvertising: EU_POLITICAL_DECLARATION,
-      };
-      if (strategy === "TARGET_CPA") campaignData.maximizeConversions = { targetCpaMicros: String(targetCpaMicros) };
-      else if (strategy === "MANUAL_CPV") campaignData.manualCpv = {};
-      else campaignData.maximizeConversions = {};
-
-      const result = await client.mutateCampaigns(customerId, [{ create: campaignData }]);
-      const resource = ((result as Record<string, unknown>).results as Array<Record<string, unknown>>)?.[0]?.resourceName as string;
-
-      return { content: [text(`Video campaign created (PAUSED): ${name}\nResource: ${resource}\nNext: create ad group → create_video_ad.`)] };
     }
   );
 
@@ -3382,20 +3563,27 @@ export function registerGoogleAdsTools(
     "create_video_ad",
     {
       description: [
-        "Create a video ad (YouTube) in an ad group.",
-        "WRITE OPERATION — created PAUSED by default.",
+        "Cria um anúncio de vídeo responsivo (VIDEO_RESPONSIVE_AD) num grupo VIDEO_RESPONSIVE de campanha de Vídeo existente.",
+        "WRITE OPERATION — criado PAUSADO.",
         "",
-        "The video must already be on YouTube. Use upload_video_asset first if needed.",
+        "ATENÇÃO: a API trata campanhas de Vídeo como só leitura; alterar uma campanha de Vídeo sem reserva é recusado",
+        "(VideoCampaignError.MUTATE_REQUIRES_RESERVATION) — a tool explica o erro quando isso acontece. Para vídeo",
+        "por API o caminho suportado é Demand Gen (create_demand_gen_campaign + anúncio de vídeo de Demand Gen);",
+        "grupo de Demand Gen é recusado aqui, porque lá o tipo de anúncio é outro (DEMAND_GEN_VIDEO_RESPONSIVE_AD).",
+        "",
+        "Antes de gravar confere: grupo existe nesta conta, é VIDEO_RESPONSIVE em campanha VIDEO; o logo é asset IMAGE",
+        "1:1 (mín. 128x128). O vídeo precisa estar no YouTube (upload_youtube_video sobe o arquivo): o asset",
+        "YOUTUBE_VIDEO é reaproveitado se existir, senão é criado antes do anúncio.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
-        adGroupId: z.string().describe("Ad group ID (tipo VIDEO_RESPONSIVE, em campanha Video action)."),
-        youtubeVideoId: z.string().describe("YouTube video ID. Reaproveita o asset se o vídeo já existir na conta; senão cria."),
+        adGroupId: z.string().describe("Ad group ID (tipo VIDEO_RESPONSIVE, em campanha de Vídeo)."),
+        youtubeVideoId: z.string().describe("YouTube video ID (11 caracteres). Reaproveita o asset se o vídeo já existir na conta; senão cria."),
         finalUrl: z.string().describe("Landing page URL."),
         headline: z.string().optional().describe("Headline (max 15 chars). Obrigatório na prática: a API rejeita o anúncio sem ele."),
         description: z.string().optional().describe("Description (max 70 chars). Obrigatório na prática."),
         callToAction: z.string().optional().describe("CTA text (e.g. 'Saiba mais', 'Comprar agora'). Max 10 chars. Obrigatório na prática."),
-        logoAssetId: z.string().optional().describe("ID de um asset IMAGE quadrado (1:1, ex.: 1200x1200) já na conta, usado como logo — a API exige ao menos um. Ache com get_image_assets."),
+        logoAssetId: z.string().optional().describe("ID de um asset IMAGE quadrado (1:1, mín. 128x128, ex.: 1200x1200) já na conta, usado como logo — a API exige ao menos um. Ache com get_image_assets."),
         businessName: z.string().optional().describe("Nome da marca/anunciante exibido no anúncio (max 25 chars). Obrigatório na prática: a API exige business_name no responsive video ad."),
         longHeadline: z.string().optional().describe("Long headline (max 90 chars). Default: reutiliza headline."),
       },
@@ -3403,8 +3591,9 @@ export function registerGoogleAdsTools(
     async ({ customerId, adGroupId, youtubeVideoId, finalUrl, headline, description, callToAction, logoAssetId, businessName, longHeadline }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
+      const fail = (message: string) => ({ content: [text(message)], isError: true });
       const cid = customerId.replace(/-/g, "");
+      if (!/^\d+$/.test(cid)) return fail(`customerId inválido: "${customerId}". Nada foi gravado.`);
 
       // VideoResponsiveAdInfo (v25) só tem coleções — videos[], headlines[],
       // longHeadlines[], descriptions[], callToActions[], logoImages[] — e a API
@@ -3412,7 +3601,53 @@ export function registerGoogleAdsTools(
       // campos opcionais para não mudar o contrato; a exigência fica explícita aqui.
       const faltando = [!headline && "headline", !description && "description", !callToAction && "callToAction", !logoAssetId && "logoAssetId", !businessName && "businessName"].filter(Boolean);
       if (faltando.length > 0) {
-        return { content: [text(`Video responsive ad exige ${faltando.join(", ")} (a API rejeita o anúncio sem eles).`)], isError: true };
+        return fail(`Video responsive ad exige ${faltando.join(", ")} (a API rejeita o anúncio sem eles). Nada foi gravado.`);
+      }
+      const problems: string[] = [];
+      if (!/^\d+$/.test(String(adGroupId))) problems.push(`adGroupId deve ser numérico, recebido "${adGroupId}".`);
+      if (!/^[A-Za-z0-9_-]{11}$/.test(youtubeVideoId)) problems.push(`youtubeVideoId "${youtubeVideoId}" não é ID de vídeo do YouTube (11 caracteres).`);
+      const logoRef = parseImageAssetRef(String(logoAssetId), cid);
+      if ("error" in logoRef) problems.push(logoRef.error);
+      if (problems.length) return fail(`Nada foi gravado:\n- ${problems.join("\n- ")}`);
+      const logo = logoRef as { assetId: string; resourceName: string };
+
+      const client = getClient();
+
+      // Leitura antes de escrever: grupo e logo conferidos ANTES de criar o asset do vídeo
+      const groupRows = await client.searchStream(customerId,
+        `SELECT ad_group.id, ad_group.name, ad_group.status, ad_group.type,
+                campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type
+         FROM ad_group
+         WHERE ad_group.id = ${adGroupId}`);
+      const group = (groupRows[0]?.adGroup ?? {}) as Record<string, unknown>;
+      const campaign = (groupRows[0]?.campaign ?? {}) as Record<string, unknown>;
+      if (!groupRows[0]) return fail(`Grupo de anúncios ${adGroupId} não encontrado na conta ${cid}. Nada foi gravado.`);
+      if (group.status === "REMOVED") return fail(`Grupo ${adGroupId} ("${group.name}") está removido. Nada foi gravado.`);
+      if (campaign.advertisingChannelType === "DEMAND_GEN") {
+        return fail(
+          `O grupo ${adGroupId} é de campanha Demand Gen ("${campaign.name}"). Em Demand Gen o anúncio de vídeo é ` +
+          "DEMAND_GEN_VIDEO_RESPONSIVE_AD, não VIDEO_RESPONSIVE_AD — use a tool de anúncio de vídeo de Demand Gen. Nada foi gravado."
+        );
+      }
+      if (campaign.advertisingChannelType !== "VIDEO") {
+        return fail(`O grupo ${adGroupId} é de campanha ${campaign.advertisingChannelType} ("${campaign.name}"), não de Vídeo. Nada foi gravado.`);
+      }
+      if (group.type !== "VIDEO_RESPONSIVE") {
+        return fail(`O grupo ${adGroupId} é do tipo ${group.type}; anúncio de vídeo responsivo vai em grupo VIDEO_RESPONSIVE. Nada foi gravado.`);
+      }
+      const logoRows = await client.searchStream(customerId,
+        `SELECT asset.id, asset.name, asset.type,
+                asset.image_asset.full_size.width_pixels, asset.image_asset.full_size.height_pixels
+         FROM asset
+         WHERE asset.id = ${logo.assetId}`);
+      const logoAsset = (logoRows[0]?.asset ?? {}) as Record<string, unknown>;
+      if (!logoRows[0]) return fail(`Logo: asset ${logo.assetId} não existe na conta ${cid}. Nada foi gravado.`);
+      if (logoAsset.type !== "IMAGE") return fail(`Logo: asset ${logo.assetId} é ${logoAsset.type}, não IMAGE. Nada foi gravado.`);
+      const logoFull = (((logoAsset.imageAsset ?? {}) as Record<string, unknown>).fullSize ?? {}) as Record<string, unknown>;
+      const lw = num(logoFull.widthPixels);
+      const lh = num(logoFull.heightPixels);
+      if (lw && lh && (Math.abs(lw / lh - 1) > 0.01 || lw < 128 || lh < 128)) {
+        return fail(`Logo: asset ${logo.assetId} tem ${lw}x${lh}; o logo do anúncio de vídeo precisa ser 1:1 (±1%) e no mínimo 128x128. Nada foi gravado.`);
       }
 
       // videos[].asset é um resource name de asset YOUTUBE_VIDEO — a API não aceita
@@ -3422,12 +3657,22 @@ export function registerGoogleAdsTools(
       const found = await client.searchStream(customerId,
         `SELECT asset.resource_name FROM asset WHERE asset.type = 'YOUTUBE_VIDEO' AND asset.youtube_video_asset.youtube_video_id = '${gaqlLiteral(youtubeVideoId)}' LIMIT 1`);
       let videoAsset = (found[0]?.asset as Record<string, unknown> | undefined)?.resourceName as string | undefined;
+      let createdVideoAsset = false;
       if (!videoAsset) {
         const assetResult = await client.mutateAssets(customerId, [{ create: { type: "YOUTUBE_VIDEO", youtubeVideoAsset: { youtubeVideoId } } }]);
         videoAsset = ((assetResult as Record<string, unknown>).results as Array<Record<string, unknown>>)?.[0]?.resourceName as string | undefined;
+        createdVideoAsset = Boolean(videoAsset);
       }
       if (!videoAsset) {
-        return { content: [text(`Error: não foi possível obter o asset do vídeo ${youtubeVideoId}.`)], isError: true };
+        if (client.isDryRun) {
+          return {
+            content: [text(
+              `DRY-RUN (validateOnly): o asset do vídeo ${youtubeVideoId} seria criado, mas sem ele o anúncio não pode ` +
+              "ser validado (em validate_only a API não devolve o ID do asset). Nada foi gravado."
+            )],
+          };
+        }
+        return fail(`Error: não foi possível obter o asset do vídeo ${youtubeVideoId}. Nada foi gravado.`);
       }
 
       const videoAdInfo: Record<string, unknown> = {
@@ -3437,7 +3682,7 @@ export function registerGoogleAdsTools(
         descriptions: [{ text: description }],
         callToActions: [{ text: callToAction }],
         // A API exige ao menos um logo (asset IMAGE 1:1) no responsive video ad.
-        logoImages: [{ asset: `customers/${cid}/assets/${logoAssetId}` }],
+        logoImages: [{ asset: logo.resourceName }],
         // business_name é Required na v25 (nome da marca, max 25 chars) — sem ele a
         // API devolve REQUIRED no nível do video_responsive_ad, sem apontar o campo.
         businessName: { text: businessName },
@@ -3454,8 +3699,28 @@ export function registerGoogleAdsTools(
         },
       };
 
-      const result = await client.mutateAdGroupAds(customerId, [{ create: adData }]);
-      return { content: [text(`Video ad created (PAUSED) with video ${youtubeVideoId} (asset ${videoAsset}).\n\n${formatJson(result)}`)] };
+      let result: Record<string, unknown>;
+      try {
+        result = await client.mutateAdGroupAds(customerId, [{ create: adData }]);
+      } catch (err) {
+        const message = (err as Error).message;
+        const assetNote = createdVideoAsset
+          ? `\nO asset do vídeo (${videoAsset}) foi criado antes e continua na biblioteca — pode ser reutilizado.`
+          : "";
+        if (/MUTATE_REQUIRES_RESERVATION|without reservation|requires? (a )?reservation|MUTATE_NOT_ALLOWED|Mutates are not allowed/i.test(message)) {
+          return fail(
+            `A API recusou: campanhas de Vídeo não podem ser alteradas pela API sem reserva ` +
+            `(VideoCampaignError.MUTATE_REQUIRES_RESERVATION). Crie o anúncio pela interface do Google Ads, ` +
+            `ou use Demand Gen (create_demand_gen_campaign + anúncio de vídeo de Demand Gen) para vídeo por API.\n` +
+            `Erro da API: ${message}${assetNote}`
+          );
+        }
+        return fail(`A API recusou o anúncio de vídeo: ${message}${assetNote}`);
+      }
+      if (client.isDryRun) {
+        return { content: [text(`DRY-RUN (validateOnly): anúncio de vídeo validado pela API — nada foi gravado.`)] };
+      }
+      return { content: [text(`Video ad created (PAUSED) with video ${youtubeVideoId} (asset ${videoAsset}${createdVideoAsset ? ", criado agora" : ""}).\n\n${formatJson(result)}`)] };
     }
   );
 

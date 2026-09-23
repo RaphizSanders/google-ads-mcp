@@ -616,4 +616,153 @@ export class GoogleAdsClient {
     }
     return data as T;
   }
+
+  // ── lote video-display ──
+  //
+  // Upload resumável (protocolo X-Goog-Upload), usado pelo YouTubeVideoUploadService:
+  // POST https://googleads.googleapis.com/resumable/upload/<versão>/customers/{cid}/youTubeVideoUploads:create.
+  // A base de URL (/resumable/upload/) e os cabeçalhos X-Goog-Upload-* não passam pelo
+  // request() genérico, que só fala JSON e não lê cabeçalhos de resposta. O endpoint não
+  // tem validate_only: em dry-run as três chamadas são recusadas (fail-closed).
+
+  private assertResumableAllowed(what: string): void {
+    this.assertWriteAllowed();
+    if (this.dryRun) {
+      throw new Error(`GOOGLE_ADS_DRY_RUN: ${what} (upload resumável) não aceita validateOnly — upload bloqueado em dry-run.`);
+    }
+  }
+
+  /** A URL de upload vem num cabeçalho da API; o token só segue para o host do Google Ads. */
+  private assertUploadUrl(uploadUrl: string): void {
+    let parsed: URL;
+    try {
+      parsed = new URL(uploadUrl);
+    } catch {
+      throw new Error(`URL de upload inválida: ${uploadUrl.slice(0, 120)}`);
+    }
+    if (parsed.protocol !== "https:" || parsed.hostname !== "googleads.googleapis.com") {
+      throw new Error(`URL de upload fora de googleads.googleapis.com recusada: ${parsed.origin}`);
+    }
+  }
+
+  private static async resumableError(res: Response, step: string): Promise<Error> {
+    const raw = await res.text().catch(() => "");
+    let detail = raw.slice(0, 300);
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      const err = (Array.isArray(parsed) ? (parsed[0] as Record<string, unknown>)?.error : parsed.error) as
+        | Record<string, unknown>
+        | undefined;
+      if (err) {
+        const details = ((err.details as Array<Record<string, unknown>>) ?? [])
+          .flatMap((d) => (d.errors as Array<Record<string, unknown>>) ?? [])
+          .map((e) => {
+            const codes = Object.entries((e.errorCode as Record<string, unknown>) ?? {}).map(([k, v]) => `${k}.${v}`);
+            return `${String(e.message ?? "")}${codes.length ? ` [${codes.join(", ")}]` : ""}`;
+          })
+          .filter(Boolean);
+        detail = `${String(err.message ?? "")}${details.length ? ` — ${details.join("; ")}` : ""}`;
+      }
+    } catch {
+      // corpo não-JSON: fica o texto cru
+    }
+    return new Error(`Google Ads API (${step}, HTTP ${res.status}): ${detail || "sem detalhe"}`);
+  }
+
+  /**
+   * Abre a sessão de upload resumável. `action` é o caminho depois de customers/{cid}/
+   * (ex.: "youTubeVideoUploads:create"). Devolve a URL de upload e a granularidade dos
+   * pedaços (todo pedaço, menos o último, precisa ser múltiplo dela).
+   */
+  async startResumableUpload(
+    customerId: string,
+    action: string,
+    body: unknown,
+    totalBytes?: number
+  ): Promise<{ uploadUrl: string; chunkGranularity: number }> {
+    this.assertResumableAllowed(action);
+    const cid = customerId.replace(/-/g, "");
+    const url = `https://googleads.googleapis.com/resumable/upload/${API_VERSION}/customers/${cid}/${action}`;
+    const headers: Record<string, string> = {
+      ...(await this.getHeaders()),
+      "X-Goog-Upload-Protocol": "resumable",
+      "X-Goog-Upload-Command": "start",
+    };
+    if (totalBytes !== undefined) headers["X-Goog-Upload-Header-Content-Length"] = String(totalBytes);
+    const res = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
+    if (!res.ok) throw await GoogleAdsClient.resumableError(res, "início do upload");
+    const uploadUrl = res.headers.get("x-goog-upload-url");
+    if (!uploadUrl) throw new Error("Google Ads API: a resposta do início do upload não trouxe x-goog-upload-url.");
+    this.assertUploadUrl(uploadUrl);
+    const granularity = parseInt(res.headers.get("x-goog-upload-chunk-granularity") ?? "", 10);
+    return { uploadUrl, chunkGranularity: granularity > 0 ? granularity : 262_144 };
+  }
+
+  /**
+   * Envia um pedaço na posição `offset`. Com finalize=true é o último e a resposta traz o
+   * corpo JSON da operação (ex.: { resourceName }). `status` é o X-Goog-Upload-Status
+   * ("active" enquanto a sessão aceita mais bytes, "final" ao terminar).
+   */
+  async sendResumableChunk(
+    uploadUrl: string,
+    offset: number,
+    chunk: Uint8Array,
+    finalize: boolean
+  ): Promise<{ status: string; body: Record<string, unknown> | null }> {
+    this.assertResumableAllowed("envio de bytes");
+    this.assertUploadUrl(uploadUrl);
+    const token = await this.getAccessToken();
+    const res = await fetch(uploadUrl, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "X-Goog-Upload-Offset": String(offset),
+        "X-Goog-Upload-Command": finalize ? "upload, finalize" : "upload",
+      },
+      body: chunk as unknown as RequestInit["body"],
+    });
+    if (!res.ok) throw await GoogleAdsClient.resumableError(res, `envio do pedaço em ${offset}`);
+    const status = (res.headers.get("x-goog-upload-status") ?? "").toLowerCase();
+    if (!finalize) {
+      await res.arrayBuffer().catch(() => undefined);
+      return { status: status || "active", body: null };
+    }
+    const raw = await res.text();
+    let body: Record<string, unknown> | null = null;
+    try {
+      body = raw ? (JSON.parse(raw) as Record<string, unknown>) : null;
+    } catch {
+      throw new Error(`Google Ads API: o upload terminou com resposta não-JSON (HTTP ${res.status}).`);
+    }
+    return { status: status || "final", body };
+  }
+
+  /** Quantos bytes o servidor já recebeu (X-Goog-Upload-Size-Received), para retomar. */
+  async queryResumableUpload(uploadUrl: string): Promise<{ status: string; sizeReceived: number }> {
+    this.assertResumableAllowed("consulta do upload");
+    this.assertUploadUrl(uploadUrl);
+    const token = await this.getAccessToken();
+    const res = await fetch(uploadUrl, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "X-Goog-Upload-Command": "query" },
+    });
+    if (!res.ok) throw await GoogleAdsClient.resumableError(res, "consulta do upload");
+    await res.arrayBuffer().catch(() => undefined);
+    return {
+      status: (res.headers.get("x-goog-upload-status") ?? "").toLowerCase(),
+      sizeReceived: Number(res.headers.get("x-goog-upload-size-received") ?? NaN),
+    };
+  }
+
+  /** Cancela a sessão (melhor esforço) quando o upload não pode terminar. */
+  async cancelResumableUpload(uploadUrl: string): Promise<void> {
+    this.assertResumableAllowed("cancelamento do upload");
+    this.assertUploadUrl(uploadUrl);
+    const token = await this.getAccessToken();
+    const res = await fetch(uploadUrl, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "X-Goog-Upload-Command": "cancel" },
+    });
+    await res.arrayBuffer().catch(() => undefined);
+  }
 }
