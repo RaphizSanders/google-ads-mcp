@@ -288,19 +288,10 @@ export const VALIDATE_ONLY_BANNER = "VALIDATE-ONLY: modo validação (validate_o
  * a chamada gravaria de verdade.
  */
 export const CHAINED_WRITE_TOOLS = new Set([
-  "create_pmax_campaign",
-  "create_asset_group",
-  "create_display_campaign",
-  "create_shopping_campaign",
-  "create_demand_gen_campaign",
+  // Só o que ainda grava em passos dependentes. As criações de campanha (PMax, Display, Shopping,
+  // Demand Gen), asset group, extensões e listas de negativas passaram a ir num único googleAds:mutate
+  // atômico com IDs temporários — nelas o validateOnly valida o pedido inteiro.
   "create_video_ad",
-  "create_sitelink_extension",
-  "create_callout_extension",
-  "create_structured_snippet",
-  "create_call_extension",
-  "create_price_extension",
-  "create_promotion_extension",
-  "create_shared_negative_list",
   ...MODULE_CHAINED_WRITE_TOOLS,
 ]);
 

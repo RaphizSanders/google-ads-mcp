@@ -1419,6 +1419,24 @@ export function registerGoogleAdsTools(
       // Valida a estratégia de lance ANTES de criar o orçamento: TARGET_CPA/ROAS sem o
       // alvo retornaria erro depois do mutate do budget e deixaria um orçamento órfão.
       const strategy = biddingStrategy ?? "MAXIMIZE_CONVERSIONS";
+      // Estratégias que o canal não aceita: a API recusaria depois de montar tudo.
+      // PMax só tem as de conversão; Demand Gen não tem CPC manual.
+      const STRATEGIES_NOT_ALLOWED: Record<string, string[]> = {
+        PERFORMANCE_MAX: ["TARGET_SPEND", "MANUAL_CPC"],
+        DEMAND_GEN: ["MANUAL_CPC"],
+      };
+      if (STRATEGIES_NOT_ALLOWED[channelType]?.includes(strategy)) {
+        return {
+          content: [text(
+            `${channelType} não aceita ${strategy}: campanhas ${channelType} aceitam só ` +
+            (channelType === "PERFORMANCE_MAX"
+              ? "MAXIMIZE_CONVERSIONS, MAXIMIZE_CONVERSION_VALUE, TARGET_CPA ou TARGET_ROAS."
+              : "TARGET_SPEND, MAXIMIZE_CONVERSIONS, MAXIMIZE_CONVERSION_VALUE, TARGET_CPA ou TARGET_ROAS — ou use create_demand_gen_campaign, que cobre os lances e controles de Demand Gen.") +
+            " Nada foi criado."
+          )],
+          isError: true,
+        };
+      }
       if (strategy === "TARGET_CPA" && !targetCpaMicros) {
         return { content: [text("TARGET_CPA exige targetCpaMicros (ex: 50000000 = R$50 por conversão).")], isError: true };
       }

@@ -1104,12 +1104,16 @@ test("create_promotion_extension: exclusividades e ocasião inválida barradas a
   assert.ok(!("occasion" in promo), "NONE não existe na API: é omitido");
 });
 
-test("create_*_extension: validateOnly segue recusado (lista de encadeadas em tool-kit) sem enviar nada", async () => {
+test("create_*_extension: validateOnly por chamada valida asset + vínculo de uma vez e não diz que criou", async () => {
+  // Asset e vínculo vão num único googleAds:mutate atômico; por isso a tool saiu da lista de
+  // encadeadas e o validateOnly roda num client em dry-run, validando o pedido inteiro.
   const { client, calls } = fakeClient();
   const result = await call(client, "create_callout_extension", { campaignId: CAMPAIGN_ID, calloutText: "Frete", validateOnly: true });
-  assert.equal(result.isError, true);
-  assert.match(textOf(result), /validateOnly não é suportado/);
-  assert.equal(calls.queries.length + calls.writes.length + calls.dryRunClones, 0);
+  assert.equal(calls.dryRunClones, 1, "a chamada roda num client em dry-run");
+  assert.match(result.content[0].text ?? "", /^VALIDATE-ONLY/);
+  assert.doesNotMatch(textOf(result), /validateOnly não é suportado/);
+  assert.ok(calls.writes.length <= 1, "no máximo um googleAds:mutate (atômico)");
+  assert.doesNotMatch(textOf(result), /\bcriad[oa]s? com sucesso\b/i);
 });
 
 test("tools novas de escrita ganham validateOnly; as de leitura não", () => {

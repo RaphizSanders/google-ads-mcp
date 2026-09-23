@@ -9,7 +9,7 @@
  * continuam em CHAINED_WRITE_TOOLS (src/tool-kit.ts, fora deste lote): um catálogo de módulo só
  * acrescenta a esse conjunto, não retira. Até o integrador tirar as duas de lá, o validateOnly por
  * chamada é recusado pelo wrapper (nada é enviado); o modo dry-run global (GOOGLE_ADS_DRY_RUN) já
- * valida o pedido inteiro. Ver docs/batches/pmax-assets.md, "Pendente para o integrador".
+ * valida o pedido inteiro. Ver docs/tools/pmax-assets.md, "Pendente para o integrador".
  */
 export const catalog = {
   read: ["list_asset_group_assets"] as string[],

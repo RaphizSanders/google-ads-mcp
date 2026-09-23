@@ -2,7 +2,7 @@
  * Lote experiments-tracking: experimentos, rastreamento de URL, rótulos e aquisição de clientes.
  *
  * Tudo aqui foi conferido nos protos oficiais da v25 (services/resources/common/enums) e nos
- * guias de developers.google.com — ver docs/batches/experiments-tracking.md para as fontes.
+ * guias de developers.google.com — ver docs/tools/experiments-tracking.md para as fontes.
  *
  * Convenções (iguais às do núcleo):
  * - checkCustomerAccess antes de tudo, em toda tool (o teste de allowlist confere no fonte);

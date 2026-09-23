@@ -4,6 +4,7 @@ import { registerGoogleAdsPrompts } from "./prompts.js";
 import { registerGoogleAdsResources } from "./resources.js";
 import { registerGoogleAdsTools } from "./tools.js";
 import { createReadOnlyToolServer } from "./read-only.js";
+import { createToolGroupServer } from "./tool-groups.js";
 
 export interface McpServerOptions {
   getClient: () => GoogleAdsClient;
@@ -13,6 +14,8 @@ export interface McpServerOptions {
      fail-closed reading of an empty allowlist, which must not apply to a
      locally spawned stdio process. */
   hosted?: boolean;
+  /* Grupos de tools publicados (GOOGLE_ADS_TOOL_GROUPS); null/ausente = todos. */
+  toolGroups?: string[] | null;
 }
 
 export function createMcpServer(opts: McpServerOptions): McpServer {
@@ -30,7 +33,7 @@ export function createMcpServer(opts: McpServerOptions): McpServer {
     }
   );
   registerGoogleAdsTools(
-    createReadOnlyToolServer(server, opts.readOnly ?? false),
+    createToolGroupServer(createReadOnlyToolServer(server, opts.readOnly ?? false), opts.toolGroups ?? null),
     opts.getClient,
     opts.allowedCustomerIds ?? [],
     opts.hosted ?? false

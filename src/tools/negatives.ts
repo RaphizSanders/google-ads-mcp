@@ -33,7 +33,7 @@ import type { ToolContext } from "../tool-kit.js";
 type Row = Record<string, unknown>;
 type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
 
-// ── Limites (fontes em docs/batches/negatives.md) ─────────────────────
+// ── Limites (fontes em docs/tools/negatives.md) ─────────────────────
 
 export const NEGATIVE_LIMITS = {
   /** KeywordInfo.text (common/criteria.proto v25): "at most 80 characters and 10 words". */

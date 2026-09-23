@@ -11,7 +11,7 @@
  * common/user_lists.proto, common/criteria.proto, resources/{campaign,ad_group}_criterion.proto,
  * common/targeting_setting.proto, errors/criterion_error.proto, errors/user_list_error.proto,
  * errors/custom_audience_error.proto, services/offline_user_data_job_service.proto e as páginas
- * de remarketing/targeting da documentação — ver docs/batches/audiences.md.
+ * de remarketing/targeting da documentação — ver docs/tools/audiences.md.
  */
 import { createHash } from "node:crypto";
 import { z } from "zod";

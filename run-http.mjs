@@ -20,10 +20,7 @@ if (existsSync(envPath)) {
   }
 }
 process.env.PORT = process.env.PORT || "3333";
+// Developer token: descontinuado em 09/09/2026 (a API ignora o header). Opcional.
 const token = process.env.GOOGLE_ADS_DEVELOPER_TOKEN;
-if (!token) {
-  console.error("[run-http] GOOGLE_ADS_DEVELOPER_TOKEN não encontrado em .env");
-  process.exit(1);
-}
-globalThis.__GOOGLE_ADS_DEVELOPER_TOKEN = token;
+if (token) globalThis.__GOOGLE_ADS_DEVELOPER_TOKEN = token;
 await import("./dist/index.js");

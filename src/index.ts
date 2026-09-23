@@ -26,6 +26,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { GoogleAdsClient } from "./google-ads-client.js";
 import { createMcpServer } from "./server.js";
+import { parseToolGroups } from "./tool-groups.js";
 import { parseBoolEnv, parseReadOnlyMode } from "./read-only.js";
 import {
   assertHostedReadOnlySecurity,
@@ -52,6 +53,9 @@ const READ_ONLY = parseReadOnlyMode(process.env.GOOGLE_ADS_READ_ONLY);
    a API valida o payload completo e devolve os mesmos erros de uma gravação
    real, sem alterar a conta. Desligado por padrão. */
 const DRY_RUN = parseBoolEnv("GOOGLE_ADS_DRY_RUN", process.env.GOOGLE_ADS_DRY_RUN);
+/* GOOGLE_ADS_TOOL_GROUPS=core,targeting-geo,... publica só esses grupos de tools (o catálogo
+   completo passa de 300 tools). Ausente ou "all" = todas. Grupo desconhecido derruba o boot. */
+const TOOL_GROUPS = parseToolGroups(process.env.GOOGLE_ADS_TOOL_GROUPS);
 const ALLOWED_HOSTS = parseAllowedHosts(process.env.MCP_ALLOWED_HOSTS);
 
 assertHostedReadOnlySecurity({
@@ -88,6 +92,7 @@ function serverOpts() {
     allowedCustomerIds: ALLOWED_CUSTOMER_IDS,
     readOnly: READ_ONLY,
     hosted: PORT > 0,
+    toolGroups: TOOL_GROUPS,
   };
 }
 

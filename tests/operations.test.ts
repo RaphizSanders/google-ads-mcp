@@ -202,6 +202,19 @@ test("create_campaign: teto de CPC fora de TARGET_SPEND é recusado antes de env
   assert.equal(calls.writes.length, 0);
 });
 
+test("create_campaign: estratégia que o canal não aceita é recusada antes de enviar", async () => {
+  for (const [channelType, biddingStrategy] of [["PERFORMANCE_MAX", "TARGET_SPEND"], ["PERFORMANCE_MAX", "MANUAL_CPC"], ["DEMAND_GEN", "MANUAL_CPC"]]) {
+    const { client, calls } = fakeClient();
+    const result = await call(client, "create_campaign", { name: "X", channelType, dailyBudgetMicros: 80_000_000, biddingStrategy });
+    assert.equal(result.isError, true, `${channelType} + ${biddingStrategy}`);
+    assert.match(textOf(result), /não aceita/);
+    assert.equal(calls.writes.length, 0);
+  }
+  const ok = fakeClient();
+  await call(ok.client, "create_campaign", { name: "X", channelType: "DEMAND_GEN", dailyBudgetMicros: 80_000_000, biddingStrategy: "TARGET_SPEND" });
+  assert.equal(ok.calls.writes.length, 1, "Demand Gen aceita Maximizar cliques");
+});
+
 test("create_campaign: CPC manual sai sem Enhanced CPC, e a recusa da API é traduzida", async () => {
   const ok = fakeClient();
   await call(ok.client, "create_campaign", { name: "Busca", channelType: "SEARCH", dailyBudgetMicros: 80_000_000, biddingStrategy: "MANUAL_CPC" });
@@ -630,11 +643,11 @@ test("validateOnly em endpoint sem validate_only (aplicar recomendação) é blo
 
 test("validateOnly em tool de passos encadeados é recusado sem enviar nada", async () => {
   const { client, calls } = fakeClient();
-  const result = await call(client, "create_sitelink_extension", {
-    campaignId: CAMPAIGN_ID, linkText: "Contato", finalUrl: "https://exemplo.com/contato", validateOnly: true,
+  const result = await call(client, "create_video_ad", {
+    adGroupId: "777", youtubeVideoId: "abc123", validateOnly: true,
   });
   assert.equal(result.isError, true);
-  assert.match(textOf(result), /validateOnly não é suportado em create_sitelink_extension/);
+  assert.match(textOf(result), /validateOnly não é suportado em create_video_ad/);
   assert.equal(calls.writes.length + calls.queries.length, 0);
   assert.equal(calls.dryRunClones, 0);
 });

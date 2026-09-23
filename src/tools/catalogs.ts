@@ -58,3 +58,38 @@ const CATALOGS = [
 export const MODULE_READ_TOOLS: string[] = CATALOGS.flatMap((c) => c.read);
 export const MODULE_WRITE_TOOLS: string[] = CATALOGS.flatMap((c) => c.write);
 export const MODULE_CHAINED_WRITE_TOOLS: string[] = CATALOGS.flatMap((c) => c.chained);
+
+/** Chave de cada módulo, na mesma ordem de CATALOGS — é o nome do grupo em GOOGLE_ADS_TOOL_GROUPS. */
+export const MODULE_KEYS: string[] = [
+  "targeting-geo",
+  "bid-modifiers",
+  "placements-brand-safety",
+  "rsa-ads",
+  "extensions",
+  "asset-library",
+  "keywords",
+  "negatives",
+  "planner-recommendations",
+  "budgets",
+  "bidding",
+  "experiments-tracking",
+  "conversions-core",
+  "conversions-offline",
+  "conversions-reporting",
+  "pmax-assets",
+  "pmax-signals",
+  "shopping",
+  "retail-reporting",
+  "demand-gen",
+  "video-display",
+  "audiences",
+  "diagnostics",
+  "reports",
+  "account-auth",
+  "account-admin",
+];
+
+/** Tool → módulo que a registra. Tools fora dos catálogos são do núcleo (src/tools.ts): grupo "core". */
+export const MODULE_OF_TOOL: Record<string, string> = Object.fromEntries(
+  CATALOGS.flatMap((catalog, index) => [...catalog.read, ...catalog.write].map((name) => [name, MODULE_KEYS[index]]))
+);

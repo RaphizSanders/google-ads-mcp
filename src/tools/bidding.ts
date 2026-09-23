@@ -7,7 +7,7 @@
  * ad_group_criterion_simulation, bidding_strategy_simulation, common/simulation,
  * bidding_seasonality_adjustment, bidding_data_exclusion, bidding_strategy,
  * accessible_bidding_strategy, campaign_budget, campaign, ad_group) e as páginas de docs
- * citadas em docs/batches/bidding.md. Toda query daqui é validada nos testes contra os
+ * citadas em docs/tools/bidding.md. Toda query daqui é validada nos testes contra os
  * metadados reais da v25 (tests/gaql-validator.ts).
  */
 import { z } from "zod";

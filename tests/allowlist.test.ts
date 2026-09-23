@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { toolImplementations } from "./tool-sources.js";
+import { toolImplementations, toolSourceFiles } from "./tool-sources.js";
 
 import {
   assertHostedReadOnlySecurity,
@@ -258,4 +258,24 @@ test("gravacao do token OAuth e atomica sob leitura concorrente", async () => {
   const { readdirSync } = await import("node:fs");
   assert.deepEqual(readdirSync(dir).filter((f) => f.includes(".tmp-")), []);
   rmSync(dir, { recursive: true, force: true });
+});
+
+test("toda tool que recebe customerId — leitura ou escrita — passa pelo guarda de conta", () => {
+  // Aceita o checkCustomerAccess direto ou um guard() local do módulo que o chama e sai cedo
+  // (o módulo de extensões usa esse padrão). Um guard() que não chama o checkCustomerAccess
+  // não conta.
+  const sources = toolSourceFiles();
+  const guardOk = sources.some((source) =>
+    /const guard = \(customerId: string\)[\s\S]{0,200}?=> \{\s*const blocked = checkCustomerAccess\(customerId, allowedCustomerIds, hosted\);\s*if \(blocked\) return/.test(source)
+  );
+  const missing: string[] = [];
+  for (const [name, body] of toolImplementations()) {
+    const schemaEnd = body.indexOf("async (");
+    const schema = schemaEnd > 0 ? body.slice(0, schemaEnd) : body;
+    if (!/customerId\s*:/.test(schema)) continue;
+    const direct = /checkCustomerAccess\(/.test(body);
+    const viaGuard = guardOk && /\bconst g = guard\((?:args\.)?customerId\);\s*if \("error" in g\) return g\.error;/.test(body);
+    if (!direct && !viaGuard) missing.push(name);
+  }
+  assert.deepEqual(missing, [], `tools sem guarda de conta: ${missing.join(", ")}`);
 });
