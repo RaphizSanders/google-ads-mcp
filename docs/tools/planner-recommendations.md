@@ -60,7 +60,8 @@ Previsão de uma campanha de Pesquisa proposta (`:generateKeywordForecastMetrics
   cada um herda o que não informar — uma chamada por cenário).
 - Regras do proto: MANUAL_CPC exige `maxCpcBidMicros`; MAXIMIZE_CLICKS e MAXIMIZE_CONVERSIONS exigem orçamento;
   MAXIMIZE_CONVERSIONS não aceita CPC. Keyword até 80 caracteres e 10 palavras. Período com início futuro e fim
-  em até 1 ano; sem período vale o default da API (domingo a sábado seguinte, 7 dias).
+  em até 1 ano; sem período a tool envia o default documentado (próximo domingo ao sábado seguinte, 7 dias) —
+  a v25 recusa o pedido sem `forecastPeriod` ("The string date's format should be yyyy-mm-dd"), apesar da doc.
 - Saída por cenário: cliques, custo, CPC médio (cliques/manual) ou conversões, CPA médio (Max. conversões), e
   médias por dia. Um cenário com erro não derruba os outros.
 - Guardas de unidade: orçamento < 1.000.000 micros e CPC < 100.000 micros são recusados (valor em reais por engano).

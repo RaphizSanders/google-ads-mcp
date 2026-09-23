@@ -198,6 +198,13 @@ function localIso(date: Date): string {
   return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
 }
 
+/** Default documentado da previsão: do próximo domingo (nunca hoje — o início tem de ser futuro) ao sábado seguinte. */
+function defaultForecastPeriod(today: Date): { startDate: string; endDate: string } {
+  const start = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 7 - today.getDay());
+  const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 6);
+  return { startDate: localIso(start), endDate: localIso(end) };
+}
+
 /** Dicas para erros comuns da API (as mensagens do Google vêm em inglês). */
 function apiHint(message: string): string {
   const hints: Array<[RegExp, string]> = [
@@ -1097,7 +1104,7 @@ export function registerPlannerRecommendationsTools(ctx: ToolContext): void {
         "removidos da API na v24.",
         "",
         "Lances e orçamento em MICROS (1.000.000 = R$ 1,00). MANUAL_CPC exige maxCpcBidMicros; MAXIMIZE_CLICKS e",
-        "MAXIMIZE_CONVERSIONS exigem dailyBudgetMicros. period: início futuro e fim em até 1 ano (default da API:",
+        "MAXIMIZE_CONVERSIONS exigem dailyBudgetMicros. period: início futuro e fim em até 1 ano (omitido:",
         "próximo domingo ao sábado seguinte). scenarios compara até 5 variações (uma chamada cada).",
       ].join("\n"),
       inputSchema: {
@@ -1149,9 +1156,10 @@ export function registerPlannerRecommendationsTools(ctx: ToolContext): void {
       const geo = parseGeoTargets(geoTargetIds);
       if ("error" in geo) return fail(geo.error);
 
-      // Período: início futuro, fim em até 1 ano
+      // Período: início futuro, fim em até 1 ano. Sem period, o default vai explícito: a v25 recusa o pedido sem
+      // forecastPeriod ("The string date's format should be yyyy-mm-dd"), apesar de a doc dizer que é opcional.
       let periodDays = 7;
-      let forecastPeriod: Row | undefined;
+      let forecastPeriod = defaultForecastPeriod(new Date());
       if (period) {
         const iso = /^\d{4}-\d{2}-\d{2}$/;
         if (!iso.test(period.since ?? "") || !iso.test(period.until ?? "")) return fail("period precisa de since e until em YYYY-MM-DD.");
@@ -1208,7 +1216,7 @@ export function registerPlannerRecommendationsTools(ctx: ToolContext): void {
       const results: Row[] = [];
       for (const [index, run] of runs.entries()) {
         const body: Row = {
-          ...(forecastPeriod ? { forecastPeriod } : {}),
+          forecastPeriod,
           campaign: {
             languageConstants: [language.resource],
             geoTargetConstants: geo.resources,
@@ -1248,7 +1256,8 @@ export function registerPlannerRecommendationsTools(ctx: ToolContext): void {
       const totalKeywords = forecastGroups.reduce((n, g) => n + g.keywords.length, 0);
       const header =
         `Previsão (moeda da conta) — ${forecastGroups.length} grupo(s), ${totalKeywords} keyword(s), idioma ${language.code}, ` +
-        `${geo.resources.length} localização(ões), ${forecastPeriod ? `${period!.since} a ${period!.until}` : "período default da API (7 dias)"}.` +
+        `${geo.resources.length} localização(ões), ${forecastPeriod.startDate} a ${forecastPeriod.endDate}` +
+        `${period ? "" : " (default: próximo domingo a sábado)"}.` +
         (failed ? `\n${failed} cenário(s) com erro.` : "");
       const out = render(results, format, header);
       return failed === results.length ? { ...out, isError: true } : out;

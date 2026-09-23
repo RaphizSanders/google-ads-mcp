@@ -979,7 +979,7 @@ const expansionRows = [
 ];
 
 test("list_url_expansion_assets: agrega por asset + field type + URL e aceita csv", async () => {
-  const { client, calls } = fakeClient({ rows: { final_url_expansion_asset_view: expansionRows } });
+  const { client, calls } = fakeClient({ rows: { campaign: pmaxCampaign(), final_url_expansion_asset_view: expansionRows } });
   const result = await call(client, "list_url_expansion_assets", { campaignId: CAMPAIGN, days: 7 });
   assert.equal(result.isError, undefined, textOf(result));
   const [row] = jsonOf(result) as unknown as Row[];
@@ -987,12 +987,57 @@ test("list_url_expansion_assets: agrega por asset + field type + URL e aceita cs
     { asset_id: row.asset_id, text: row.text, impressions: row.impressions, clicks: row.clicks, spend: row.spend },
     { asset_id: "901", text: "Dicas de corrida", impressions: 150, clicks: 5, spend: 3 }
   );
-  assert.match(calls.queries[0], /segments\.date DURING LAST_7_DAYS/);
+  assert.match(calls.queries.find((q) => /FROM final_url_expansion_asset_view/.test(q))!, /segments\.date DURING LAST_7_DAYS/);
   const csv = await call(client, "list_url_expansion_assets", { campaignId: CAMPAIGN, format: "csv" });
   assert.match(textOf(csv), /^asset_id,field_type,text,final_url/);
   const bad = fakeClient();
   assert.equal((await call(bad.client, "list_url_expansion_assets", { campaignId: "1;DROP" })).isError, true);
   assert.equal(bad.calls.queries.length, 0);
+});
+
+test("expansão de URL: a view é filtrada pelo canal da campanha com '=' e canal sem expansão não é consultado", async () => {
+  // o grupo selecionado depende do canal (tests/gaql-rules.ts recusa o outro, como a API)
+  for (const [channel, group] of [["PERFORMANCE_MAX", "asset_group"], ["SEARCH", "ad_group"]] as const) {
+    const { client, calls } = fakeClient({ rows: { campaign: pmaxCampaign([], { advertisingChannelType: channel }) } });
+    const result = await call(client, "list_url_expansion_assets", { campaignId: CAMPAIGN });
+    assert.equal(result.isError, undefined, textOf(result));
+    const query = calls.queries.find((q) => /FROM final_url_expansion_asset_view/.test(q))!;
+    assert.match(query, new RegExp(`campaign\\.id = ${CAMPAIGN} AND campaign\\.advertising_channel_type = '${channel}'`));
+    assert.match(query, new RegExp(`final_url_expansion_asset_view\\.${group}, ${group}\\.name`));
+  }
+  const search = fakeClient({
+    rows: {
+      campaign: pmaxCampaign([], { advertisingChannelType: "SEARCH" }),
+      final_url_expansion_asset_view: [{
+        finalUrlExpansionAssetView: {
+          asset: `customers/${CID}/assets/905`, fieldType: "HEADLINE", finalUrl: "https://loja.com.br/frete", status: "ENABLED", adGroup: `customers/${CID}/adGroups/${AG}`,
+        },
+        asset: { id: "905", type: "TEXT", textAsset: { text: "Frete grátis" } },
+        adGroup: { name: "Tênis Pesquisa" },
+        metrics: { impressions: "10" },
+      }],
+    },
+  });
+  const [searchRow] = jsonOf(await call(search.client, "list_url_expansion_assets", { campaignId: CAMPAIGN })) as unknown as Row[];
+  assert.deepEqual({ asset_group: searchRow.asset_group, ad_group: searchRow.ad_group }, { asset_group: "", ad_group: "Tênis Pesquisa" });
+
+  // a API responde "Invalid advertising channel type DEMAND_GEN in filter"
+  const items = [{ assetId: "901", fieldType: "HEADLINE" }];
+  for (const [tool, args, tail] of [
+    ["list_url_expansion_assets", {}, ""],
+    ["remove_auto_created_assets", { items, confirm: true }, " Nada foi removido."],
+  ] as const) {
+    const demandGen = fakeClient({ rows: { campaign: pmaxCampaign([], { advertisingChannelType: "DEMAND_GEN" }) }, action: () => ({}) });
+    const refused = await call(demandGen.client, tool, { campaignId: CAMPAIGN, ...args });
+    assert.equal(refused.isError, true, tool);
+    assert.equal(textOf(refused), `Campanha ${CAMPAIGN} ("PMax Loja") é DEMAND_GEN: a expansão de URL final só existe em Performance Max e Pesquisa.${tail}`);
+    assert.ok(!demandGen.calls.queries.some((q) => /final_url_expansion_asset_view/.test(q)), tool);
+    assert.equal(demandGen.calls.actions.length, 0, tool);
+
+    const missing = fakeClient({ action: () => ({}) });
+    assert.match(textOf(await call(missing.client, tool, { campaignId: CAMPAIGN, ...args })), new RegExp(`Campanha ${CAMPAIGN} não encontrada`));
+    assert.equal(missing.calls.queries.length, 1, "só a busca da campanha");
+  }
 });
 
 test("remove_auto_created_assets: confirm, conferência na campanha e partial failure obrigatório", async () => {

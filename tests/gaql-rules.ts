@@ -36,7 +36,31 @@ export function assertUpdateMaskLeaves(updateMask: string): void {
   }
 }
 
+/**
+ * Restrições que só aparecem em runtime: os metadados da v25 não as descrevem, o validador aceita a
+ * query e a API recusa. Cada regra traz a mensagem que a API real devolveu.
+ */
+const RUNTIME_RULES: Record<string, (query: string) => string | null> = {
+  final_url_expansion_asset_view: (query) => {
+    // "FinalUrlExpansionAssetView requires advertising channel type filter along with campaign id filter."
+    // Com IN: "...can only be selected when filtering by a single advertising channel type in WHERE clause."
+    // DEMAND_GEN, SHOPPING, DISPLAY, VIDEO...: "Invalid advertising channel type X in filter."
+    const channel = /\bcampaign\.advertising_channel_type\s*=\s*'(PERFORMANCE_MAX|SEARCH)'/.exec(query)?.[1];
+    if (!/\bcampaign\.id\s*=\s*\d+/.test(query) || !channel) {
+      return "final_url_expansion_asset_view exige campaign.id = N junto de campaign.advertising_channel_type = 'PERFORMANCE_MAX' | 'SEARCH'";
+    }
+    // PMax: "Cannot select ad group in the query." — Pesquisa: "Cannot select asset group in the query."
+    const select = /\bSELECT\s+([\s\S]*?)\s+FROM\s/i.exec(query)?.[1] ?? "";
+    const group = channel === "PERFORMANCE_MAX" ? "ad_group" : "asset_group";
+    return new RegExp(`(^|[\\s,.])${group}\\b`).test(select)
+      ? `final_url_expansion_asset_view de ${channel} não aceita ${group} no SELECT`
+      : null;
+  },
+};
+
 export function assertGaqlRules(query: string): void {
-  const errors = validateGaql(query);
+  const from = /\bFROM\s+([a-z_]+)/i.exec(query)?.[1] ?? "";
+  const runtime = RUNTIME_RULES[from]?.(query);
+  const errors = [...validateGaql(query), ...(runtime ? [runtime] : [])];
   assert.deepEqual(errors, [], `GAQL inválido para a API:\n- ${errors.join("\n- ")}\n\n${query.replace(/\s+/g, " ").trim()}`);
 }

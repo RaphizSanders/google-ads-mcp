@@ -1775,9 +1775,11 @@ export function registerConversionsReportingTools(ctx: ToolContext): void {
         ? `\n         WHERE ${resource}.lift_measurement_config_id = ${liftMeasurementConfigId}`
         : "");
 
+      // lift_measurement_config.campaigns derruba a consulta inteira ("Internal error encountered.", reproduzido em
+      // contas sem estudo): fica fora da consulta principal e é lido à parte, só quando há estudo.
       const configRows = await client.searchStream(customerId,
         `SELECT lift_measurement_config.lift_measurement_config_id, lift_measurement_config.name,
-                lift_measurement_config.campaigns, lift_measurement_config.conversion_actions,
+                lift_measurement_config.conversion_actions,
                 lift_measurement_config.conversion_lift_holdback_ratio_micros, lift_measurement_config.survey_language,
                 lift_measurement_config.single_measurement_question_set.question_measurements
          FROM lift_measurement_config${where("lift_measurement_config")}`);
@@ -1792,8 +1794,20 @@ export function registerConversionsReportingTools(ctx: ToolContext): void {
                 lift_measurement_flight.survey_lift_measurement.response_collection_ratio_micros
          FROM lift_measurement_flight${where("lift_measurement_flight")}`);
 
-      const campaignRns = [...new Set(configRows.flatMap((row) => strings(obj(row.liftMeasurementConfig).campaigns)))]
-        .filter((rn) => CAMPAIGN_RN.test(rn));
+      const campaignsByConfig = new Map<string, string[]>();
+      let campaignsError: string | undefined;
+      try {
+        const rows = await client.searchStream(customerId,
+          `SELECT lift_measurement_config.lift_measurement_config_id, lift_measurement_config.campaigns
+           FROM lift_measurement_config${where("lift_measurement_config")}`);
+        for (const row of rows) {
+          const config = obj(row.liftMeasurementConfig);
+          campaignsByConfig.set(String(config.liftMeasurementConfigId ?? ""), strings(config.campaigns));
+        }
+      } catch (err) {
+        campaignsError = errorText(err);
+      }
+      const campaignRns = [...new Set([...campaignsByConfig.values()].flat())].filter((rn) => CAMPAIGN_RN.test(rn));
       const campaignNames = new Map<string, string>();
       if (campaignRns.length) {
         const rows = await client.searchStream(customerId,
@@ -1823,7 +1837,9 @@ export function registerConversionsReportingTools(ctx: ToolContext): void {
         return {
           config_id: id,
           name: String(config.name ?? ""),
-          campaigns: strings(config.campaigns).map((rn) => `${campaignNames.get(rn) ?? ""} (${lastSegment(rn)})`.trim()),
+          // null = a API não devolveu as campanhas (ver nota); [] = estudo sem campanha
+          campaigns: campaignsError ? null
+            : (campaignsByConfig.get(id) ?? []).map((rn) => `${campaignNames.get(rn) ?? ""} (${lastSegment(rn)})`.trim()),
           conversion_actions: strings(config.conversionActions).map(lastSegment),
           ...(holdback !== undefined ? { conversion_lift_holdback_ratio_micros: holdback } : {}),
           ...(config.surveyLanguage ? { survey_language: String(config.surveyLanguage) } : {}),
@@ -1838,6 +1854,7 @@ export function registerConversionsReportingTools(ctx: ToolContext): void {
       const runConversion = !!conversionDims && (kind === "CONVERSION" || (kind === "AUTO" && (hasConversionStudy || unknownType)));
       const runBrand = !!brandSpec && (kind === "BRAND" || (kind === "AUTO" && (hasBrandStudy || unknownType)));
       const notes: string[] = [];
+      if (campaignsError) notes.push(`Campanhas dos estudos indisponíveis (campaigns: null) — a API falhou ao lê-las: ${campaignsError}`);
       if (kind === "AUTO" && hasConversionStudy && !conversionDims) notes.push(`breakdown ${dim} não existe para Conversion Lift — parte de conversão omitida.`);
       if (kind === "AUTO" && hasBrandStudy && !brandSpec) notes.push(`breakdown ${dim} não existe para Brand Lift — parte de marca omitida.`);
       if (flightTypes.has("SEARCH")) notes.push("Há voo de Search Lift: a API v25 não expõe métricas próprias dele nestes recursos.");

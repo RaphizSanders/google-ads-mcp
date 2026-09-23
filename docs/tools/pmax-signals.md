@@ -122,10 +122,18 @@ regras de título/conteúdo de página (legadas no produto). Avisa quando a expa
 `final_url_expansion_asset_view` da campanha: texto, field type, URL escolhida, status, grupo,
 métricas no período (`dateRange`/`days`). `format` json/table/csv.
 
+Restrições de runtime da view (os metadados da v25 não as descrevem; reproduzidas na API real):
+- exige `campaign.advertising_channel_type = '<canal>'` junto do `campaign.id` — com `=`, `IN` é recusado;
+  a tool lê o canal da campanha antes;
+- só aceita `PERFORMANCE_MAX` e `SEARCH` (Demand Gen, Shopping, Display, Vídeo: "Invalid advertising channel
+  type") — outros canais são recusados localmente, sem consultar a view;
+- PMax só aceita grupo de recursos no SELECT e Pesquisa só grupo de anúncios ("Cannot select ad group" /
+  "Cannot select asset group") — a coluna do outro grupo sai vazia.
+
 ### `remove_auto_created_assets` (write)
 `RemoveCampaignAutomaticallyCreatedAsset` (`POST /v25/customers/{cid}:removeCampaignAutomaticallyCreatedAsset`,
 `partialFailure: true` obrigatório no proto). Cada `{assetId, fieldType}` é conferido na
-`final_url_expansion_asset_view` da campanha; o que não aparece lá não é enviado. Irreversível →
+`final_url_expansion_asset_view` da campanha (mesmo filtro de canal acima); o que não aparece lá não é enviado. Irreversível →
 `confirm`. Sem `validate_only` no endpoint → não é chamado em dry-run/validateOnly.
 
 ## Item 83 — Diretrizes de marca

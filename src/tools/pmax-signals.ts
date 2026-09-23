@@ -355,6 +355,26 @@ function pmaxCampaignProblem(campaign: Row | null, campaignId: string, cid: stri
   return null;
 }
 
+/** Canais que final_url_expansion_asset_view aceita no filtro (os demais: "Invalid advertising channel type X in filter"). */
+const URL_EXPANSION_CHANNELS = new Set([PMAX, "SEARCH"]);
+
+/**
+ * WHERE de final_url_expansion_asset_view para uma campanha. A API exige o canal junto do campaign.id
+ * ("requires advertising channel type filter along with campaign id filter"), e com "=": IN é recusado
+ * ("filtering by a single advertising channel type"). Os metadados da v25 não descrevem essas regras.
+ */
+async function urlExpansionCampaignFilter(
+  client: GoogleAdsClient, cid: string, campaignId: string
+): Promise<{ campaign: Row; channel: string; where: string } | { error: string }> {
+  const campaign = await loadCampaign(client, cid, campaignId);
+  if (!campaign) return { error: `Campanha ${campaignId} não encontrada na conta ${cid}.` };
+  const channel = str(campaign.advertisingChannelType);
+  if (!URL_EXPANSION_CHANNELS.has(channel)) {
+    return { error: `Campanha ${campaignId} ("${str(campaign.name)}") é ${channel || "de tipo desconhecido"}: a expansão de URL final só existe em Performance Max e Pesquisa.` };
+  }
+  return { campaign, channel, where: `campaign.id = ${campaignId} AND campaign.advertising_channel_type = '${channel}'` };
+}
+
 interface AssetInfo {
   id: string;
   resourceName: string;
@@ -2096,14 +2116,20 @@ export function registerPmaxSignalsTools(ctx: ToolContext): void {
       if (!isId(campaignId)) return fail(`campaignId deve ser numérico, recebido "${campaignId}".`);
       const dateClause = buildDateClause(dateRange, days);
       const client = ctx.getClient();
+      const target = await urlExpansionCampaignFilter(client, cid, campaignId.trim());
+      if ("error" in target) return fail(target.error);
+      // PMax só aceita o grupo de recursos e Pesquisa só o grupo de anúncios: a API recusa o outro
+      // ("Cannot select ad group in the query" / "Cannot select asset group in the query")
+      const groupFields = target.channel === PMAX
+        ? "final_url_expansion_asset_view.asset_group, asset_group.name"
+        : "final_url_expansion_asset_view.ad_group, ad_group.name";
       const rows = await client.searchStream(cid,
         `SELECT final_url_expansion_asset_view.asset, final_url_expansion_asset_view.field_type,
-                final_url_expansion_asset_view.final_url, final_url_expansion_asset_view.status,
-                final_url_expansion_asset_view.asset_group, final_url_expansion_asset_view.ad_group,
-                asset.id, asset.type, asset.text_asset.text, asset_group.name,
+                final_url_expansion_asset_view.final_url, final_url_expansion_asset_view.status, ${groupFields},
+                asset.id, asset.type, asset.text_asset.text,
                 metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions, metrics.conversions_value
          FROM final_url_expansion_asset_view
-         WHERE campaign.id = ${campaignId.trim()}
+         WHERE ${target.where}
            AND ${dateClause}
          ORDER BY metrics.impressions DESC`);
       const agg = new Map<string, Row>();
@@ -2120,7 +2146,7 @@ export function registerPmaxSignalsTools(ctx: ToolContext): void {
           final_url: str(view.finalUrl),
           status: str(view.status),
           asset_group: str(asObj(row.assetGroup).name) || lastSegment(view.assetGroup) || "",
-          ad_group: lastSegment(view.adGroup),
+          ad_group: str(asObj(row.adGroup).name) || lastSegment(view.adGroup),
           impressions: 0,
           clicks: 0,
           spend: 0,
@@ -2192,14 +2218,15 @@ export function registerPmaxSignalsTools(ctx: ToolContext): void {
       if (wanted.length > 1000) return fail(`${wanted.length} itens (máx. 1000 por chamada).`);
 
       const client = ctx.getClient();
-      const campaign = await loadCampaign(client, cid, id);
-      if (!campaign) return fail(`Campanha ${id} não encontrada na conta ${cid}. Nada foi removido.`);
+      const target = await urlExpansionCampaignFilter(client, cid, id);
+      if ("error" in target) return fail(`${target.error} Nada foi removido.`);
+      const { campaign } = target;
       const rows = await client.searchStream(cid,
         `SELECT final_url_expansion_asset_view.asset, final_url_expansion_asset_view.field_type,
                 final_url_expansion_asset_view.status, final_url_expansion_asset_view.final_url,
                 asset.id, asset.text_asset.text
          FROM final_url_expansion_asset_view
-         WHERE campaign.id = ${id}
+         WHERE ${target.where}
            AND asset.id IN (${[...new Set(wanted.map((w) => w.assetId))].join(", ")})`);
       const known = new Map<string, Row>();
       for (const row of rows) {

@@ -329,7 +329,14 @@ test("forecast_search_campaign: cenários comparados, CPC manual e Max. convers�
   assert.deepEqual((calls.actions[0].body.campaign as Row).biddingStrategy, { maximizeConversionsBiddingStrategy: { dailyTargetSpendMicros: "200000000" } });
   assert.deepEqual((calls.actions[1].body.campaign as Row).biddingStrategy, { manualCpcBiddingStrategy: { maxCpcBidMicros: "4000000" } });
   assert.equal(((calls.actions[0].body.campaign as Row).adGroups as Row[]).length, 2);
-  assert.equal(calls.actions[0].body.forecastPeriod, undefined, "sem period, vale o default da API");
+  // sem period, o default documentado vai explícito: a v25 recusa o pedido sem forecastPeriod
+  // ("The string date's format should be yyyy-mm-dd")
+  const { startDate, endDate } = calls.actions[0].body.forecastPeriod as { startDate: string; endDate: string };
+  assert.equal(new Date(`${startDate}T12:00:00`).getDay(), 0, "começa num domingo");
+  assert.ok(startDate > tomorrowPlus(0) && startDate <= tomorrowPlus(7), `o próximo domingo, nunca hoje (${startDate})`);
+  assert.equal(Math.round((Date.parse(endDate) - Date.parse(startDate)) / 86_400_000), 6, "até o sábado seguinte");
+  assert.deepEqual(calls.actions[1].body.forecastPeriod, calls.actions[0].body.forecastPeriod, "mesmo período em todos os cenários");
+  assert.match(textOf(result), new RegExp(`${startDate} a ${endDate} \\(default: próximo domingo a sábado\\)`));
   assert.equal(result.isError, undefined);
   const rows = jsonAfterHeader(result) as Row[];
   assert.equal(rows[0].conversions, 12.5);
