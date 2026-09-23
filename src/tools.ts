@@ -466,71 +466,7 @@ export function registerGoogleAdsTools(
   );
 
   // ── Insights: Shopping Products ────────────────────────────────────
-
-  mcp.registerTool(
-    "get_shopping_products",
-    {
-      description: [
-        "Get product-level performance from Shopping/PMax campaigns.",
-        "Uses shopping_performance_view. Returns product title, item_id, and metrics.",
-        "Monetary values already converted from micros.",
-      ].join("\n"),
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        dateRange: dateRangeSchema.describe(DATE_RANGE_DESC),
-        days: z.number().optional().describe(DAYS_DESC),
-        orderBy: z
-          .enum(["spend", "revenue", "clicks", "conversions"])
-          .optional()
-          .describe("Sort order. Default: revenue (conversions_value DESC)."),
-        limit: z.number().optional().describe("Max results. Default: 20."),
-      },
-    },
-    async ({ customerId, dateRange, days, orderBy, limit }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const dateClause = buildDateClause(dateRange, days);
-      const orderMap: Record<string, string> = {
-        spend: "metrics.cost_micros DESC",
-        revenue: "metrics.conversions_value DESC",
-        clicks: "metrics.clicks DESC",
-        conversions: "metrics.conversions DESC",
-      };
-      const order = orderMap[orderBy ?? "revenue"];
-
-      const results = await client.searchStream(
-        customerId,
-        `SELECT segments.product_title, segments.product_item_id,
-                metrics.clicks, metrics.impressions, metrics.cost_micros,
-                metrics.conversions, metrics.conversions_value
-         FROM shopping_performance_view
-         WHERE ${dateClause}
-         ORDER BY ${order}
-         LIMIT ${limit ?? 20}`
-      );
-
-      const products = results.map((r) => {
-        const s = r.segments as Record<string, unknown>;
-        const m = r.metrics as Record<string, unknown>;
-        const spend = microsToMoney(m?.costMicros);
-        const conv = num(m?.conversions);
-        const convValue = num(m?.conversionsValue);
-        return {
-          title: s?.productTitle,
-          item_id: s?.productItemId,
-          clicks: num(m?.clicks),
-          impressions: num(m?.impressions),
-          spend: Math.round(spend * 100) / 100,
-          conversions: conv,
-          revenue: Math.round(convValue * 100) / 100,
-          roas: spend > 0 ? Math.round((convValue / spend) * 100) / 100 : 0,
-        };
-      });
-
-      return { content: [text(`${products.length} produto(s).\n\n${formatJson(products)}`)] };
-    }
-  );
+  // get_shopping_products foi movida para src/tools/retail-reporting.ts (lote retail-reporting).
 
   // ── Insights: Device Breakdown ─────────────────────────────────────
 
