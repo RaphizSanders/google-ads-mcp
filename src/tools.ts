@@ -99,41 +99,136 @@ export function registerGoogleAdsTools(
     "list_accounts",
     {
       description: [
-        "List all Google Ads accounts accessible from the MCC (Manager account).",
-        "Returns child accounts with id, name, currency, timezone, and status.",
+        "List the Google Ads accounts under the login MCC (Manager account) — all levels.",
+        "Returns id, name, currency, timezone, status, level, manager, hidden, test_account and account labels.",
         "Use this to discover which customer_id to use in other tools.",
+        "",
+        "Default: only ENABLED, non-manager accounts (as before). The header always counts accounts per status, so",
+        "SUSPENDED / CANCELED / CLOSED clients show up there — list them with includeStatuses.",
+        "includeManagers lists sub-MCCs; labelId keeps only accounts with that account label; hierarchy adds",
+        "parent_manager_id (one query per sub-MCC).",
       ].join("\n"),
-      inputSchema: {},
+      inputSchema: {
+        includeStatuses: flexArray(z.enum(["ENABLED", "CANCELED", "SUSPENDED", "CLOSED"])).optional().describe(
+          "Status a listar. Default: ['ENABLED']. Ex.: ['SUSPENDED','CANCELED'] para achar clientes com problema."
+        ),
+        includeManagers: z.boolean().optional().describe("Incluir sub-MCCs (contas gerente). Default: false."),
+        includeHidden: z.boolean().optional().describe("Incluir contas ocultas (hidden). Default: true."),
+        labelId: z.string().optional().describe("Só contas com este rótulo de conta (ID numérico do label, do MCC do login)."),
+        hierarchy: z.boolean().optional().describe("Adiciona parent_manager_id (MCC pai de cada conta). Default: false."),
+        format: formatSchema,
+      },
     },
-    async () => {
+    async ({ includeStatuses, includeManagers, includeHidden, labelId, hierarchy, format }) => {
+      const CUSTOMER_STATUSES = ["ENABLED", "CANCELED", "SUSPENDED", "CLOSED"];
+      const requested = ensureArray<string>(includeStatuses ?? []).map((s) => String(s).trim().toUpperCase());
+      const wanted = new Set(requested.length ? requested : ["ENABLED"]);
+      const invalid = [...wanted].filter((s) => !CUSTOMER_STATUSES.includes(s));
+      if (invalid.length) {
+        return { content: [text(`Status inválido: ${invalid.join(", ")}. Válidos: ${CUSTOMER_STATUSES.join(", ")}.`)], isError: true };
+      }
+      const label = labelId?.trim();
+      if (label !== undefined && !/^\d+$/.test(label)) {
+        return { content: [text(`labelId inválido: "${labelId}" — use o ID numérico do rótulo de conta.`)], isError: true };
+      }
+
+      /* A hosted run must not enumerate the whole MCC just because no
+         allowlist was given, so there an empty set filters everything out.
+         On stdio there is no cross-tenant surface and this tool is the
+         discovery entry point — the id you would need to allowlist is
+         precisely what you come here to find — so an empty set means
+         "no filter". */
+      const isAllowed = (id: string) =>
+        allowAllCustomers ? true : allowedCustomerIdSet.size === 0 ? !hosted : allowedCustomerIdSet.has(id.replace(/-/g, ""));
+      const toAccount = (r: Record<string, unknown>) => {
+        const c = (r.customerClient ?? {}) as Record<string, unknown>;
+        return {
+          customer_id: c.id,
+          name: c.descriptiveName,
+          currency: c.currencyCode,
+          timezone: c.timeZone,
+          status: c.status,
+          level: c.level !== undefined ? Number(c.level) : undefined,
+          manager: c.manager,
+          hidden: c.hidden,
+          test_account: c.testAccount,
+          labels: (c.appliedLabels as string[] | undefined) ?? [],
+        } as Record<string, unknown>;
+      };
+      // A própria conta consultada volta com level 0 quando gerentes entram na consulta.
+      const scoped = (rows: Array<Record<string, unknown>>) =>
+        rows.map(toAccount).filter((a) => a.level !== 0 && isAllowed(String(a.customer_id ?? "")));
+
       const client = getClient();
-      const results = await client.listChildAccounts();
-      const accounts = results
-        .map((r) => {
-          const c = r.customerClient as Record<string, unknown> | undefined;
-          return {
-            customer_id: c?.id,
-            name: c?.descriptiveName,
-            currency: c?.currencyCode,
-            timezone: c?.timeZone,
-            status: c?.status,
-          };
-        })
-        /* A hosted run must not enumerate the whole MCC just because no
-           allowlist was given, so there an empty set filters everything out.
-           On stdio there is no cross-tenant surface and this tool is the
-           discovery entry point — the id you would need to allowlist is
-           precisely what you come here to find — so an empty set means
-           "no filter". */
-        .filter((account) =>
-          allowAllCustomers
-            ? true
-            : allowedCustomerIdSet.size === 0
-              ? !hosted
-              : allowedCustomerIdSet.has(String(account.customer_id ?? "").replace(/-/g, ""))
-        );
+      const onlyEnabled = wanted.size === 1 && wanted.has("ENABLED");
+      /* Só ENABLED: o filtro de status continua no GAQL (como sempre). Os demais
+         status vêm de uma consulta sem filtro de status, que também alimenta a
+         contagem por status — é ela que mostra os clientes SUSPENSOS que antes
+         simplesmente sumiam da lista. */
+      const allRows = await client.listChildAccounts(undefined, { allStatuses: true, includeManagers: includeManagers === true });
+      const everyStatus = scoped(allRows);
+      let accounts = onlyEnabled
+        ? scoped(await client.listChildAccounts(undefined, { includeManagers: includeManagers === true }))
+        : everyStatus.filter((a) => wanted.has(String(a.status)));
+      if (includeHidden === false) accounts = accounts.filter((a) => a.hidden !== true);
+      if (label) {
+        const labelResource = `customers/${client.loginCustomer}/labels/${label}`;
+        accounts = accounts.filter((a) => (a.labels as string[]).includes(labelResource));
+      }
+
+      // Nomes dos rótulos de conta (são do MCC do login).
+      const labelResources = [...new Set(accounts.flatMap((a) => a.labels as string[]))];
+      if (labelResources.length) {
+        const labelRows = await client.searchStream(client.loginCustomer, "SELECT label.resource_name, label.name FROM label");
+        const names = new Map(labelRows.map((r) => {
+          const l = (r.label ?? {}) as Record<string, unknown>;
+          return [String(l.resourceName), String(l.name ?? "")] as [string, string];
+        }));
+        for (const a of accounts) a.labels = (a.labels as string[]).map((rn) => names.get(rn) || rn);
+      }
+
+      if (hierarchy) {
+        /* customer_client não diz quem é o pai: busca em largura, um nível por
+           MCC (customer_client.level <= 1), como no guia oficial de hierarquia. */
+        const parentOf = new Map<string, string>();
+        const queue = [client.loginCustomer];
+        const seen = new Set(queue);
+        while (queue.length && seen.size <= 100) {
+          const managerId = queue.shift() as string;
+          const children = await client.listChildAccounts(managerId, { allStatuses: true, includeManagers: true, maxLevel: 1 });
+          for (const row of children) {
+            const child = toAccount(row);
+            const childId = String(child.customer_id ?? "");
+            if (child.level !== 1 || !childId) continue;
+            parentOf.set(childId, managerId);
+            if (child.manager === true && !seen.has(childId)) {
+              seen.add(childId);
+              queue.push(childId);
+            }
+          }
+        }
+        for (const a of accounts) a.parent_manager_id = parentOf.get(String(a.customer_id ?? "")) ?? null;
+      }
+
+      const counts: Record<string, number> = {};
+      for (const a of everyStatus) {
+        if (a.manager === true) continue;
+        const status = String(a.status ?? "UNSPECIFIED");
+        counts[status] = (counts[status] ?? 0) + 1;
+      }
+      const outside = Object.entries(counts).filter(([s]) => s !== "ENABLED" && !wanted.has(s));
+      const header = [
+        `${accounts.length} conta(s) encontrada(s) (status: ${[...wanted].join(", ")}${includeManagers ? ", com sub-MCCs" : ""}).`,
+        `Contas (não-gerente) por status: ${Object.entries(counts).map(([s, n]) => `${s} ${n}`).join(", ") || "nenhuma"}.`,
+        ...(outside.length
+          ? [`Atenção: ${outside.map(([s, n]) => `${n} ${s}`).join(", ")} fora da lista — use includeStatuses para vê-las ` +
+              "(SUSPENDED só o suporte do Google reativa; CANCELED um admin reativa; CLOSED é permanente)."]
+          : []),
+      ].join("\n");
+      if (format === "table") return { content: [text(`${header}\n\n${formatAsTable(accounts)}`)] };
+      if (format === "csv") return { content: [text(formatAsCsv(accounts))] };
       return {
-        content: [text(`${accounts.length} conta(s) encontrada(s).\n\n${formatJson(accounts)}`)],
+        content: [text(`${header}\n\n${formatJson(accounts)}`)],
       };
     }
   );
@@ -141,8 +236,11 @@ export function registerGoogleAdsTools(
   mcp.registerTool(
     "get_account_info",
     {
-      description:
-        "Get details of a specific Google Ads account (name, currency, timezone, status).",
+      description: [
+        "Get details of a specific Google Ads account (name, currency, timezone, status, manager, test account).",
+        "Explains non-ENABLED statuses (SUSPENDED, CANCELED, CLOSED). For auto-tagging, tracking template,",
+        "conversion tracking and optimization score use get_account_settings.",
+      ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID (10 digits, with or without hyphens)."),
       },
@@ -150,9 +248,23 @@ export function registerGoogleAdsTools(
     async ({ customerId }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
+      if (!/^\d+$/.test(customerId.replace(/-/g, ""))) {
+        return { content: [text(`customerId inválido: "${customerId}" — use os 10 dígitos da conta.`)], isError: true };
+      }
       const client = getClient();
       const result = await client.getCustomer(customerId);
-      return { content: [text(formatJson(result))] };
+      const customer = (result.customer ?? {}) as Record<string, unknown>;
+      // Significado de cada status conforme enums/customer_status.proto (v25).
+      const statusNotes: Record<string, string> = {
+        CANCELED: "Conta CANCELADA: não veicula anúncios; um usuário administrador pode reativá-la.",
+        SUSPENDED: "Conta SUSPENSA: não veicula anúncios e só o suporte do Google reativa (em geral pagamento ou política).",
+        CLOSED: "Conta ENCERRADA: não veicula anúncios e o status é permanente (contas de teste também aparecem como CLOSED).",
+      };
+      const notes = [
+        statusNotes[String(customer.status)],
+        customer.testAccount === true ? "Conta de TESTE: não veicula anúncios reais." : undefined,
+      ].filter(Boolean);
+      return { content: [text(`${formatJson(result)}${notes.length ? `\n\n${notes.join("\n")}` : ""}`)] };
     }
   );
 
@@ -168,9 +280,12 @@ export function registerGoogleAdsTools(
         "Common GAQL resources: campaign, ad_group, ad_group_ad, keyword_view,",
         "shopping_performance_view, geographic_view, age_range_view, gender_view,",
         "search_term_view, customer, ad_group_criterion, campaign_criterion.",
+        "Não sabe o nome de um campo ou se ele combina com o FROM? Use get_gaql_fields",
+        "(campos, segmentos e métricas de um recurso) e validate_gaql (confere a query antes de rodar).",
         "",
         "Monetary values are in MICROS (1,000,000 = 1 unit of currency).",
         "Divide cost_micros by 1,000,000 to get BRL/USD value.",
+        "metrics.conversions = só ações primárias (include_in_conversions_metric); metrics.all_conversions = todas.",
         "",
         "Example:",
         "SELECT campaign.name, metrics.cost_micros, metrics.conversions",
@@ -188,8 +303,27 @@ export function registerGoogleAdsTools(
     async ({ customerId, query, format }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
+      if (!/^\s*SELECT\s/i.test(query)) {
+        return {
+          content: [text("GAQL precisa começar com SELECT (ex.: SELECT campaign.id, campaign.name FROM campaign). Nada foi enviado.")],
+          isError: true,
+        };
+      }
       const client = getClient();
-      const results = await client.searchStream(customerId, query);
+      let results: Array<Record<string, unknown>>;
+      try {
+        results = await client.searchStream(customerId, query);
+      } catch (err) {
+        /* Erro de query (campo inexistente, incompatível com o FROM, não
+           filtrável...): aponta as tools de metadados em vez de deixar o agente
+           adivinhar nomes de novo. */
+        const codes = ((err as { codes?: string[] }).codes ?? []);
+        const queryError = codes.some((code) => code.startsWith("queryError.")) || /queryError|UNRECOGNIZED_FIELD|PROHIBITED_/i.test((err as Error).message);
+        const hint = queryError
+          ? "\nDica: confira a query com validate_gaql e os campos compatíveis com get_gaql_fields (resource=<recurso do FROM>)."
+          : "";
+        return { content: [text(`Erro: ${(err as Error).message}${hint}`)], isError: true };
+      }
 
       const fmt = format ?? "json";
       let output: string;
@@ -4726,7 +4860,13 @@ export function registerGoogleAdsTools(
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
-      const currency = await client.getAccountCurrency(customerId);
+      /* Lê a moeda direto da conta: getAccountCurrency cai em "BRL" quando a
+         linha não vem, e aqui um "BRL" inventado seria lido como resposta. */
+      const result = await client.getCustomer(customerId);
+      const currency = ((result.customer ?? {}) as Record<string, unknown>).currencyCode;
+      if (typeof currency !== "string" || !currency) {
+        return { content: [text(`A API não devolveu a moeda da conta ${customerId} — confira o customerId e o acesso (check_api_access).`)], isError: true };
+      }
       return { content: [text(currency)] };
     }
   );

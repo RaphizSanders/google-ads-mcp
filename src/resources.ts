@@ -20,9 +20,12 @@ export const glossaryContent = `# Glossário Google Ads — Tráfego Pago
 
 ## Métricas de resultado
 - **ROAS (Return on Ad Spend):** conversions_value / cost. ROAS > 1 = lucrativo.
-- **Conversions:** Ações configuradas como conversão (compras, leads, etc.). Inclui TODAS as ações de conversão.
-- **Purchase conversions:** Filtrar com conversion_action_category = 'PURCHASE' para obter apenas compras.
-- **conversions_value:** Receita atribuída. Já vem em BRL (NÃO é micros).
+- **Conversions (metrics.conversions):** SÓ as ações de conversão com include_in_conversions_metric = true (as primárias) — é o que os lances automáticos otimizam. Ação secundária NÃO entra aqui.
+- **All conversions (metrics.all_conversions):** TODAS as ações, independentemente de include_in_conversions_metric (primárias + secundárias).
+- **View-through conversions (metrics.view_through_conversions):** conversões após impressão sem clique — métrica separada.
+- **Variantes by_conversion_date** (conversions_by_conversion_date, all_conversions_by_conversion_date...): com segments.date, a data passa a ser a da conversão, não a do clique/interação.
+- **Purchase conversions:** Filtrar com segments.conversion_action_category = 'PURCHASE' (e selecionar esse segmento). Com segmentos de ação de conversão, selecione só métricas de conversão — custo, cliques e impressões não se dividem por ação.
+- **conversions_value:** Receita atribuída das ações primárias. Já vem na moeda da conta (NÃO é micros).
 - **CTR (click-through rate):** clicks / impressions × 100. Vem como decimal da API (0.05 = 5%).
 - **Quality Score:** 1-10, avalia relevância do anúncio + LP + keyword. Score > 7 é bom.
 - **Impression share:** % de impressões obtidas vs disponíveis. < 70% indica espaço para escala.
@@ -31,16 +34,16 @@ export const glossaryContent = `# Glossário Google Ads — Tráfego Pago
 - **SEARCH:** Anúncios de texto na busca. Usa keywords + RSA (Responsive Search Ads).
 - **SHOPPING:** Anúncios de produto com imagem/preço. Requer feed de produtos (Merchant Center).
 - **PERFORMANCE_MAX (PMax):** Cross-channel automatizado. Google decide onde exibir.
-- **DISPLAY:** Banners na rede de display (sites parceiros).
-- **VIDEO:** YouTube ads (in-stream, bumper, discovery).
-- **DEMAND_GEN:** Discovery + Gmail + YouTube Shorts.
+- **DISPLAY:** Banners na Rede de Display do Google. O Google está levando Display para Demand Gen (migração voluntária desde jun/2026; depois, campanhas novas só em Demand Gen).
+- **VIDEO:** Campanhas de vídeo do YouTube. Pela API só dá para LER e reportar campanhas de Vídeo existentes — criar ou editar não é suportado; para vídeo com criação via API, use DEMAND_GEN. As Video action campaigns viraram Demand Gen (criação removida em abr/2025, migração automática concluída até abr/2026).
+- **DEMAND_GEN:** YouTube (in-stream, in-feed, Shorts), Discover, Gmail e Rede de Display do Google, com controle de canais.
 
 ## Bidding strategies
-- **MAXIMIZE_CONVERSIONS:** Google otimiza para mais conversões no budget.
-- **MAXIMIZE_CONVERSION_VALUE:** Otimiza para maior valor de conversão (ROAS).
-- **TARGET_CPA:** Define CPA alvo e Google ajusta bids.
-- **TARGET_ROAS:** Define ROAS alvo.
-- **MANUAL_CPC:** Bids manuais por keyword (com Enhanced CPC opcional).
+- **MAXIMIZE_CONVERSIONS:** Google otimiza para mais conversões (primárias) no budget; CPA desejado (tCPA) opcional.
+- **MAXIMIZE_CONVERSION_VALUE:** Otimiza para maior valor de conversão; ROAS desejado (tROAS) opcional.
+- **TARGET_CPA / TARGET_ROAS:** CPA ou ROAS alvo (hoje também configuráveis como opção dentro de Maximizar conversões / valor).
+- **TARGET_SPEND (Maximizar cliques):** Mais cliques no budget, com teto de CPC opcional.
+- **MANUAL_CPC:** Lances manuais por keyword. O Enhanced CPC (ECPC) foi descontinuado: não existe mais em Pesquisa e Display desde a semana de 31/03/2025 (campanhas com ECPC passaram a funcionar como CPC manual) e o flag é ignorado em Shopping. Para otimizar por conversão, recomende Maximizar conversões (tCPA opcional) ou Maximizar valor (tROAS opcional). get_account_settings aponta campanhas que ainda têm manual_cpc.enhanced_cpc_enabled=true.
 
 ## Hierarquia
 Conta → Campanha → Ad Group → Ad/Keyword. Budget pode ser em campanha. Targeting (keywords, audiences) no Ad Group.
@@ -70,13 +73,14 @@ export const playbookContent = `# Playbook de Performance — Google Ads
 - **Budget limitado (limited by budget):** Campanha tem potencial mas budget insuficiente.
 
 ## Fluxo de análise recomendado
-1. \`google_list_accounts\` → descobrir contas
-2. \`google_get_campaign_performance\` → visão geral
-3. \`google_get_performance_alerts\` → identificar problemas
-4. \`google_get_purchase_conversions\` → separar compras de outras conversões
-5. \`google_get_keyword_performance\` → keywords com melhor/pior ROAS
-6. \`google_get_search_terms\` → termos de busca reais → negativos
-7. \`google_get_shopping_products\` → performance por produto
+1. \`list_accounts\` → descobrir contas (o cabeçalho conta as SUSPENSAS/CANCELADAS)
+2. \`get_account_settings\` → auto-tagging, acompanhamento de conversões, optimization score
+3. \`get_campaign_performance\` → visão geral
+4. \`get_performance_alerts\` → identificar problemas
+5. \`get_purchase_conversions\` → separar compras de outras conversões
+6. \`get_keyword_performance\` → keywords com melhor/pior ROAS
+7. \`get_search_terms\` → termos de busca reais → negativos
+8. \`get_shopping_products\` → performance por produto
 
 ## Ordem de otimização
 1. Pausar o que está perdendo dinheiro (ROAS < 1, keywords sem conversão)
@@ -165,17 +169,21 @@ metrics.impressions          -- Impressões
 metrics.clicks               -- Cliques
 metrics.ctr                  -- CTR (decimal: 0.05 = 5%)
 metrics.average_cpc          -- CPC médio em micros
-metrics.conversions          -- Conversões (TODAS as ações)
-metrics.conversions_value    -- Receita (já em BRL, NÃO micros)
-metrics.all_conversions      -- Conversões incluindo cross-device
+metrics.conversions          -- Conversões das ações PRIMÁRIAS (include_in_conversions_metric = true)
+metrics.conversions_value    -- Valor das primárias (moeda da conta, NÃO micros)
+metrics.all_conversions      -- TODAS as ações (primárias + secundárias)
 metrics.all_conversions_value
+metrics.view_through_conversions        -- Pós-impressão, sem clique
+metrics.conversions_by_conversion_date  -- Primárias pela data da conversão (com segments.date)
 \`\`\`
 
 ## Segmentos (WHERE / breakdowns)
 \`\`\`
 segments.date                          -- Data (YYYY-MM-DD)
 segments.device                        -- MOBILE, DESKTOP, TABLET, OTHER
-segments.conversion_action_category    -- PURCHASE, LEAD, DEFAULT, etc.
+segments.conversion_action_category    -- PURCHASE, SUBMIT_LEAD_FORM, QUALIFIED_LEAD, CONVERTED_LEAD,
+                                       -- IMPORTED_LEAD, PHONE_CALL_LEAD, CONTACT, SIGNUP, DEFAULT...
+                                       -- (NÃO existe LEAD). No WHERE, precisa estar no SELECT
 segments.product_title                 -- Título do produto (Shopping)
 segments.product_item_id              -- ID do item (Shopping)
 \`\`\`
@@ -217,7 +225,8 @@ LIMIT 20
 
 ### Apenas compras (filtrar conversões)
 \`\`\`sql
-SELECT campaign.name, metrics.conversions, metrics.conversions_value
+SELECT campaign.name, segments.conversion_action_category,
+       metrics.conversions, metrics.conversions_value
 FROM campaign
 WHERE segments.date DURING LAST_30_DAYS
   AND segments.conversion_action_category = 'PURCHASE'
@@ -235,13 +244,15 @@ LIMIT 30
 \`\`\`
 
 ## Notas
+- Não sabe o nome de um campo ou se ele combina com o FROM? \`get_gaql_fields\` (resource=...) lista campos, segmentos e métricas compatíveis; \`validate_gaql\` confere a query antes de rodar.
 - \`cost_micros\` e \`average_cpc\`: SEMPRE dividir por 1.000.000
-- \`conversions_value\`: NÃO dividir (já em BRL)
+- \`conversions_value\`: NÃO dividir (já na moeda da conta)
 - \`ctr\`: Vem como decimal (0.05 = 5%). Multiplicar por 100 para exibir como %
-- Não usar WHERE com campo que não está no SELECT (exceto segments.date)
+- Segmento usado no WHERE precisa estar no SELECT — exceto os de data (date, week, month, quarter, year)
+- Segmento de data no SELECT exige um período finito no WHERE (ex.: \`segments.date DURING LAST_30_DAYS\`)
 - Recurso de SEGMENTAÇÃO (ex.: \`campaign\` em FROM campaign_asset ou expanded_landing_page_view): campo dele no WHERE precisa estar no SELECT. Recurso ATRIBUÍDO (ex.: \`campaign\` em search_term_view) não tem essa exigência — confira na field reference de cada recurso
-- ORDER BY só aceita campos do SELECT
-- LIMIT máximo: 10.000 por query
+- Prefira ordenar (ORDER BY) por campos que estão no SELECT
+- Use LIMIT para limitar o volume: run_gaql usa searchStream e devolve todas as linhas
 - DURING aceita só: TODAY, YESTERDAY, LAST_7_DAYS, LAST_14_DAYS, LAST_30_DAYS, LAST_BUSINESS_WEEK, THIS_MONTH, LAST_MONTH, THIS_WEEK_SUN_TODAY, THIS_WEEK_MON_TODAY, LAST_WEEK_SUN_SAT, LAST_WEEK_MON_SUN. **Não existe LAST_60_DAYS nem LAST_90_DAYS** — use \`segments.date BETWEEN 'AAAA-MM-DD' AND 'AAAA-MM-DD'\`
 - Datas da campanha: \`campaign.start_date_time\` / \`campaign.end_date_time\` (os antigos \`start_date\`/\`end_date\` não existem mais)
 `;
@@ -256,7 +267,21 @@ export const troubleshootingContent = `# Troubleshooting — Google Ads
 
 ### PERMISSION_DENIED
 - **Causa:** Token sem permissão ou conta não acessível pela MCC.
-- **Solução:** Verificar se o token OAuth tem escopo \`https://www.googleapis.com/auth/adwords\`. Verificar se a conta está vinculada à MCC.
+- **Solução:** Verificar se o token OAuth tem escopo \`https://www.googleapis.com/auth/adwords\`. Verificar se a conta está vinculada à MCC (o header login-customer-id precisa ser o MCC gerente — USER_PERMISSION_DENIED). \`check_api_access\` faz o diagnóstico.
+
+## Acesso à API (desde 09/09/2026)
+- **Developer token:** foi descontinuado em 09/09/2026. O header é opcional e ignorado; uma versão major futura vai recusá-lo. O servidor só envia se GOOGLE_ADS_DEVELOPER_TOKEN estiver definido — pode remover.
+- **Nível de acesso:** é do projeto Google Cloud dono do OAuth client. Pede-se na página "Google Ads API Overview" do projeto no Cloud Console (console.cloud.google.com/google/ads-apis/overview), não mais no API Center.
+- **Cotas (por projeto Cloud, janela de 24 h):** Test — só contas de teste, 15.000 operações/dia; Explorer — 2.880/dia em produção; Basic — 15.000/dia; Standard — sem limite diário.
+- **CLOUD_PROJECT_NOT_APPROVED_FOR_PRODUCTION:** o projeto só tem acesso Test e a conta é de produção → pedir Explorer, Basic ou Standard.
+- **TWO_STEP_VERIFICATION_NOT_ENROLLED:** desde 21/04/2026 a API exige verificação em duas etapas do usuário que autoriza o OAuth → ativar 2SV na conta Google (ou usar service account).
+- **Service account:** alternativa ao refresh token de uma pessoa — o e-mail da service account é adicionado como usuário da conta/MCC em Admin > Acesso e segurança (até 20 contas por e-mail; para mais, adicione ao MCC). Variáveis GOOGLE_ADS_SERVICE_ACCOUNT_KEY_PATH ou GOOGLE_ADS_SERVICE_ACCOUNT_JSON.
+- **CUSTOMER_NOT_ENABLED / ACTION_NOT_PERMITTED_FOR_SUSPENDED_ACCOUNT:** a conta não está ativa ou está suspensa — veja \`list_accounts\` com includeStatuses.
+
+## Serviços restritos (não construa fluxos em cima sem liberação)
+- **Só com allowlist (liberação pelo representante Google):** ReachPlanService (previsão de alcance no YouTube), AudienceInsightsService, ContentCreatorInsightsService, BenchmarksService, IncentiveService (créditos promocionais de conta nova).
+- **Beta fechado:** AssetGenerationService (títulos e imagens por IA generativa, desde a v22).
+- Sem liberação a API recusa as chamadas; não há como contornar pelo MCP.
 
 ### INVALID_ARGUMENT — "The required field was not present"
 - **Causa:** Campo obrigatório faltando na mutação. Comum ao criar campanhas sem todos os campos.
@@ -318,14 +343,24 @@ Quando uma campanha com Smart Bidding (Maximize Conversions, Target CPA, Target 
 - Política: corrigir violação e apelar
 - Suspensão por clique inválido: apelar com evidências
 
+### Como achar pela API
+- \`list_accounts\` conta as contas por status no cabeçalho; \`includeStatuses: ["SUSPENDED","CANCELED"]\` lista quais são.
+- SUSPENDED só o suporte do Google reativa; CANCELED um administrador reativa; CLOSED é permanente.
+
+## Verificação de identidade do anunciante
+- Se o prazo de conclusão passar sem a verificação concluída, a conta pode ser pausada.
+- \`get_identity_verification\` (uma conta ou allAccounts) mostra status, prazos e o link de ação; o método é limitado pela API, então o resultado fica em cache por 6 h.
+- \`start_identity_verification\` abre uma sessão nova quando o link expirou (exige confirm: true).
+
 ## Conversões não aparecendo
 
 ### Checklist
 1. Tag do Google Ads instalada corretamente? (verificar com Tag Assistant)
-2. Conversion action configurada como PRIMARY? (só primary conta pra bidding)
-3. Janela de atribuição correta? (default: 30 dias click, 1 dia view)
-4. Enhanced conversions ativado? (melhora matching, especialmente iOS)
-5. Consent mode configurado? (GDPR/LGPD pode bloquear tracking)
+2. Conversion action configurada como PRIMARY? (só primary conta pra bidding e aparece em metrics.conversions; secundária só em all_conversions)
+3. Auto-tagging ligado? Sem ele não há GCLID — quebra a importação do GA4 e o upload offline (\`get_account_settings\`)
+4. Janela de atribuição correta? (default: 30 dias click, 1 dia view)
+5. Enhanced conversions ativado? (melhora matching, especialmente iOS; exige aceitar os termos de dados do cliente)
+6. Consent mode configurado? (GDPR/LGPD pode bloquear tracking)
 
 ### Delay normal
 - Conversões podem levar até 72h pra aparecer (cross-device, data processing)

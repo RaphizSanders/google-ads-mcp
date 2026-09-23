@@ -13,7 +13,10 @@ const rootByCwd = join(process.cwd(), ".env");
 const rootByDir = join(dirname(fileURLToPath(import.meta.url)), "..", ".env");
 // quiet: true — em modo stdio qualquer log em stdout corrompe o protocolo JSON-RPC.
 dotenv.config({ path: rootByCwd, quiet: true });
-if (!process.env.GOOGLE_ADS_DEVELOPER_TOKEN) {
+/* O fallback olhava GOOGLE_ADS_DEVELOPER_TOKEN, que deixou de ser obrigatório
+   (a API ignora o header desde 09/09/2026). O critério agora é a variável que
+   continua obrigatória: sem ela o .env do cwd não configurou este servidor. */
+if (!process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID) {
   dotenv.config({ path: rootByDir, quiet: true });
 }
 
@@ -28,7 +31,7 @@ import {
   assertHostedReadOnlySecurity,
   parseAllowedCustomerIds,
   parseAllowedHosts,
-  parseGoogleAdsCredentialsJson,
+  resolveGoogleAdsAuth,
 } from "./hosted-config.js";
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 0;
@@ -59,41 +62,21 @@ assertHostedReadOnlySecurity({
   allowedCustomerIds: ALLOWED_CUSTOMER_IDS,
 });
 
-// Runner run-http.mjs injeta o token aqui quando carrega .env
+// Runner run-http.mjs injeta o token aqui quando carrega .env. O servidor não o
+// exige (a API ignora o developer token desde 09/09/2026), mas o run-http.mjs —
+// fora deste lote — ainda sai sem ele; sem token, use `PORT=3333 node dist/index.js`.
 const g = globalThis as unknown as { __GOOGLE_ADS_DEVELOPER_TOKEN?: string };
 const tokenFromRunner = typeof g.__GOOGLE_ADS_DEVELOPER_TOKEN === "string" ? g.__GOOGLE_ADS_DEVELOPER_TOKEN : null;
-if (tokenFromRunner) {
+if (tokenFromRunner && !process.env.GOOGLE_ADS_DEVELOPER_TOKEN) {
   process.env.GOOGLE_ADS_DEVELOPER_TOKEN = tokenFromRunner;
 }
 
+/* Credenciais: OAuth de usuário (GOOGLE_ADS_CREDENTIALS_PATH/JSON) ou service
+   account (GOOGLE_ADS_SERVICE_ACCOUNT_KEY_PATH/JSON) — exatamente uma. O
+   developer token é opcional. Regras em resolveGoogleAdsAuth (hosted-config). */
 function getClient(): GoogleAdsClient {
-  const credentialsPath = process.env.GOOGLE_ADS_CREDENTIALS_PATH;
-  const credentialsJson = process.env.GOOGLE_ADS_CREDENTIALS_JSON;
-  const developerToken = process.env.GOOGLE_ADS_DEVELOPER_TOKEN ?? tokenFromRunner;
-  const loginCustomerId = process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID;
-
-  if (credentialsPath && credentialsJson) {
-    throw new Error("Defina apenas GOOGLE_ADS_CREDENTIALS_PATH ou GOOGLE_ADS_CREDENTIALS_JSON.");
-  }
-  if (!credentialsPath && !credentialsJson) {
-    throw new Error("GOOGLE_ADS_CREDENTIALS_PATH ou GOOGLE_ADS_CREDENTIALS_JSON deve ser definido.");
-  }
-  if (!developerToken) {
-    throw new Error("GOOGLE_ADS_DEVELOPER_TOKEN não definido.");
-  }
-  if (!loginCustomerId) {
-    throw new Error("GOOGLE_ADS_LOGIN_CUSTOMER_ID não definido.");
-  }
-
-  // Expand ~ in path
-  const resolvedPath = credentialsPath?.replace(/^~/, process.env.HOME ?? "");
-
   return new GoogleAdsClient({
-    ...(credentialsJson
-      ? { credentials: parseGoogleAdsCredentialsJson(credentialsJson) }
-      : { credentialsPath: resolvedPath }),
-    developerToken,
-    loginCustomerId,
+    ...resolveGoogleAdsAuth(process.env),
     readOnly: READ_ONLY,
     dryRun: DRY_RUN,
   });

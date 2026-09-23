@@ -4,7 +4,17 @@
  * encadeados (o segundo usa o ID criado no primeiro) — nelas o validateOnly é recusado.
  */
 export const catalog = {
-  read: [] as string[],
-  write: [] as string[],
+  read: [
+    "check_api_access",
+    "get_account_settings",
+    "get_identity_verification",
+    "get_gaql_fields",
+    "validate_gaql",
+  ] as string[],
+  write: [
+    "update_account_settings",
+    // Sem validate_only na API: em dry-run/validateOnly a tool não envia nada (fail-closed no código).
+    "start_identity_verification",
+  ] as string[],
   chained: [] as string[],
 };

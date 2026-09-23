@@ -1,9 +1,16 @@
 /**
  * Cliente para Google Ads API (REST).
  * Versão da API configurável via GOOGLE_ADS_API_VERSION env var (default: v25).
- * Auth: OAuth 2.0 com auto-refresh, sem dependências Google.
+ * Auth: OAuth 2.0 de usuário (refresh token) ou service account (JWT assinado
+ * localmente), com auto-refresh e sem dependências Google.
+ *
+ * Developer token: desde 09/09/2026 o header `developer-token` é opcional e
+ * ignorado pela API — o nível de acesso (Test, Explorer, Basic, Standard) é do
+ * projeto Google Cloud dono do OAuth client. O header só vai quando o token foi
+ * configurado; a Google anunciou que uma versão major futura vai recusá-lo.
  */
 
+import { createHash, createSign } from "node:crypto";
 import { readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 
 const API_VERSION = process.env.GOOGLE_ADS_API_VERSION ?? "v25";
@@ -11,6 +18,12 @@ const API_BASE = `https://googleads.googleapis.com/${API_VERSION}`;
 
 const MAX_RETRIES = 3;
 const RETRY_BASE_MS = 2000;
+
+export const GOOGLE_ADS_OAUTH_SCOPE = "https://www.googleapis.com/auth/adwords";
+export const DEFAULT_TOKEN_URI = "https://oauth2.googleapis.com/token";
+const JWT_BEARER_GRANT = "urn:ietf:params:oauth:grant-type:jwt-bearer";
+/** Página do projeto Cloud onde se pede acesso Explorer/Basic/Standard. */
+export const CLOUD_ADS_API_OVERVIEW_URL = "https://console.cloud.google.com/google/ads-apis/overview";
 
 export interface GoogleAdsCredentials {
   token: string;
@@ -21,10 +34,25 @@ export interface GoogleAdsCredentials {
   expiry?: string;
 }
 
+/**
+ * Chave JSON de service account (o arquivo baixado do Cloud Console). Acesso
+ * direto: o e-mail da service account é adicionado como usuário da conta ou do
+ * MCC no Google Ads (Admin > Acesso e segurança) — sem delegação de domínio.
+ */
+export interface ServiceAccountKey {
+  client_email: string;
+  private_key: string;
+  token_uri?: string;
+  private_key_id?: string;
+}
+
 export interface GoogleAdsClientConfig {
   credentialsPath?: string;
   credentials?: GoogleAdsCredentials;
-  developerToken: string;
+  /** Alternativa ao OAuth de usuário: não depende da conta de um funcionário. */
+  serviceAccount?: ServiceAccountKey;
+  /** Opcional desde 09/09/2026 (header ignorado pela API). Só é enviado quando definido. */
+  developerToken?: string;
   loginCustomerId: string;
   readOnly?: boolean;
   /* Dry-run: envia validateOnly=true nos endpoints :mutate, de modo que a API
@@ -41,22 +69,188 @@ export interface MutateOperation {
   updateMask?: string;
 }
 
+/** Filtros de listChildAccounts. Sem opções, o comportamento é o de sempre: só contas ENABLED e não-gerente. */
+export interface ListChildAccountsOptions {
+  /** Traz todos os status (ENABLED, CANCELED, SUSPENDED, CLOSED) em vez de só ENABLED. */
+  allStatuses?: boolean;
+  /** Inclui contas gerente (MCC), inclusive a própria conta consultada (level 0). */
+  includeManagers?: boolean;
+  /** customer_client.level <= maxLevel (1 = a própria conta + filhos diretos). */
+  maxLevel?: number;
+}
+
+/** Operação única de CustomerService.MutateCustomer (só update existe para customer). */
+export interface CustomerOperation {
+  update: Record<string, unknown>;
+  updateMask: string;
+}
+
+/**
+ * Erro da Google Ads API com os códigos estruturados (ex.:
+ * "authorizationError.CLOUD_PROJECT_NOT_APPROVED_FOR_PRODUCTION"). A mensagem já
+ * traz a explicação em PT-BR quando o código é conhecido; `codes` permite que
+ * uma tool trate um caso específico sem depender do texto.
+ */
+export class GoogleAdsApiError extends Error {
+  constructor(
+    message: string,
+    readonly codes: string[],
+    readonly httpStatus: number
+  ) {
+    super(message);
+    this.name = "GoogleAdsApiError";
+  }
+}
+
+/**
+ * Explicação em PT-BR, com o que fazer, para os erros de acesso mais comuns.
+ * Chave: "<categoria>.<VALOR>" como vem em errors[].errorCode.
+ */
+const API_ERROR_HINTS: Record<string, string> = {
+  "authorizationError.CLOUD_PROJECT_NOT_APPROVED_FOR_PRODUCTION":
+    "O projeto do Google Cloud dono do OAuth client só tem acesso Test (contas de teste). Desde 09/09/2026 o nível de " +
+    "acesso é do projeto Cloud, não do developer token: peça acesso Explorer, Basic ou Standard na página \"Google Ads API " +
+    `Overview\" do projeto no Cloud Console (${CLOUD_ADS_API_OVERVIEW_URL}).`,
+  "authorizationError.DEVELOPER_TOKEN_NOT_APPROVED":
+    "Erro de nível de acesso. Desde 09/09/2026 o developer token é opcional e ignorado: o acesso vem do projeto Cloud do " +
+    `OAuth client — confira/solicite o nível em ${CLOUD_ADS_API_OVERVIEW_URL} e remova GOOGLE_ADS_DEVELOPER_TOKEN.`,
+  "authorizationError.DEVELOPER_TOKEN_PROHIBITED":
+    "O developer token enviado não combina com o projeto Cloud. Desde 09/09/2026 o token é opcional: remova " +
+    "GOOGLE_ADS_DEVELOPER_TOKEN e deixe o acesso vir do projeto Cloud do OAuth client.",
+  "authorizationError.DEVELOPER_TOKEN_NOT_ON_ALLOWLIST":
+    "O developer token não está na allowlist deste recurso. Desde 09/09/2026 o token é opcional: remova " +
+    "GOOGLE_ADS_DEVELOPER_TOKEN; se o serviço for restrito a allowlist, só o representante Google libera.",
+  "authenticationError.DEVELOPER_TOKEN_INVALID":
+    "Developer token inválido. Ele é opcional desde 09/09/2026 — remova GOOGLE_ADS_DEVELOPER_TOKEN da configuração.",
+  "authorizationError.USER_PERMISSION_DENIED":
+    "O usuário do OAuth (ou a service account) não tem acesso a esta conta, ou GOOGLE_ADS_LOGIN_CUSTOMER_ID não é um MCC " +
+    "que a gerencia (o header login-customer-id precisa ser o gerente da conta consultada).",
+  "authorizationError.INVALID_LOGIN_CUSTOMER_ID_SERVING_CUSTOMER_ID_COMBINATION":
+    "GOOGLE_ADS_LOGIN_CUSTOMER_ID não gerencia esta conta: use o MCC ao qual ela está vinculada.",
+  "authorizationError.ACTION_NOT_PERMITTED":
+    "O usuário/service account não tem permissão para esta ação na conta (ex.: acesso só de leitura ou faturamento). " +
+    "Peça nível Padrão ou Administrador em Admin > Acesso e segurança da conta Google Ads.",
+  "authorizationError.ACTION_NOT_PERMITTED_FOR_SUSPENDED_ACCOUNT":
+    "A conta está SUSPENSA: a API não permite a ação. Resolva a suspensão (pagamento ou política) na interface do Google Ads.",
+  "authorizationError.CUSTOMER_NOT_ENABLED":
+    "A conta não está ativa (cancelada, suspensa, encerrada ou ainda não habilitada). Veja o status em list_accounts com " +
+    "includeStatuses.",
+  "authorizationError.PROJECT_DISABLED":
+    "A Google Ads API não está habilitada no projeto Google Cloud do OAuth client. Ative-a em APIs e serviços do projeto.",
+  "authorizationError.SERVICE_ACCESS_DENIED":
+    "O projeto não tem acesso a este serviço. Alguns serviços são restritos a allowlist (ReachPlanService, " +
+    "AudienceInsightsService, BenchmarksService, ContentCreatorInsightsService, IncentiveService) ou beta fechado " +
+    "(AssetGenerationService) — só o representante Google libera.",
+  "authorizationError.MISSING_TOS":
+    "Os termos de serviço da Google Ads API não foram aceitos para esta credencial.",
+  "authenticationError.TWO_STEP_VERIFICATION_NOT_ENROLLED":
+    "A conta Google que autorizou o acesso não tem verificação em duas etapas (2SV). A Google Ads API exige 2SV dos " +
+    "usuários desde 21/04/2026: ative em https://www.google.com/landing/2step e tente de novo — ou use uma service " +
+    "account (GOOGLE_ADS_SERVICE_ACCOUNT_KEY_PATH/JSON), que não depende da conta de uma pessoa.",
+  "authenticationError.ADVANCED_PROTECTION_NOT_ENROLLED":
+    "Um administrador da conta Google Ads passou a exigir Proteção Avançada: ative em " +
+    "https://landing.google.com/advancedprotection na conta Google que autorizou o acesso.",
+  "authenticationError.NOT_ADS_USER":
+    "A conta Google do OAuth (ou a service account) não é usuária de nenhuma conta Google Ads. Para service account, " +
+    "adicione o e-mail dela em Admin > Acesso e segurança da conta ou do MCC.",
+  "authenticationError.OAUTH_TOKEN_REVOKED":
+    "O acesso OAuth foi revogado: gere um novo refresh token (a conta precisa ter 2SV ativo).",
+  "authenticationError.OAUTH_TOKEN_INVALID": "Token OAuth inválido: gere um novo refresh token.",
+  "authenticationError.OAUTH_TOKEN_DISABLED": "Token OAuth desativado: gere um novo refresh token.",
+  "authenticationError.GOOGLE_ACCOUNT_DELETED":
+    "A conta Google que autorizou o acesso foi excluída. Use outra conta ou uma service account.",
+  "authenticationError.CUSTOMER_NOT_FOUND": "Não existe conta Google Ads com esse ID — confira o customerId.",
+  "quotaError.RESOURCE_EXHAUSTED":
+    "Cota da API esgotada. O limite diário de operações é do projeto Google Cloud (Explorer: 2.880/dia em contas de " +
+    "produção; Basic: 15.000/dia; Standard: sem limite diário) — espace as chamadas ou peça nível maior em " +
+    `${CLOUD_ADS_API_OVERVIEW_URL}.`,
+};
+
+/** Explicações PT-BR para os códigos de erro conhecidos (sem repetição). */
+export function explainApiErrorCodes(codes: string[]): string[] {
+  return [...new Set(codes.map((code) => API_ERROR_HINTS[code]).filter((hint): hint is string => Boolean(hint)))];
+}
+
+/** Dica para falhas do endpoint de token (refresh token de usuário ou JWT de service account). */
+function explainTokenFailure(body: string, serviceAccount: boolean): string {
+  if (/invalid_grant/.test(body)) {
+    return serviceAccount
+      ? " — a service account foi recusada (chave revogada/excluída ou relógio do servidor fora de hora)."
+      : " — o refresh token expirou ou foi revogado: gere um novo (desde 21/04/2026 a conta Google precisa ter " +
+          "verificação em duas etapas).";
+  }
+  if (/invalid_client|unauthorized_client/.test(body)) {
+    return " — client_id/client_secret (ou a chave da service account) não são aceitos pelo projeto Cloud.";
+  }
+  return "";
+}
+
+function base64url(value: string | Buffer): string {
+  return Buffer.from(value).toString("base64url");
+}
+
+/**
+ * JWT de service account (RS256) para o fluxo server-to-server do OAuth:
+ * iss = e-mail da service account, scope = adwords, aud = endpoint de token,
+ * exp no máximo 1 h depois de iat.
+ */
+export function buildServiceAccountAssertion(key: ServiceAccountKey, nowSeconds: number, tokenUri?: string): string {
+  const header = { alg: "RS256", typ: "JWT", ...(key.private_key_id ? { kid: key.private_key_id } : {}) };
+  const claims = {
+    iss: key.client_email,
+    scope: GOOGLE_ADS_OAUTH_SCOPE,
+    aud: tokenUri ?? key.token_uri ?? DEFAULT_TOKEN_URI,
+    iat: nowSeconds,
+    exp: nowSeconds + 3600,
+  };
+  const input = `${base64url(JSON.stringify(header))}.${base64url(JSON.stringify(claims))}`;
+  const signature = createSign("RSA-SHA256").update(input).sign(key.private_key);
+  return `${input}.${base64url(signature)}`;
+}
+
+export type GoogleAdsAuthMode = "oauth_user" | "service_account";
+
+type TokenState = { token?: string; expiresAt?: number; inflight?: Promise<void> };
+
+/* getClient() cria um client por chamada de tool. Para service account o
+   access token vive só em memória; sem este cache cada tool pediria um token
+   novo ao endpoint OAuth. Chave: e-mail + hash da chave privada. */
+const SERVICE_ACCOUNT_TOKEN_STATES = new Map<string, TokenState>();
+
 export class GoogleAdsClient {
-  private credentials: GoogleAdsCredentials;
+  private credentials?: GoogleAdsCredentials;
   private credentialsPath?: string;
-  private developerToken: string;
+  private serviceAccount?: ServiceAccountKey;
+  /* Estado de token compartilhado com os clones de withDryRun (Object.create):
+     muta-se o objeto, nunca se reatribui a propriedade. inflight evita que
+     chamadas paralelas (varredura de várias contas) renovem o token juntas. */
+  private tokenState: TokenState = {};
+  private developerToken?: string;
   private loginCustomerId: string;
   private readOnly: boolean;
   private dryRun: boolean;
 
   constructor(config: GoogleAdsClientConfig) {
     this.credentialsPath = config.credentialsPath;
-    this.developerToken = config.developerToken;
+    this.developerToken = config.developerToken?.trim() ? config.developerToken.trim() : undefined;
     this.loginCustomerId = config.loginCustomerId.replace(/-/g, "");
     this.readOnly = config.readOnly ?? false;
     this.dryRun = config.dryRun ?? false;
 
-    if (config.credentials) {
+    const sources = [config.credentials, config.credentialsPath, config.serviceAccount].filter(Boolean).length;
+    if (config.serviceAccount && sources > 1) {
+      throw new Error("Use OAuth de usuário OU service account, não os dois.");
+    }
+    if (config.serviceAccount) {
+      if (!config.serviceAccount.client_email || !config.serviceAccount.private_key) {
+        throw new Error("Service account sem client_email ou private_key.");
+      }
+      this.serviceAccount = { ...config.serviceAccount };
+      const cacheKey = `${this.serviceAccount.client_email}|${createHash("sha256").update(this.serviceAccount.private_key).digest("hex")}`;
+      const shared = SERVICE_ACCOUNT_TOKEN_STATES.get(cacheKey) ?? {};
+      SERVICE_ACCOUNT_TOKEN_STATES.set(cacheKey, shared);
+      this.tokenState = shared;
+    } else if (config.credentials) {
       this.credentials = { ...config.credentials };
     } else if (config.credentialsPath) {
       const raw = readFileSync(config.credentialsPath, "utf8");
@@ -66,24 +260,75 @@ export class GoogleAdsClient {
     }
   }
 
+  // ── Configuração (sem segredos) ──────────────────────────────────────
+
+  /** Como a chamada se autentica: refresh token de usuário ou service account. */
+  get authMode(): GoogleAdsAuthMode {
+    return this.serviceAccount ? "service_account" : "oauth_user";
+  }
+
+  /** E-mail da service account (é o que se adiciona como usuário no Google Ads). */
+  get serviceAccountEmail(): string | undefined {
+    return this.serviceAccount?.client_email;
+  }
+
+  /** Há developer token configurado? (opcional e ignorado pela API desde 09/09/2026) */
+  get hasDeveloperToken(): boolean {
+    return Boolean(this.developerToken);
+  }
+
+  /** MCC enviado no header login-customer-id. */
+  get loginCustomer(): string {
+    return this.loginCustomerId;
+  }
+
+  get isReadOnly(): boolean {
+    return this.readOnly;
+  }
+
+  get apiVersion(): string {
+    return API_VERSION;
+  }
+
   // ── Auth ─────────────────────────────────────────────────────────────
 
   private isTokenExpired(): boolean {
-    if (!this.credentials.expiry) return true;
+    if (!this.credentials?.expiry) return true;
     const expiry = new Date(this.credentials.expiry).getTime();
     // Refresh 5 minutes before expiry
     return Date.now() > expiry - 5 * 60 * 1000;
   }
 
+  private async refreshServiceAccountToken(): Promise<void> {
+    const key = this.serviceAccount as ServiceAccountKey;
+    const tokenUri = key.token_uri ?? DEFAULT_TOKEN_URI;
+    const assertion = buildServiceAccountAssertion(key, Math.floor(Date.now() / 1000), tokenUri);
+    const res = await fetch(tokenUri, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ grant_type: JWT_BEARER_GRANT, assertion }).toString(),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`OAuth da service account falhou (HTTP ${res.status}): ${text}${explainTokenFailure(text, true)}`);
+    }
+    const data = (await res.json()) as { access_token: string; expires_in: number };
+    // Só em memória: o token de service account é barato de gerar e não vai para disco.
+    this.tokenState.token = data.access_token;
+    this.tokenState.expiresAt = Date.now() + Number(data.expires_in ?? 3600) * 1000;
+  }
+
   private async refreshToken(): Promise<void> {
+    if (this.serviceAccount) return this.refreshServiceAccountToken();
+    const credentials = this.credentials as GoogleAdsCredentials;
     const body = new URLSearchParams({
       grant_type: "refresh_token",
-      refresh_token: this.credentials.refresh_token,
-      client_id: this.credentials.client_id,
-      client_secret: this.credentials.client_secret,
+      refresh_token: credentials.refresh_token,
+      client_id: credentials.client_id,
+      client_secret: credentials.client_secret,
     });
 
-    const res = await fetch(this.credentials.token_uri, {
+    const res = await fetch(credentials.token_uri, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: body.toString(),
@@ -91,12 +336,12 @@ export class GoogleAdsClient {
 
     if (!res.ok) {
       const text = await res.text();
-      throw new Error(`OAuth refresh failed (HTTP ${res.status}): ${text}`);
+      throw new Error(`OAuth refresh failed (HTTP ${res.status}): ${text}${explainTokenFailure(text, false)}`);
     }
 
     const data = (await res.json()) as { access_token: string; expires_in: number };
-    this.credentials.token = data.access_token;
-    this.credentials.expiry = new Date(Date.now() + data.expires_in * 1000).toISOString();
+    credentials.token = data.access_token;
+    credentials.expiry = new Date(Date.now() + data.expires_in * 1000).toISOString();
 
     // Persist refreshed token.
     //
@@ -111,7 +356,7 @@ export class GoogleAdsClient {
     if (this.credentialsPath) {
       const tmp = `${this.credentialsPath}.tmp-${process.pid}-${Date.now()}`;
       try {
-        writeFileSync(tmp, JSON.stringify(this.credentials, null, 2), { mode: 0o600 });
+        writeFileSync(tmp, JSON.stringify(credentials, null, 2), { mode: 0o600 });
         renameSync(tmp, this.credentialsPath);
       } catch {
         // Non-fatal: token will be refreshed again next time
@@ -124,18 +369,31 @@ export class GoogleAdsClient {
     }
   }
 
+  private needsRefresh(): boolean {
+    if (!this.serviceAccount) return this.isTokenExpired();
+    const { token, expiresAt } = this.tokenState;
+    return !token || !expiresAt || Date.now() > expiresAt - 5 * 60 * 1000;
+  }
+
   private async getAccessToken(): Promise<string> {
-    if (this.isTokenExpired()) {
-      await this.refreshToken();
+    if (this.needsRefresh()) {
+      // Uma renovação por vez: chamadas paralelas esperam a mesma promessa.
+      if (!this.tokenState.inflight) {
+        this.tokenState.inflight = this.refreshToken().finally(() => {
+          this.tokenState.inflight = undefined;
+        });
+      }
+      await this.tokenState.inflight;
     }
-    return this.credentials.token;
+    return this.serviceAccount ? (this.tokenState.token as string) : (this.credentials as GoogleAdsCredentials).token;
   }
 
   private async getHeaders(): Promise<Record<string, string>> {
     const token = await this.getAccessToken();
     return {
       Authorization: `Bearer ${token}`,
-      "developer-token": this.developerToken,
+      // Opcional e ignorado pela API desde 09/09/2026: só vai quando foi configurado.
+      ...(this.developerToken ? { "developer-token": this.developerToken } : {}),
       "login-customer-id": this.loginCustomerId,
       "Content-Type": "application/json",
       Accept: "application/json",
@@ -209,14 +467,21 @@ export class GoogleAdsClient {
 
       // Extract detailed errors if available
       const details = (err.details as Array<Record<string, unknown>>) ?? [];
-      const errorDetails = details
+      const detailErrors = details
         .filter((d) => d.errors)
-        .flatMap((d) => (d.errors as Array<Record<string, unknown>>) ?? [])
-        .map((e) => (e.message as string) ?? "")
-        .filter(Boolean);
+        .flatMap((d) => (d.errors as Array<Record<string, unknown>>) ?? []);
+      const errorDetails = detailErrors.map((e) => (e.message as string) ?? "").filter(Boolean);
+      /* errorCode vem como { authorizationError: "USER_PERMISSION_DENIED" }: vira
+         "authorizationError.USER_PERMISSION_DENIED" para a tool tratar o caso
+         sem depender do texto, e para a dica em PT-BR abaixo. */
+      const codes = detailErrors.flatMap((e) =>
+        Object.entries((e.errorCode as Record<string, unknown>) ?? {}).map(([kind, value]) => `${kind}.${String(value)}`)
+      );
+      const hints = explainApiErrorCodes(codes);
 
       const detailStr = errorDetails.length > 0 ? ` — ${errorDetails.join("; ")}` : "";
-      throw new Error(`Google Ads API: ${message}${detailStr}`);
+      const hintStr = hints.length > 0 ? `\nComo resolver: ${hints.join(" ")}` : "";
+      throw new GoogleAdsApiError(`Google Ads API: ${message}${detailStr}${hintStr}`, codes, res.status);
     }
 
     /* Não-2xx sem `error` no corpo (página JSON de proxy/LB, `[]` ou `{}` de um
@@ -299,28 +564,47 @@ export class GoogleAdsClient {
     return (response.resourceNames ?? []).map((rn) => rn.replace("customers/", ""));
   }
 
-  /** Get customer details (name, currency, timezone). */
+  /** Get customer details (name, currency, timezone, status, test account). */
   async getCustomer(customerId: string): Promise<Record<string, unknown>> {
     const results = await this.searchStream(customerId, `
       SELECT customer.id, customer.descriptive_name, customer.currency_code,
-             customer.time_zone, customer.manager, customer.status
+             customer.time_zone, customer.manager, customer.status,
+             customer.test_account
       FROM customer
       LIMIT 1
     `);
     return results[0] ?? {};
   }
 
-  /** List child accounts of an MCC. */
-  async listChildAccounts(mccId?: string): Promise<Array<Record<string, unknown>>> {
+  /**
+   * List client accounts of an MCC (customer_client: todos os níveis abaixo dele).
+   * Sem opções: só contas ENABLED e não-gerente, como sempre foi. Com
+   * allStatuses/includeManagers aparecem as suspensas, canceladas, encerradas e
+   * os sub-MCCs — sem isso um cliente SUSPENSO simplesmente some da lista.
+   */
+  async listChildAccounts(
+    mccId?: string,
+    options: ListChildAccountsOptions = {}
+  ): Promise<Array<Record<string, unknown>>> {
     const cid = mccId ?? this.loginCustomerId;
+    const conditions: string[] = [];
+    if (!options.includeManagers) conditions.push("customer_client.manager = false");
+    if (!options.allStatuses) conditions.push("customer_client.status = 'ENABLED'");
+    if (options.maxLevel !== undefined) {
+      if (!Number.isInteger(options.maxLevel) || options.maxLevel < 0) {
+        throw new Error(`maxLevel inválido: ${options.maxLevel}`);
+      }
+      conditions.push(`customer_client.level <= ${options.maxLevel}`);
+    }
     return this.searchStream(cid, `
       SELECT customer_client.id, customer_client.descriptive_name,
              customer_client.currency_code, customer_client.time_zone,
              customer_client.manager, customer_client.status,
-             customer_client.level
+             customer_client.level, customer_client.hidden,
+             customer_client.test_account, customer_client.applied_labels,
+             customer_client.client_customer
       FROM customer_client
-      WHERE customer_client.manager = false
-        AND customer_client.status = 'ENABLED'
+      ${conditions.length ? `WHERE ${conditions.join("\n        AND ")}` : ""}
       ORDER BY customer_client.descriptive_name
     `);
   }
@@ -764,5 +1048,71 @@ export class GoogleAdsClient {
       headers: { Authorization: `Bearer ${token}`, "X-Goog-Upload-Command": "cancel" },
     });
     await res.arrayBuffer().catch(() => undefined);
+  }
+
+  // ── Conta, verificação de identidade e metadados (lote account-auth) ──
+
+  /**
+   * CustomerService.MutateCustomer: POST /customers/{cid}:mutate com UMA
+   * operação (`operation`, no singular — o :mutate genérico manda `operations`)
+   * e validateOnly em dry-run.
+   */
+  async mutateCustomer(customerId: string, operation: CustomerOperation): Promise<Record<string, unknown>> {
+    this.assertWriteAllowed();
+    const cid = customerId.replace(/-/g, "");
+    const url = `${API_BASE}/customers/${cid}:mutate`;
+    return this.request<Record<string, unknown>>("POST", url, {
+      operation: { update: operation.update, updateMask: operation.updateMask },
+      ...(this.dryRun ? { validateOnly: true } : {}),
+    });
+  }
+
+  /* customerGet (GET genérico sob customers/{cid}, ex.: getIdentityVerification) é o
+     mesmo do lote experiments-tracking, definido acima — com params opcionais. */
+
+  /** IdentityVerificationService.GetIdentityVerification (rate-limited: faça cache). */
+  async getIdentityVerification(customerId: string): Promise<Record<string, unknown>> {
+    return this.customerGet(customerId, "getIdentityVerification");
+  }
+
+  /**
+   * IdentityVerificationService.StartIdentityVerification. O método não tem
+   * validate_only: em dry-run customerWriteAction recusa a chamada (fail-closed).
+   */
+  async startIdentityVerification(customerId: string): Promise<Record<string, unknown>> {
+    return this.customerWriteAction(customerId, ":startIdentityVerification", {
+      verificationProgram: "ADVERTISER_IDENTITY_VERIFICATION",
+    });
+  }
+
+  /**
+   * GoogleAdsFieldService.SearchGoogleAdsFields (POST /googleAdsFields:search):
+   * metadados globais dos campos GAQL — não lê dados de conta. Consulta sem FROM,
+   * ex.: SELECT name, selectable WHERE name LIKE 'campaign.%'. Pagina sozinho.
+   */
+  async searchGoogleAdsFields(query: string, pageSize = 10000): Promise<Array<Record<string, unknown>>> {
+    const url = `${API_BASE}/googleAdsFields:search`;
+    const results: Array<Record<string, unknown>> = [];
+    let pageToken: string | undefined;
+    let pages = 0;
+    do {
+      const response = await this.request<{ results?: Array<Record<string, unknown>>; nextPageToken?: string }>(
+        "POST",
+        url,
+        { query, pageSize, ...(pageToken ? { pageToken } : {}) }
+      );
+      results.push(...(response.results ?? []));
+      pageToken = response.nextPageToken;
+      pages++;
+    } while (pageToken && pages < 50);
+    return results;
+  }
+
+  /** GoogleAdsFieldService.GetGoogleAdsField (GET /googleAdsFields/{nome}): recurso, atributo, segmento ou métrica. */
+  async getGoogleAdsField(name: string): Promise<Record<string, unknown>> {
+    if (!/^[a-z][a-z0-9_]*(\.[a-z0-9_]+)*$/.test(name)) {
+      throw new Error(`Nome de campo GAQL inválido: "${name}"`);
+    }
+    return this.request<Record<string, unknown>>("GET", `${API_BASE}/googleAdsFields/${name}`);
   }
 }
