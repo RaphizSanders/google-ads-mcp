@@ -4136,31 +4136,41 @@ export function registerGoogleAdsTools(
     "add_placement",
     {
       description: [
-        "Add a placement (website, app, or YouTube channel) to an ad group.",
-        "WRITE OPERATION — for Display and Video campaigns.",
+        "Adiciona UM posicionamento — site, canal ou vídeo do YouTube, app ou categoria de app. WRITE OPERATION.",
+        "- Grupo de anúncios (level AD_GROUP, padrão; adGroupId): segmentação (padrão) ou exclusão (negative: true).",
+        "- Campanha (level CAMPAIGN; campaignId): SÓ exclusão — exige negative: true. A API não aceita posicionamento",
+        "  positivo na campanha (a segmentação por posicionamento é por grupo); sem negative: true a tool recusa antes",
+        "  de chamar a API. Para excluir vários ou na conta inteira: exclude_placements.",
+        "",
+        "type: WEBSITE, YOUTUBE_CHANNEL, YOUTUBE_VIDEO, MOBILE_APP, MOBILE_APP_CATEGORY. Sem type a tool detecta:",
+        "youtube.com/channel/UC… vira YOUTUBE_CHANNEL e watch?v= / youtu.be / shorts vira YOUTUBE_VIDEO (a API",
+        "recusa URL do YouTube como site: YOUTUBE_URL_UNSUPPORTED). @handle é recusado — a API não resolve handle;",
+        "informe o channel ID (UC…, 24 caracteres). App: 1-<ID da App Store> ou 2-<pacote Android>, ou a URL da loja.",
+        "",
+        "Positivo só no grupo e só em Display, Vídeo e Demand Gen (Pesquisa recusa; PMax não aceita posicionamento — use",
+        "exclude_placements level ACCOUNT). Confere que o grupo/campanha existe nesta conta; se o posicionamento já",
+        "existe igual, nada é gravado; se existe com a polaridade oposta, recusa e indica o resource name para remover.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
-        adGroupId: z.string().describe("Ad group ID."),
-        url: z.string().describe("Placement URL (e.g. 'youtube.com/channel/xxx' or 'example.com')."),
+        adGroupId: z.string().optional().describe("Ad group ID (obrigatório com level AD_GROUP, o padrão)."),
+        campaignId: z.string().optional().describe("Campaign ID (obrigatório com level CAMPAIGN)."),
+        level: z.enum(["AD_GROUP", "CAMPAIGN"]).optional()
+          .describe("AD_GROUP (segmentar ou excluir) ou CAMPAIGN (só excluir: negative true). Sem level: AD_GROUP; CAMPAIGN se só campaignId vier."),
+        type: z.enum(["WEBSITE", "YOUTUBE_CHANNEL", "YOUTUBE_VIDEO", "MOBILE_APP", "MOBILE_APP_CATEGORY"]).optional()
+          .describe("Tipo do posicionamento. Sem ele, detecta pelo valor."),
+        value: z.string().optional().describe("Domínio/URL, channel ID (UC…) ou URL /channel/, video ID ou URL, app ID, ID da categoria."),
+        url: z.string().optional().describe("Nome antigo de value (compatibilidade). Ex.: 'exemplo.com.br'."),
+        negative: z.boolean().optional()
+          .describe("true = excluir em vez de segmentar (obrigatório na campanha). Default: false (segmentar, só no grupo)."),
       },
     },
-    async ({ customerId, adGroupId, url }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
+    async (args) => {
+      const blocked = checkCustomerAccess(args.customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const cid = customerId.replace(/-/g, "");
-
-      const result = await client.mutateAdGroupCriteria(customerId, [
-        {
-          create: {
-            adGroup: `customers/${cid}/adGroups/${adGroupId}`,
-            placement: { url },
-          },
-        },
-      ]);
-
-      return { content: [text(`Placement added: ${url}\n\n${formatJson(result)}`)] };
+      // lógica e parser compartilhados com exclude_placements (lote placements-brand-safety)
+      const { addPlacementTool } = await import("./tools/placements-brand-safety.js");
+      return addPlacementTool(getClient, args);
     }
   );
 
