@@ -15,7 +15,6 @@ export const catalog = {
     "add_audience_segment_targeting",
     "remove_audience_segment_targeting",
     "set_targeting_mode",
-    "set_optimized_targeting",
     "create_logical_user_list",
     "create_customer_match_list",
     "upload_customer_match_members",

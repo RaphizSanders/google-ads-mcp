@@ -1091,61 +1091,6 @@ export async function setTargetingMode(
 /** Canais com segmentação otimizada (Ajuda do Google Ads 10537509): Display, Vídeo (vendas/leads/tráfego) e Demand Gen. */
 const OPTIMIZED_TARGETING_CHANNELS = new Set(["DISPLAY", "VIDEO", "DEMAND_GEN"]);
 
-export async function setOptimizedTargeting(
-  client: GoogleAdsClient,
-  customerId: string,
-  args: { adGroupId: string; enabled?: boolean; excludeDemographicExpansion?: boolean }
-): Promise<AudienceToolResult> {
-  const bad = badCustomer(customerId);
-  if (bad) return bad;
-  const cid = cleanCid(customerId);
-  const adGroupId = String(args.adGroupId ?? "").trim();
-  if (!ID.test(adGroupId)) return refuse(`adGroupId deve ser numérico, recebido "${args.adGroupId}". Nada foi alterado.`);
-  if (args.enabled === undefined && args.excludeDemographicExpansion === undefined) {
-    return refuse("Informe enabled e/ou excludeDemographicExpansion. Nada foi alterado.");
-  }
-  const rows = await client.searchStream(customerId,
-    `SELECT ad_group.id, ad_group.name, ad_group.status, ad_group.optimized_targeting_enabled,
-            ad_group.exclude_demographic_expansion, campaign.id, campaign.advertising_channel_type
-     FROM ad_group
-     WHERE ad_group.id = ${adGroupId}`);
-  const adGroup = obj(rows[0]?.adGroup);
-  const channel = String(obj(rows[0]?.campaign).advertisingChannelType ?? "");
-  if (!rows.length || !adGroup.id) return refuse(`Grupo ${adGroupId} não encontrado na conta ${cid}. Nada foi alterado.`);
-  if (adGroup.status === "REMOVED") return refuse(`O grupo ${adGroupId} está removido. Nada foi alterado.`);
-  if (!OPTIMIZED_TARGETING_CHANNELS.has(channel)) {
-    return refuse(`Segmentação otimizada existe em Display, Vídeo (metas de vendas, leads ou tráfego) e Demand Gen; a campanha é ${channel}. Nada foi alterado.`);
-  }
-  if (args.excludeDemographicExpansion !== undefined && channel !== "DEMAND_GEN") {
-    return refuse("excludeDemographicExpansion só vale para Demand Gen (restringe a expansão demográfica da segmentação otimizada). Nada foi alterado.");
-  }
-  const update: Row = { resourceName: `customers/${cid}/adGroups/${adGroupId}` };
-  const mask: string[] = [];
-  const changes: Row[] = [];
-  if (args.enabled !== undefined && (adGroup.optimizedTargetingEnabled === true) !== args.enabled) {
-    update.optimizedTargetingEnabled = args.enabled; mask.push("optimized_targeting_enabled");
-    changes.push({ setting: "optimized_targeting_enabled", before: adGroup.optimizedTargetingEnabled === true, after: args.enabled });
-  }
-  if (args.excludeDemographicExpansion !== undefined && (adGroup.excludeDemographicExpansion === true) !== args.excludeDemographicExpansion) {
-    update.excludeDemographicExpansion = args.excludeDemographicExpansion; mask.push("exclude_demographic_expansion");
-    changes.push({ setting: "exclude_demographic_expansion", before: adGroup.excludeDemographicExpansion === true, after: args.excludeDemographicExpansion });
-  }
-  const warnings: string[] = [];
-  const finalEnabled = args.enabled ?? adGroup.optimizedTargetingEnabled === true;
-  if (args.excludeDemographicExpansion !== undefined && !finalEnabled) warnings.push("Com a segmentação otimizada desligada, exclude_demographic_expansion é ignorado pela API.");
-  if (!mask.length) return done(`Grupo ${adGroupId} ("${adGroup.name}"): nada a mudar. Nenhuma escrita foi enviada.`);
-  let response: Row;
-  try {
-    response = await client.mutate(customerId, "adGroups", [{ update, updateMask: mask.join(",") }]);
-  } catch (err) {
-    return refuse(`A API recusou — nada foi gravado.\n${explainAudienceError((err as Error).message)}`);
-  }
-  return done(
-    (client.isDryRun ? `Grupo ${adGroupId} — DRY-RUN (validateOnly): validado, nada foi gravado.` : `Grupo ${adGroupId} ("${adGroup.name}") atualizado.`) +
-    `\n\n${formatJson({ changes, warnings, update_mask: mask, result: response })}`
-  );
-}
-
 // ── Listas de remarketing (rule-based e lógicas) ─────────────────────
 
 export const REMARKETING_RULE_TYPES = [
@@ -2352,27 +2297,6 @@ export function registerAudiencesTools(ctx: ToolContext): void {
     }
   );
 
-  mcp.registerTool(
-    "set_optimized_targeting",
-    {
-      description: [
-        "Liga/desliga a segmentação otimizada de um grupo (Display, Vídeo com metas de vendas/leads/tráfego, Demand Gen)",
-        "e, em Demand Gen, a exclusão da expansão demográfica.",
-        "WRITE OPERATION — lê antes e só grava o que muda.",
-      ].join("\n"),
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        adGroupId: z.string().describe("ID do grupo."),
-        enabled: z.boolean().optional().describe("true = segmentação otimizada ligada."),
-        excludeDemographicExpansion: z.boolean().optional().describe("Só Demand Gen: true = não expandir além das idades/gêneros escolhidos."),
-      },
-    },
-    async ({ customerId, ...args }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      return setOptimizedTargeting(getClient(), customerId, args);
-    }
-  );
 
   mcp.registerTool(
     "create_logical_user_list",

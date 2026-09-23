@@ -604,7 +604,7 @@ test("remove_audience_segment_targeting: pede confirm e mapeia falha parcial", a
   assert.match(textOf(result), /1 critério\(s\) de público removido/);
 });
 
-// ── set_targeting_mode / set_optimized_targeting ──────────────────────
+// ── set_targeting_mode (set_optimized_targeting fica no lote placements-brand-safety) ──────────────────────
 
 test("set_targeting_mode: reenvia a lista inteira, só troca a dimensão pedida, e respeita os dois níveis", async () => {
   const restr = [{ targetingDimension: "AUDIENCE", bidOnly: false }, { targetingDimension: "TOPIC", bidOnly: true }];
@@ -636,19 +636,6 @@ test("set_targeting_mode: reenvia a lista inteira, só troca a dimensão pedida,
     adGroupSettings: [{ adGroup: { id: "333", name: "G", targetingSetting: { targetRestrictions: restr } } }] }) });
   assert.equal((await call(blockedCampaign.client, "set_targeting_mode", { level: "campaign", campaignId: CAMPAIGN, mode: "OBSERVATION" })).isError, true);
   assert.equal(blockedCampaign.calls.writes.length, 0);
-});
-
-test("set_optimized_targeting: só Display/Vídeo/Demand Gen; expansão demográfica só Demand Gen; no-op", async () => {
-  const row = (channel: string, enabled = false) => () => [{ adGroup: { id: AD_GROUP, name: "G", status: "ENABLED", optimizedTargetingEnabled: enabled, excludeDemographicExpansion: false }, campaign: { id: CAMPAIGN, advertisingChannelType: channel } }];
-  const search = fakeClient({ rows: row("SEARCH") });
-  assert.equal((await call(search.client, "set_optimized_targeting", { adGroupId: AD_GROUP, enabled: true })).isError, true);
-  const display = fakeClient({ rows: row("DISPLAY") });
-  assert.equal((await call(display.client, "set_optimized_targeting", { adGroupId: AD_GROUP, excludeDemographicExpansion: true })).isError, true);
-  await call(display.client, "set_optimized_targeting", { adGroupId: AD_GROUP, enabled: true });
-  assert.deepEqual(display.calls.writes[0].operations, [{ update: { resourceName: `customers/${CID}/adGroups/${AD_GROUP}`, optimizedTargetingEnabled: true }, updateMask: "optimized_targeting_enabled" }]);
-  const noop = fakeClient({ rows: row("DEMAND_GEN", true) });
-  assert.match(textOf(await call(noop.client, "set_optimized_targeting", { adGroupId: AD_GROUP, enabled: true })), /nada a mudar/);
-  assert.equal(noop.calls.writes.length, 0);
 });
 
 // ── Listas de remarketing (item 8) ────────────────────────────────────
