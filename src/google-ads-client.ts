@@ -809,22 +809,8 @@ export class GoogleAdsClient {
   }
 
   // ── lote experiments-tracking ──
-
-  /**
-   * GET de leitura sob customers/{cid} — os endpoints de lista que não são GAQL, como
-   * experiments/{id}:listExperimentAsyncErrors e campaignDrafts/{base~draft}:listAsyncErrors.
-   * Não altera a conta (por isso vale também em read-only e dry-run).
-   */
-  async customerGet<T = Record<string, unknown>>(
-    customerId: string,
-    path: string,
-    params: Record<string, string> = {}
-  ): Promise<T> {
-    const cid = customerId.replace(/-/g, "");
-    const query = new URLSearchParams(params).toString();
-    const url = `${API_BASE}/customers/${cid}${path.startsWith(":") ? "" : "/"}${path}${query ? `?${query}` : ""}`;
-    return this.request<T>("GET", url);
-  }
+  /* customerGet (GET de leitura sob customers/{cid}, ex.: experiments/{id}:listExperimentAsyncErrors)
+     é o único definido no fim da classe (seção account-admin) — três lotes precisaram do mesmo método. */
 
   // ── lote conversions-offline ──
 
@@ -1114,5 +1100,43 @@ export class GoogleAdsClient {
       throw new Error(`Nome de campo GAQL inválido: "${name}"`);
     }
     return this.request<Record<string, unknown>>("GET", `${API_BASE}/googleAdsFields/${name}`);
+  }
+
+  // ── lote account-admin ──
+
+  /**
+   * Cópia deste client com outro login-customer-id, para uma chamada só. Aceitar o
+   * convite de um gerente exige autenticar como a conta cliente, e as faturas exigem o
+   * gerente pagador (paying manager). Compartilha credenciais, dry-run e read-only com
+   * o original, como withDryRun.
+   */
+  withLoginCustomerId(loginCustomerId: string): GoogleAdsClient {
+    const id = loginCustomerId.replace(/-/g, "");
+    if (!/^\d+$/.test(id)) {
+      throw new Error(`login-customer-id inválido: "${loginCustomerId}" (esperado o ID numérico da conta).`);
+    }
+    const clone = Object.create(this) as GoogleAdsClient;
+    clone.loginCustomerId = id;
+    return clone;
+  }
+
+  /**
+   * GET de leitura num endpoint da conta que não é GAQL. Ex.: `invoices`,
+   * `paymentsAccounts`, `batchJobs/{id}:listResults`. Os parâmetros vão na query string
+   * com os nomes JSON (lowerCamelCase) do request.
+   */
+  async customerGet<T = Record<string, unknown>>(
+    customerId: string,
+    path: string,
+    params: Record<string, string | number | boolean | undefined> = {}
+  ): Promise<T> {
+    const cid = customerId.replace(/-/g, "");
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    const qs = query.toString();
+    const url = `${API_BASE}/customers/${cid}${path.startsWith(":") ? "" : "/"}${path}${qs ? `?${qs}` : ""}`;
+    return this.request<T>("GET", url);
   }
 }

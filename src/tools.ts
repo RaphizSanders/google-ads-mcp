@@ -2613,40 +2613,177 @@ export function registerGoogleAdsTools(
     "bulk_update_status",
     {
       description: [
-        "Pause or enable multiple campaigns, ad groups, or ads at once.",
+        "Pausa ou ativa várias campanhas, grupos de anúncios ou anúncios de uma vez.",
         "WRITE OPERATION.",
+        "",
+        "Lê o status atual antes de gravar: pula os que já estão no status pedido, os removidos",
+        "e os que não existem nesta conta (sem escrita para eles). Envia em lotes de até 10.000",
+        "operações com partial failure: um ID ruim não desfaz os outros — cada falha volta com",
+        "o motivo. Até 50.000 IDs por chamada; acima disso, use create_batch_job.",
+        "",
+        "Em escala exige confirm: true — quando mais de 100 itens mudariam (mais de 20 ao ATIVAR,",
+        "que volta a gastar na hora), a primeira chamada só devolve o plano lido (quantos mudam,",
+        "quais, status antes) e não grava. Chamadas menores gravam direto, como antes.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
         resourceType: z
           .enum(["campaigns", "adGroups", "adGroupAds"])
           .describe("Type of resource."),
-        resourceIds: z
-          .array(z.string())
-          .describe("Array of resource IDs. For ads, use 'adGroupId~adId' format."),
+        resourceIds: flexArray(z.string())
+          .describe("IDs. Campanhas e grupos: ID numérico. Anúncios: 'adGroupId~adId'."),
         status: z.enum(["ENABLED", "PAUSED"]).describe("New status."),
+        confirm: z.boolean().optional().describe(
+          "true = aplica mesmo em escala. Obrigatório quando mais de 100 itens mudariam (mais de 20 com status ENABLED)."
+        ),
       },
     },
-    async ({ customerId, resourceType, resourceIds, status }) => {
+    async ({ customerId, resourceType, resourceIds, status, confirm }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
       const cid = customerId.replace(/-/g, "");
+      if (!/^\d+$/.test(cid)) {
+        return { content: [text(`customerId inválido: "${customerId}". Nada foi alterado.`)], isError: true };
+      }
 
-      const operations = resourceIds.map((id) => ({
-        update: {
-          resourceName: `customers/${cid}/${resourceType}/${id}`,
-          status,
-        },
-        updateMask: "status",
-      }));
+      /* Limites da API: 10.000 operações por mutate e até 20.000 valores num IN do GAQL.
+         A leitura vai em blocos de 1.000 para a query não crescer demais. */
+      const MAX_IDS = 50_000;
+      const MUTATE_CHUNK = 10_000;
+      const READ_CHUNK = 1_000;
+      const idPattern = resourceType === "adGroupAds" ? /^\d+~\d+$/ : /^\d+$/;
+      const ids = [...new Set(ensureArray<string>(resourceIds).map((id) => String(id).trim()).filter(Boolean))];
+      if (ids.length === 0) {
+        return { content: [text("Informe ao menos um ID em resourceIds. Nada foi alterado.")], isError: true };
+      }
+      const badIds = ids.filter((id) => !idPattern.test(id));
+      if (badIds.length > 0) {
+        const expected = resourceType === "adGroupAds" ? "'adGroupId~adId' (ex.: 123~456)" : "numéricos";
+        return {
+          content: [text(`IDs inválidos para ${resourceType} (esperado ${expected}): ${badIds.slice(0, 50).join(", ")}` +
+            `${badIds.length > 50 ? ` (+${badIds.length - 50})` : ""}. Nada foi alterado.`)],
+          isError: true,
+        };
+      }
+      if (ids.length > MAX_IDS) {
+        return {
+          content: [text(`${ids.length} IDs passam do limite de ${MAX_IDS} por chamada. Divida a lista ou use create_batch_job. Nada foi alterado.`)],
+          isError: true,
+        };
+      }
 
-      const result = await client.mutate(customerId, resourceType, operations);
+      const client = getClient();
+      const spec = {
+        campaigns: { from: "campaign", key: "campaign" },
+        adGroups: { from: "ad_group", key: "adGroup" },
+        adGroupAds: { from: "ad_group_ad", key: "adGroupAd" },
+      }[resourceType];
+      const resourceNameOf = (id: string) => `customers/${cid}/${resourceType}/${id}`;
 
+      // Leitura antes da escrita: o que existe, o status atual e o nome (para o relatório).
+      const current = new Map<string, { status: string; name: string }>();
+      for (let start = 0; start < ids.length; start += READ_CHUNK) {
+        const names = ids.slice(start, start + READ_CHUNK).map((id) => `'${resourceNameOf(id)}'`).join(", ");
+        const nameField = resourceType === "adGroupAds" ? "ad_group_ad.ad.name" : `${spec.from}.name`;
+        const rows = await client.searchStream(customerId,
+          `SELECT ${spec.from}.resource_name, ${spec.from}.status, ${nameField}
+           FROM ${spec.from}
+           WHERE ${spec.from}.resource_name IN (${names})`);
+        for (const row of rows) {
+          const entity = (row[spec.key] ?? {}) as Record<string, unknown>;
+          const name = resourceType === "adGroupAds"
+            ? String(((entity.ad ?? {}) as Record<string, unknown>).name ?? "")
+            : String(entity.name ?? "");
+          current.set(String(entity.resourceName ?? ""), { status: String(entity.status ?? ""), name });
+        }
+      }
+
+      const notFound: string[] = [];
+      const removed: string[] = [];
+      const unchanged: string[] = [];
+      const toChange: Array<{ id: string; name: string; before: string }> = [];
+      for (const id of ids) {
+        const found = current.get(resourceNameOf(id));
+        if (!found) notFound.push(id);
+        else if (found.status === "REMOVED") removed.push(id);
+        else if (found.status === status) unchanged.push(id);
+        else toChange.push({ id, name: found.name, before: found.status });
+      }
+
+      const dryRun = client.isDryRun;
+      // Com dezenas de milhares de IDs a lista completa não cabe numa resposta: as contagens
+      // do cabeçalho são exatas e cada lista mostra os primeiros itens.
+      const LISTED = 500;
+      const capped = <T,>(items: T[]) => items.length > LISTED ? [...items.slice(0, LISTED), `(+${items.length - LISTED} omitidos)`] : items;
+
+      /* Aplicar em escala exige confirm (convenção do servidor para o que é difícil de
+         desfazer). Ativar volta a gastar na hora, por isso o limite é menor. O corte usa o
+         que de fato mudaria depois da leitura, e dry-run/validateOnly não grava — não pede. */
+      const confirmAbove = status === "ENABLED" ? 20 : 100;
+      if (!dryRun && confirm !== true && toChange.length > confirmAbove) {
+        return {
+          content: [text(
+            `${toChange.length} ${resourceType} mudariam para ${status} — acima de ${confirmAbove} numa chamada a alteração exige confirm: true` +
+            `${status === "ENABLED" ? " (ativar em massa volta a gastar na hora)" : ""}. Nada foi alterado.\n` +
+            `Revise o plano e repita com confirm: true para aplicar. Já estavam em ${status}: ${unchanged.length} | ` +
+            `Removidos (ignorados): ${removed.length} | Não encontrados: ${notFound.length}\n\n` +
+            formatJson({
+              to_change: capped(toChange.map((item) => ({ id: item.id, name: item.name, before: item.before, after: status }))),
+              already_in_status: capped(unchanged),
+              removed_skipped: capped(removed),
+              not_found: capped(notFound),
+            })
+          )],
+          isError: true,
+        };
+      }
+
+      const changed: Array<Record<string, unknown>> = [];
+      const errors: Array<Record<string, unknown>> = [];
+      const notSent: string[] = [];
+      for (let start = 0; start < toChange.length; start += MUTATE_CHUNK) {
+        const chunk = toChange.slice(start, start + MUTATE_CHUNK);
+        let response: Record<string, unknown>;
+        try {
+          response = await client.mutate(customerId, resourceType, chunk.map((item) => ({
+            update: { resourceName: resourceNameOf(item.id), status },
+            updateMask: "status",
+          })), { partialFailure: true });
+        } catch (err) {
+          // Erro fora das operações (auth, cota): o lote inteiro falhou e os seguintes não vão.
+          for (const item of chunk) errors.push({ id: item.id, error: (err as Error).message });
+          notSent.push(...toChange.slice(start + MUTATE_CHUNK).map((item) => item.id));
+          break;
+        }
+        const results = (response.results as Array<Record<string, unknown>>) ?? [];
+        const { byIndex, unattributed } = partialFailureByOperation(response.partialFailureError, chunk.length);
+        chunk.forEach((item, index) => {
+          const opErrors = byIndex.get(index);
+          if (opErrors) errors.push({ id: item.id, name: item.name, error: opErrors.join("; ") });
+          else if (!dryRun && !results[index]?.resourceName) errors.push({ id: item.id, name: item.name, error: "a API não confirmou a alteração" });
+          else changed.push({ id: item.id, name: item.name, before: item.before, after: status });
+        });
+        for (const message of unattributed) errors.push({ error: message });
+      }
+
+      const header = dryRun
+        ? `DRY-RUN (validateOnly): nada foi gravado. ${changed.length} ${resourceType} validado(s) para ${status}.`
+        : `${changed.length} ${resourceType} → ${status}.`;
       return {
-        content: [
-          text(`${resourceIds.length} ${resourceType} → ${status}.\n\n${formatJson(result)}`),
-        ],
+        content: [text(
+          `${header} Já estavam em ${status}: ${unchanged.length} | Removidos (ignorados): ${removed.length} | ` +
+          `Não encontrados: ${notFound.length} | Com erro: ${errors.length}` +
+          `${notSent.length ? ` | Não enviados: ${notSent.length}` : ""}\n\n` +
+          formatJson({
+            [dryRun ? "validated" : "changed"]: capped(changed),
+            already_in_status: capped(unchanged),
+            removed_skipped: capped(removed),
+            not_found: capped(notFound),
+            errors: errors.length > 2 * LISTED ? [...errors.slice(0, 2 * LISTED), `(+${errors.length - 2 * LISTED} omitidos)`] : errors,
+            ...(notSent.length ? { not_sent: capped(notSent) } : {}),
+          })
+        )],
+        isError: errors.length > 0,
       };
     }
   );
