@@ -219,6 +219,10 @@ export function registerGoogleAdsTools(
         "",
         "Monetary values (spend, CPC, CPA) are already converted from micros to currency.",
         "ROAS = conversions_value / spend.",
+        "includeImpressionShare: true acrescenta parcela de impressões da Pesquisa, perdida por orçamento/ranking,",
+        "topo e topo absoluto (\"<10%\"/\">90%\" quando a API trunca) e um diagnóstico. Para mais níveis e",
+        "segmentos, use get_impression_share.",
+        "Só entram campanhas com impressões no período — a que parou de veicular não aparece; use diagnose_campaigns.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID (10 digits)."),
@@ -228,15 +232,21 @@ export function registerGoogleAdsTools(
           .enum(["ALL", "ENABLED", "PAUSED", "REMOVED"])
           .optional()
           .describe("Filter by status. Default: excludes REMOVED."),
+        includeImpressionShare: z
+          .boolean()
+          .optional()
+          .describe("true = inclui parcela de impressões (Pesquisa) e perdas por orçamento/ranking. Default: false."),
       },
     },
-    async ({ customerId, dateRange, days, status }) => {
+    async ({ customerId, dateRange, days, status, includeImpressionShare }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
       const client = getClient();
       const dateClause = buildDateClause(dateRange, days);
       const statusClause =
         status === "ALL" ? "" : `AND campaign.status ${status ? `= '${status}'` : "!= 'REMOVED'"}`;
+      // Helpers de parcela ficam no módulo do lote diagnostics (import tardio: sem mexer no topo do arquivo).
+      const share = includeImpressionShare ? await import("./tools/diagnostics.js") : undefined;
 
       const results = await client.searchStream(
         customerId,
@@ -246,7 +256,8 @@ export function registerGoogleAdsTools(
                 metrics.cost_micros, metrics.impressions, metrics.clicks,
                 metrics.ctr, metrics.average_cpc, metrics.conversions,
                 metrics.conversions_value, metrics.all_conversions,
-                metrics.all_conversions_value
+                metrics.all_conversions_value${share ? `,
+                ${share.PERFORMANCE_IS_FIELDS}` : ""}
          FROM campaign
          WHERE ${dateClause} ${statusClause}
            AND metrics.impressions > 0
@@ -275,6 +286,7 @@ export function registerGoogleAdsTools(
           revenue: Math.round(convValue * 100) / 100,
           roas: spend > 0 ? Math.round((convValue / spend) * 100) / 100 : 0,
           cpa: conv > 0 ? Math.round((spend / conv) * 100) / 100 : null,
+          ...(share ? share.performanceImpressionShare(m) : {}),
         };
       });
 
@@ -289,28 +301,40 @@ export function registerGoogleAdsTools(
   mcp.registerTool(
     "get_ad_group_performance",
     {
-      description:
+      description: [
         "Get performance metrics for ad groups. Optionally filter by campaign ID.",
+        "includeImpressionShare: true acrescenta parcela de impressões da Pesquisa e perdas por orçamento/ranking.",
+      ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
         dateRange: dateRangeSchema.describe(DATE_RANGE_DESC),
         days: z.number().optional().describe(DAYS_DESC),
-        campaignId: z.string().optional().describe("Filter by campaign ID."),
+        campaignId: z.string().optional().describe("Filter by campaign ID (numeric)."),
+        includeImpressionShare: z
+          .boolean()
+          .optional()
+          .describe("true = inclui parcela de impressões (Pesquisa) e perdas por orçamento/ranking. Default: false."),
       },
     },
-    async ({ customerId, dateRange, days, campaignId }) => {
+    async ({ customerId, dateRange, days, campaignId, includeImpressionShare }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
+      // campaignId entra direto no GAQL: só dígitos passam
+      if (campaignId !== undefined && !/^\d+$/.test(campaignId)) {
+        return { content: [text(`campaignId deve ser numérico, recebido "${campaignId}".`)], isError: true };
+      }
       const client = getClient();
       const dateClause = buildDateClause(dateRange, days);
       const campaignFilter = campaignId ? `AND campaign.id = ${campaignId}` : "";
+      const share = includeImpressionShare ? await import("./tools/diagnostics.js") : undefined;
 
       const results = await client.searchStream(
         customerId,
         `SELECT ad_group.id, ad_group.name, ad_group.status,
                 campaign.name, campaign.id,
                 metrics.cost_micros, metrics.impressions, metrics.clicks,
-                metrics.ctr, metrics.conversions, metrics.conversions_value
+                metrics.ctr, metrics.conversions, metrics.conversions_value${share ? `,
+                ${share.PERFORMANCE_IS_FIELDS}` : ""}
          FROM ad_group
          WHERE ${dateClause}
            AND ad_group.status != 'REMOVED'
@@ -329,6 +353,7 @@ export function registerGoogleAdsTools(
         return {
           ad_group_id: ag?.id,
           ad_group_name: ag?.name,
+          campaign_id: c?.id,
           campaign_name: c?.name,
           spend: Math.round(spend * 100) / 100,
           impressions: num(m?.impressions),
@@ -338,6 +363,7 @@ export function registerGoogleAdsTools(
           revenue: Math.round(convValue * 100) / 100,
           roas: spend > 0 ? Math.round((convValue / spend) * 100) / 100 : 0,
           cpa: conv > 0 ? Math.round((spend / conv) * 100) / 100 : null,
+          ...(share ? share.performanceImpressionShare(m) : {}),
         };
       });
 
@@ -477,36 +503,61 @@ export function registerGoogleAdsTools(
   mcp.registerTool(
     "get_daily_trend",
     {
-      description: "Get daily performance trend. Returns one row per day with spend, clicks, conversions, revenue.",
+      description: [
+        "Get daily performance trend. Returns one row per day with spend, clicks, conversions, revenue.",
+        "Sem campaignId = conta inteira (FROM customer); com campaignId = só a campanha (FROM campaign).",
+        "granularity: DAY (padrão), WEEK, MONTH, QUARTER ou YEAR. Desde 01/06/2026 o Google só guarda dado",
+        "diário/semanal por 37 meses — para períodos mais antigos use MONTH/QUARTER/YEAR com datas alinhadas ao mês.",
+      ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
         dateRange: dateRangeSchema.describe(DATE_RANGE_DESC),
         days: z.number().optional().describe(DAYS_DESC),
-        campaignId: z.string().optional().describe("Filter by campaign ID."),
+        campaignId: z.string().optional().describe("Filter by campaign ID (numeric)."),
+        granularity: z
+          .enum(["DAY", "WEEK", "MONTH", "QUARTER", "YEAR"])
+          .optional()
+          .describe("Agrupamento das linhas. Default: DAY (segments.date)."),
       },
     },
-    async ({ customerId, dateRange, days, campaignId }) => {
+    async ({ customerId, dateRange, days, campaignId, granularity }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
+      if (campaignId !== undefined && !/^\d+$/.test(campaignId)) {
+        return { content: [text(`campaignId deve ser numérico, recebido "${campaignId}".`)], isError: true };
+      }
+      const periodField = {
+        DAY: "date", WEEK: "week", MONTH: "month", QUARTER: "quarter", YEAR: "year",
+      }[granularity ?? "DAY"];
       const client = getClient();
-      const dateClause = buildDateClause(dateRange, days);
-      const campaignFilter = campaignId ? `AND campaign.id = ${campaignId}` : "";
+      // Dado diário/semanal só existe para os últimos 37 meses: o guarda recusa antes da API.
+      const dateClause = buildDateClause(dateRange, days, { granular: periodField === "date" || periodField === "week" });
 
+      /* customer não tem recursos atribuídos: campaign.id em FROM customer é recusado pela
+         API. Com campanha, a query sai de FROM campaign, que aceita o filtro. */
       const results = await client.searchStream(
         customerId,
-        `SELECT segments.date,
+        campaignId
+          ? `SELECT segments.${periodField}, campaign.id, campaign.name,
+                metrics.impressions, metrics.clicks, metrics.cost_micros,
+                metrics.conversions, metrics.conversions_value
+         FROM campaign
+         WHERE ${dateClause} AND campaign.id = ${campaignId}
+         ORDER BY segments.${periodField}`
+          : `SELECT segments.${periodField},
                 metrics.impressions, metrics.clicks, metrics.cost_micros,
                 metrics.conversions, metrics.conversions_value
          FROM customer
-         WHERE ${dateClause} ${campaignFilter}
-         ORDER BY segments.date`
+         WHERE ${dateClause}
+         ORDER BY segments.${periodField}`
       );
 
       const trend = results.map((r) => {
         const s = r.segments as Record<string, unknown>;
         const m = r.metrics as Record<string, unknown>;
+        const period = s?.[periodField];
         return {
-          date: s?.date,
+          ...(periodField === "date" ? { date: period } : { period, granularity: granularity }),
           impressions: num(m?.impressions),
           clicks: num(m?.clicks),
           spend: Math.round(microsToMoney(m?.costMicros) * 100) / 100,
@@ -514,6 +565,24 @@ export function registerGoogleAdsTools(
           revenue: Math.round(num(m?.conversionsValue) * 100) / 100,
         };
       });
+
+      if (campaignId && trend.length === 0) {
+        // Sem linhas: distingue campanha inexistente de campanha sem entrega no período.
+        const found = await client.searchStream(
+          customerId,
+          `SELECT campaign.id, campaign.name, campaign.status FROM campaign WHERE campaign.id = ${campaignId}`
+        );
+        const campaign = found[0]?.campaign as Record<string, unknown> | undefined;
+        if (!campaign) {
+          return { content: [text(`Campanha ${campaignId} não encontrada na conta ${customerId}.`)], isError: true };
+        }
+        return {
+          content: [text(
+            `Campanha ${campaignId} (${String(campaign.name ?? "")}, ${String(campaign.status ?? "")}) sem nenhuma ` +
+              "linha de métrica no período — não veiculou. Para ver o motivo, use diagnose_campaigns.\n\n[]"
+          )],
+        };
+      }
 
       return { content: [text(formatJson(trend))] };
     }
@@ -811,7 +880,11 @@ export function registerGoogleAdsTools(
   mcp.registerTool(
     "compare_periods",
     {
-      description: "Compare performance between two date ranges. Returns absolute and percentage deltas.",
+      description: [
+        "Compare performance between two date ranges. Returns absolute and percentage deltas.",
+        "campaignId opcional compara só uma campanha. Períodos que começam há mais de 37 meses precisam",
+        "estar alinhados ao mês (dia 1 ao último dia) — regra de retenção do Google desde 01/06/2026.",
+      ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
         periodA: z
@@ -826,22 +899,54 @@ export function registerGoogleAdsTools(
             until: z.string().describe("End date YYYY-MM-DD."),
           })
           .describe("Previous period."),
+        campaignId: z.string().optional().describe("Compara só esta campanha (ID numérico). Default: conta inteira."),
       },
     },
-    async ({ customerId, periodA, periodB }) => {
+    async ({ customerId, periodA, periodB, campaignId }) => {
       const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
+      if (campaignId !== undefined && !/^\d+$/.test(campaignId)) {
+        return { content: [text(`campaignId deve ser numérico, recebido "${campaignId}".`)], isError: true };
+      }
+      /* Os dois períodos são obrigatórios e completos: buildDateClause cai em "últimos 30 dias"
+         quando since/until vêm vazios, o que compararia outro período com o rótulo pedido. */
+      for (const [label, period] of [["periodA", periodA], ["periodB", periodB]] as const) {
+        if (!period?.since || !period?.until || !/^\d{4}-\d{2}-\d{2}$/.test(period.since) || !/^\d{4}-\d{2}-\d{2}$/.test(period.until)) {
+          return {
+            content: [text(
+              `compare_periods: ${label} precisa de since e until no formato YYYY-MM-DD ` +
+                `(recebido "${String(period?.since ?? "")}" → "${String(period?.until ?? "")}").`
+            )],
+            isError: true,
+          };
+        }
+      }
+      /* As datas iam cruas para o GAQL. buildDateClause valida o formato, a ordem e a
+         retenção (período antigo só alinhado ao mês) antes de qualquer chamada. */
+      let clauseA: string;
+      let clauseB: string;
+      try {
+        clauseA = buildDateClause(periodA);
+        clauseB = buildDateClause(periodB);
+      } catch (err) {
+        return { content: [text(`compare_periods: ${(err as Error).message}`)], isError: true };
+      }
       const client = getClient();
 
-      const query = (since: string, until: string) =>
-        `SELECT metrics.cost_micros, metrics.impressions, metrics.clicks,
+      const query = (dateClause: string) =>
+        campaignId
+          ? `SELECT campaign.id, campaign.name, metrics.cost_micros, metrics.impressions, metrics.clicks,
+                metrics.ctr, metrics.conversions, metrics.conversions_value
+         FROM campaign
+         WHERE ${dateClause} AND campaign.id = ${campaignId}`
+          : `SELECT metrics.cost_micros, metrics.impressions, metrics.clicks,
                 metrics.ctr, metrics.conversions, metrics.conversions_value
          FROM customer
-         WHERE segments.date BETWEEN '${since}' AND '${until}'`;
+         WHERE ${dateClause}`;
 
       const [resA, resB] = await Promise.all([
-        client.searchStream(customerId, query(periodA.since, periodA.until)),
-        client.searchStream(customerId, query(periodB.since, periodB.until)),
+        client.searchStream(customerId, query(clauseA)),
+        client.searchStream(customerId, query(clauseB)),
       ]);
 
       const extract = (res: Array<Record<string, unknown>>) => {
@@ -866,7 +971,9 @@ export function registerGoogleAdsTools(
         change_pct: vb > 0 ? Math.round(((va - vb) / vb) * 10000) / 100 : null,
       });
 
+      const campaignRow = (resA[0]?.campaign ?? resB[0]?.campaign) as Record<string, unknown> | undefined;
       const comparison = {
+        ...(campaignId ? { campaign_id: campaignId, campaign_name: campaignRow?.name ?? null } : {}),
         periodA: `${periodA.since} → ${periodA.until}`,
         periodB: `${periodB.since} → ${periodB.until}`,
         spend: delta(a.spend, b.spend),
@@ -892,6 +999,8 @@ export function registerGoogleAdsTools(
       description: [
         "Detect performance anomalies: campaigns with ROAS < 1, high spend with no conversions,",
         "or CPA significantly above average. Returns actionable alerts.",
+        "Também alerta campanhas ativas que não veiculam (primary_status NOT_ELIGIBLE/MISCONFIGURED ou sem gasto",
+        "no período) e campanhas com bom ROAS perdendo parcela de impressões por orçamento.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
@@ -909,18 +1018,30 @@ export function registerGoogleAdsTools(
         customerId,
         `SELECT campaign.name, campaign.id,
                 metrics.cost_micros, metrics.impressions, metrics.clicks,
-                metrics.conversions, metrics.conversions_value
+                metrics.conversions, metrics.conversions_value,
+                metrics.search_budget_lost_impression_share
          FROM campaign
          WHERE ${dateClause}
            AND campaign.status = 'ENABLED'
            AND metrics.cost_micros > 0
          ORDER BY metrics.cost_micros DESC`
       );
+      /* Campanha ativa que parou de veicular não tem gasto e some da query acima. O status
+         primário vem sem métricas, então lista todas as ativas. */
+      const servingRows = await client.searchStream(
+        customerId,
+        `SELECT campaign.id, campaign.name, campaign.primary_status, campaign.primary_status_reasons
+         FROM campaign
+         WHERE campaign.status = 'ENABLED'`
+      );
+      const { CAMPAIGN_REASONS } = await import("./tools/diagnostics.js");
 
       const alerts: Array<{ level: string; campaign: string; title: string; text: string }> = [];
       const totalSpend = results.reduce((s, r) => s + microsToMoney((r.metrics as Record<string, unknown>)?.costMicros), 0);
       const totalConv = results.reduce((s, r) => s + num((r.metrics as Record<string, unknown>)?.conversions), 0);
       const avgCpa = totalConv > 0 ? totalSpend / totalConv : 0;
+      const totalValue = results.reduce((s, r) => s + num((r.metrics as Record<string, unknown>)?.conversionsValue), 0);
+      const avgRoas = totalSpend > 0 ? totalValue / totalSpend : 0;
 
       for (const r of results) {
         const c = r.campaign as Record<string, unknown>;
@@ -960,6 +1081,45 @@ export function registerGoogleAdsTools(
             campaign: name,
             title: `${name} — alta performance`,
             text: `ROAS de ${roas.toFixed(2)}x. Potencial de escala.`,
+          });
+        }
+
+        // Bom retorno travado pelo orçamento (limiares de 20% e ROAS ≥ média são heurística de agência).
+        const lostBudget = m?.searchBudgetLostImpressionShare === undefined ? NaN : Number(m.searchBudgetLostImpressionShare);
+        if (Number.isFinite(lostBudget) && lostBudget >= 0.2 && roas >= Math.max(1, avgRoas)) {
+          alerts.push({
+            level: "success",
+            campaign: name,
+            title: `${name} — limitada pelo orçamento com bom retorno`,
+            text: `Perde ${lostBudget >= 0.9 ? "mais de 90%" : `${(lostBudget * 100).toFixed(1)}%`} das impressões da Pesquisa por orçamento ` +
+              `com ROAS de ${roas.toFixed(2)}x. Candidata a mais orçamento (update_budget); detalhe em get_impression_share.`,
+          });
+        }
+      }
+
+      const spending = new Set(results.map((r) => String((r.campaign as Record<string, unknown>)?.id)));
+      for (const row of servingRows) {
+        const c = row.campaign as Record<string, unknown>;
+        const name = String(c?.name ?? "");
+        const primary = String(c?.primaryStatus ?? "");
+        const reasons = (Array.isArray(c?.primaryStatusReasons) ? c.primaryStatusReasons : []).map(String);
+        const explained = reasons
+          .filter((code) => CAMPAIGN_REASONS[code]?.[0] === "problema" || CAMPAIGN_REASONS[code]?.[0] === "atencao")
+          .slice(0, 3)
+          .map((code) => `${code}: ${CAMPAIGN_REASONS[code][1]}`);
+        if (primary === "NOT_ELIGIBLE" || primary === "MISCONFIGURED") {
+          alerts.push({
+            level: "danger",
+            campaign: name,
+            title: `${name} — ativa, mas não veicula (${primary})`,
+            text: `${explained.join(" ") || "Sem motivo detalhado."} Diagnóstico completo: diagnose_campaigns.`,
+          });
+        } else if (!spending.has(String(c?.id)) && primary !== "ENDED" && primary !== "PENDING") {
+          alerts.push({
+            level: "warning",
+            campaign: name,
+            title: `${name} — ativa e sem gasto no período`,
+            text: `Status primário ${primary || "desconhecido"}. ${explained.join(" ")} Veja diagnose_campaigns.`.replace(/\s+/g, " ").trim(),
           });
         }
       }

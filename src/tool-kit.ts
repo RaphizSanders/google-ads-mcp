@@ -39,13 +39,91 @@ export function localIsoDate(date: Date): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
+/**
+ * Retenção de dados do Google Ads (desde 01/06/2026): dados granulares — diários, semanais e
+ * por hora — ficam só pelos últimos 37 meses; mensais, trimestrais e anuais, por 11 anos.
+ * Fonte: developers.google.com/google-ads/api/docs/deprecations e o Ads Developer Blog de
+ * 01/05/2026 ("New Data Retention Policy for Google Ads starting June 1, 2026"): query com
+ * segments.date/segments.week para período mais antigo que 37 meses recebe
+ * DateRangeError.INVALID_DATE, e query sem segmento de data para período histórico só passa
+ * alinhada ao mês civil (dia 1 ao último dia do mês).
+ */
+export const GRANULAR_RETENTION_MONTHS = 37;
+
+/** Primeiro dia (data local do servidor) que ainda tem dado diário/semanal/por hora. */
+export function granularRetentionStart(now: Date = new Date()): string {
+  return localIsoDate(new Date(now.getFullYear(), now.getMonth() - GRANULAR_RETENTION_MONTHS, now.getDate()));
+}
+
+function isRealIsoDate(value: string): boolean {
+  if (!ISO_DATE.test(value)) return false;
+  const [y, m, d] = value.split("-").map(Number);
+  return localIsoDate(new Date(y, m - 1, d)) === value;
+}
+
+function lastDayOfMonth(value: string): string {
+  const [y, m] = value.split("-").map(Number);
+  return localIsoDate(new Date(y, m, 0));
+}
+
+export interface DateClauseOptions {
+  /**
+   * true quando a query seleciona segments.date, segments.week ou segments.hour: período
+   * mais antigo que 37 meses é recusado aqui, com a saída (granularidade mensal) no texto.
+   */
+  granular?: boolean;
+}
+
+/**
+ * Confere o período contra a retenção de 37 meses e devolve um aviso pronto (ou null).
+ * Granular antigo: erro. Sem segmento de data e antigo: só passa alinhado ao mês.
+ */
+export function retentionProblem(since: string, until: string, options: DateClauseOptions = {}, now: Date = new Date()): string | null {
+  const start = granularRetentionStart(now);
+  if (since >= start) return null;
+  if (options.granular) {
+    return `Dados diários, semanais e por hora só existem para os últimos ${GRANULAR_RETENTION_MONTHS} meses ` +
+      `(desde ${start}); o período pedido começa em ${since}. Para histórico mais antigo use granularidade ` +
+      "mensal, trimestral ou anual (segments.month/quarter/year — em get_daily_trend, granularity MONTH) " +
+      "com o período alinhado ao mês, ou comece o período a partir dessa data.";
+  }
+  const aligned = since.endsWith("-01") && until === lastDayOfMonth(until);
+  if (aligned) return null;
+  const today = localIsoDate(now);
+  const suggestedUntil = lastDayOfMonth(until) < today
+    ? lastDayOfMonth(until)
+    : localIsoDate(new Date(Number(until.slice(0, 4)), Number(until.slice(5, 7)) - 1, 0));
+  return `Períodos que começam antes de ${start} (limite de ${GRANULAR_RETENTION_MONTHS} meses dos dados diários) ` +
+    "só são aceitos pela API alinhados ao mês civil: since no dia 1 e until no último dia de um mês. " +
+    `Sugestão: since ${since.slice(0, 8)}01 e until ${suggestedUntil}.`;
+}
+
 /** Build GAQL date clause from dateRange or days */
-export function buildDateClause(dateRange?: { since: string; until: string }, days?: number): string {
+export function buildDateClause(
+  dateRange?: { since: string; until: string },
+  days?: number,
+  options: DateClauseOptions = {}
+): string {
+  // Só uma das pontas preenchida: cair em `days` trocaria o período em silêncio.
+  if (Boolean(dateRange?.since) !== Boolean(dateRange?.until)) {
+    throw new Error(
+      `dateRange incompleto — informe since e until (YYYY-MM-DD) ou omita dateRange para usar days ` +
+        `(recebido "${dateRange?.since ?? ""}" → "${dateRange?.until ?? ""}").`
+    );
+  }
   if (dateRange?.since && dateRange?.until) {
     // As datas entram direto na string GAQL: só formato ISO passa
     if (!ISO_DATE.test(dateRange.since) || !ISO_DATE.test(dateRange.until)) {
       throw new Error(`dateRange inválido — use YYYY-MM-DD (recebido ${dateRange.since} → ${dateRange.until}).`);
     }
+    if (!isRealIsoDate(dateRange.since) || !isRealIsoDate(dateRange.until)) {
+      throw new Error(`dateRange inválido — data inexistente no calendário (recebido ${dateRange.since} → ${dateRange.until}).`);
+    }
+    if (dateRange.since > dateRange.until) {
+      throw new Error(`dateRange inválido — since (${dateRange.since}) é depois de until (${dateRange.until}).`);
+    }
+    const problem = retentionProblem(dateRange.since, dateRange.until, options);
+    if (problem) throw new Error(problem);
     return `segments.date BETWEEN '${dateRange.since}' AND '${dateRange.until}'`;
   }
   const n = days ?? 30;
@@ -57,6 +135,8 @@ export function buildDateClause(dateRange?: { since: string; until: string }, da
   until.setDate(until.getDate() - 1);
   const since = new Date();
   since.setDate(since.getDate() - n);
+  const problem = retentionProblem(localIsoDate(since), localIsoDate(until), options);
+  if (problem) throw new Error(`days=${n}: ${problem} Use dateRange.`);
   return `segments.date BETWEEN '${localIsoDate(since)}' AND '${localIsoDate(until)}'`;
 }
 

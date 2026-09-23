@@ -85,9 +85,7 @@ function registerAll() {
  * Queries inválidas que já existiam antes da varredura. Cada entrada é uma tool com bug
  * conhecido; a lista tem que ficar vazia — quem corrige a tool remove a entrada.
  */
-const KNOWN_BROKEN = new Set<string>([
-  "get_daily_trend", // #21 — filtro campaign.id em FROM customer
-]);
+const KNOWN_BROKEN = new Set<string>([]);
 
 /** run_gaql executa a query que o usuário escreve: não há query "da tool" para validar. */
 const SKIP = new Set(["run_gaql"]);
