@@ -1535,42 +1535,60 @@ export function registerGoogleAdsTools(
     "update_budget",
     {
       description: [
-        "Update a campaign's daily budget.",
-        "WRITE OPERATION — changes take effect immediately.",
-        "Budget amount is in MICROS (1,000,000 = R$1.00).",
+        "Altera um orçamento de campanha: valor diário (amountMicros), valor total da campanha (totalAmountMicros),",
+        "nome, ou torna o orçamento compartilhado (makeShared). WRITE OPERATION — vale na hora.",
+        "Valores em MICROS (1000000 = R$ 1,00).",
         "",
-        "To find the budget resource name, use google_run_gaql:",
-        "SELECT campaign.campaign_budget FROM campaign WHERE campaign.id = {campaignId}",
+        "Identifique o orçamento por budgetResourceName (resource name ou ID numérico) OU por campaignId (usa o",
+        "orçamento da campanha). Veja os orçamentos com list_budgets.",
+        "Antes de gravar, lê o orçamento: período (DAILY → amountMicros; CUSTOM_PERIOD, o orçamento total da",
+        "campanha → totalAmountMicros), se é compartilhado e quais campanhas o usam.",
+        "- Orçamento usado por mais de uma campanha: exige confirmShared: true (muda o gasto de todas; a resposta lista quais).",
+        "- Novo valor acima do dobro do atual: exige confirm: true (pega erro de digitação nos micros).",
+        "- makeShared: irreversível (compartilhado nunca volta a individual); exige confirm: true e um nome.",
+        "- name: só em orçamento compartilhado (o individual herda o nome da campanha).",
+        "Valor igual ao atual não grava nada.",
       ].join("\n"),
       inputSchema: {
         customerId: z.string().describe("Customer ID."),
         budgetResourceName: z
           .string()
-          .describe("Budget resource name (e.g. customers/123/campaignBudgets/456)."),
+          .optional()
+          .describe("Orçamento: resource name (customers/123/campaignBudgets/456) ou o ID numérico. Use isto OU campaignId."),
+        campaignId: z
+          .string()
+          .optional()
+          .describe("Alternativa: ID da campanha — altera o orçamento que ela usa (se compartilhado, pede confirmShared)."),
         amountMicros: z
           .number()
-          .describe("New daily budget in MICROS. 100000000 = R$100/day."),
+          .optional()
+          .describe("Novo valor DIÁRIO médio em MICROS (orçamento DAILY). 100000000 = R$ 100/dia."),
+        totalAmountMicros: z
+          .number()
+          .optional()
+          .describe("Novo valor TOTAL da campanha em MICROS (só orçamento CUSTOM_PERIOD)."),
+        name: z.string().optional().describe("Novo nome (só orçamento compartilhado, ou junto com makeShared)."),
+        makeShared: z
+          .boolean()
+          .optional()
+          .describe("true = torna o orçamento compartilhado (irreversível; exige confirm e nome)."),
+        confirmShared: z
+          .boolean()
+          .optional()
+          .describe("true = confirma mudar o valor de um orçamento usado por várias campanhas."),
+        confirm: z
+          .boolean()
+          .optional()
+          .describe("true = confirma makeShared ou um aumento acima do dobro do valor atual."),
       },
     },
-    async ({ customerId, budgetResourceName, amountMicros }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
+    async (args) => {
+      const blocked = checkCustomerAccess(args.customerId, allowedCustomerIds, hosted);
       if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-
-      const result = await client.mutateCampaignBudgets(customerId, [
-        {
-          update: { resourceName: budgetResourceName, amountMicros: String(amountMicros) },
-          updateMask: "amount_micros",
-        },
-      ]);
-
-      return {
-        content: [
-          text(
-            `Budget updated to R$ ${(amountMicros / 1_000_000).toFixed(2)}/day.\n\n${formatJson(result)}`
-          ),
-        ],
-      };
+      /* A lógica mora em src/tools/budgets.ts (lote budgets), junto das outras tools de
+         orçamento. Import dinâmico para não mexer no bloco de imports deste arquivo. */
+      const { runUpdateBudget } = await import("./tools/budgets.js");
+      return runUpdateBudget({ getClient, allowedCustomerIds, hosted }, args);
     }
   );
 
