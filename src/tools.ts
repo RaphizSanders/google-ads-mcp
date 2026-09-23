@@ -642,42 +642,7 @@ export function registerGoogleAdsTools(
     }
   );
 
-  // ── Insights: Geo Performance ──────────────────────────────────────
-
-  mcp.registerTool(
-    "get_geo_performance",
-    {
-      description: "Get performance broken down by geographic location (country, region).",
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        dateRange: dateRangeSchema.describe(DATE_RANGE_DESC),
-        days: z.number().optional().describe(DAYS_DESC),
-        limit: z.number().optional().describe("Max results. Default: 30."),
-      },
-    },
-    async ({ customerId, dateRange, days, limit }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const dateClause = buildDateClause(dateRange, days);
-
-      const results = await client.searchStream(
-        customerId,
-        `SELECT geographic_view.country_criterion_id,
-                geographic_view.location_type,
-                campaign.id, campaign.name,
-                metrics.impressions, metrics.clicks, metrics.cost_micros,
-                metrics.conversions, metrics.conversions_value
-         FROM geographic_view
-         WHERE ${dateClause}
-           AND metrics.impressions > 0
-         ORDER BY metrics.cost_micros DESC
-         LIMIT ${limit ?? 30}`
-      );
-
-      return { content: [text(`${results.length} location(s).\n\n${formatJson(results)}`)] };
-    }
-  );
+  // get_geo_performance: registrada em src/tools/targeting-geo.ts (lote targeting-geo).
 
   // ── Insights: Search Terms ─────────────────────────────────────────
 
@@ -4860,99 +4825,7 @@ export function registerGoogleAdsTools(
     }
   );
 
-  mcp.registerTool(
-    "set_campaign_locations",
-    {
-      description: [
-        "Add geographic targeting to a campaign.",
-        "WRITE OPERATION.",
-        "",
-        "Por padrão ADICIONA (replace=false): o resultado é a UNIÃO com a segmentação",
-        "geográfica que a campanha já tinha — não substitui nada.",
-        "Use replace=true para substituir de verdade: remove antes os critérios de",
-        "LOCATION existentes da mesma polaridade (os positivos, ou as exclusões quando",
-        "negative=true) e preserva idioma, público, dispositivo e demais critérios.",
-        "",
-        "Common IDs: Brazil=2076, São Paulo state=20106, São Paulo city=1001773, Portugal=2620, USA=2840.",
-        "Find IDs: run_gaql SELECT geo_target_constant.id, geo_target_constant.name FROM geo_target_constant WHERE geo_target_constant.name LIKE '%São Paulo%'",
-      ].join("\n"),
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        campaignId: z.string().describe("Campaign ID."),
-        locationIds: flexArray(z.string()).describe("geo_target_constant IDs."),
-        negative: z.boolean().optional().describe("True=exclude. Default: false."),
-        replace: z.boolean().optional().describe("True=substitui a segmentação geográfica atual (remove só critérios de LOCATION da mesma polaridade). Default: false (adiciona)."),
-      },
-    },
-    async ({ customerId, campaignId, locationIds: rawLocationIds, negative, replace }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const cid = customerId.replace(/-/g, "");
-      const locationIds = ensureArray<string>(rawLocationIds);
-      const isNegative = negative ?? false;
-      if (locationIds.length === 0) {
-        return { content: [text("Error: locationIds vazio — informe ao menos um geo_target_constant ID.")], isError: true };
-      }
-
-      // campaignId entra cru em GAQL e em resource names: exigir numérico impede que um
-      // valor manipulado amplie o WHERE do remove ou gere um resource name inválido.
-      if (!/^\d+$/.test(campaignId)) {
-        return { content: [text("Error: campaignId inválido — use apenas o ID numérico da campanha.")], isError: true };
-      }
-
-      let removeOps: Array<Record<string, unknown>> = [];
-      if (replace) {
-        const existing = await client.searchStream(customerId,
-          `SELECT campaign_criterion.resource_name, campaign_criterion.type, campaign_criterion.negative
-           FROM campaign_criterion
-           WHERE campaign.id = ${campaignId}
-             AND campaign_criterion.type = 'LOCATION'
-             AND campaign_criterion.status != 'REMOVED'`);
-        removeOps = existing
-          .map(r => r.campaignCriterion as Record<string, unknown> | undefined)
-          // Dupla checagem do type no cliente + negative=false vem OMITIDO no JSON da
-          // API (default de proto3), então undefined tem que valer false.
-          .filter((cc): cc is Record<string, unknown> =>
-            !!cc && cc.type === "LOCATION" && ((cc.negative as boolean) ?? false) === isNegative && !!cc.resourceName)
-          .map(cc => ({ remove: cc.resourceName as string }));
-      }
-
-      // Remove e create na MESMA requisição: a API aplica a lista inteira de forma
-      // atômica (sem partialFailure). Em duas requisições, um create recusado deixaria
-      // a campanha sem nenhum critério de LOCATION — entregando no mundo inteiro.
-      const createOps = locationIds.map(locId => ({ create: { campaign: `customers/${cid}/campaigns/${campaignId}`, location: { geoTargetConstant: `geoTargetConstants/${locId}` }, negative: isNegative } }));
-      const result = await client.mutateCampaignCriteria(customerId, [...removeOps, ...createOps] as unknown as import("./google-ads-client.js").MutateOperation[]);
-      const removedCount = removeOps.length;
-      const mode = replace ? `substituindo (${removedCount} critério(s) de LOCATION removido(s))` : "adicionando à segmentação existente";
-      return { content: [text(`${isNegative ? "Excluded" : "Targeted"} ${locationIds.length} location(s) for campaign ${campaignId} — ${mode}.\n\n${formatJson(result)}`)] };
-    }
-  );
-
-  mcp.registerTool(
-    "set_campaign_languages",
-    {
-      description: [
-        "Set language targeting for a campaign. WRITE OPERATION.",
-        "Common IDs: Portuguese=1014, English=1000, Spanish=1003.",
-      ].join("\n"),
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        campaignId: z.string().describe("Campaign ID."),
-        languageIds: flexArray(z.string()).describe("language_constant IDs."),
-      },
-    },
-    async ({ customerId, campaignId, languageIds: rawLangIds }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-      const cid = customerId.replace(/-/g, "");
-      const languageIds = ensureArray<string>(rawLangIds);
-      const ops = languageIds.map(langId => ({ create: { campaign: `customers/${cid}/campaigns/${campaignId}`, language: { languageConstant: `languageConstants/${langId}` } } }));
-      const result = await client.mutateCampaignCriteria(customerId, ops as unknown as import("./google-ads-client.js").MutateOperation[]);
-      return { content: [text(`Set ${languageIds.length} language(s) for campaign ${campaignId}.\n\n${formatJson(result)}`)] };
-    }
-  );
+  // set_campaign_locations e set_campaign_languages: registradas em src/tools/targeting-geo.ts (lote targeting-geo).
 
   mcp.registerTool(
     "list_merchant_centers",
@@ -5703,57 +5576,7 @@ export function registerGoogleAdsTools(
     }
   );
 
-  mcp.registerTool(
-    "list_geo_targets",
-    {
-      description: [
-        "Busca geo target IDs por nome (para set_campaign_locations e generate_keyword_ideas).",
-        "READ OPERATION.",
-        "",
-        "Ex: query='São Paulo', countryCode='BR' → IDs de cidade, estado e região.",
-      ].join("\n"),
-      inputSchema: {
-        customerId: z.string().describe("Customer ID."),
-        query: z.string().describe("Nome (ou parte do nome) da localização."),
-        countryCode: z.string().optional().describe("Filtra por país (ex: 'BR')."),
-        targetType: z.string().optional().describe("Filtra por tipo (ex: 'City', 'State', 'Country')."),
-        limit: z.number().optional().describe("Máximo de resultados. Default: 25."),
-        format: formatSchema,
-      },
-    },
-    async ({ customerId, query, countryCode, targetType, limit, format }) => {
-      const blocked = checkCustomerAccess(customerId, allowedCustomerIds, hosted);
-      if (blocked) return { content: [blocked], isError: true };
-      const client = getClient();
-
-      const filters = [`geo_target_constant.name LIKE '%${gaqlLiteral(query)}%'`, "geo_target_constant.status = 'ENABLED'"];
-      if (countryCode) filters.push(`geo_target_constant.country_code = '${gaqlLiteral(countryCode.toUpperCase())}'`);
-      if (targetType) filters.push(`geo_target_constant.target_type = '${gaqlLiteral(targetType)}'`);
-
-      const results = await client.searchStream(customerId,
-        `SELECT geo_target_constant.id, geo_target_constant.name,
-                geo_target_constant.canonical_name, geo_target_constant.country_code,
-                geo_target_constant.target_type
-         FROM geo_target_constant
-         WHERE ${filters.join(" AND ")}
-         LIMIT ${limit ?? 25}`);
-
-      const rows = results.map((r) => {
-        const g = (r.geoTargetConstant ?? {}) as Record<string, unknown>;
-        return {
-          geo_target_id: g.id,
-          name: g.name,
-          canonical_name: g.canonicalName,
-          country: g.countryCode,
-          type: g.targetType,
-        };
-      });
-
-      if (format === "table") return { content: [text(formatAsTable(rows as Array<Record<string, unknown>>))] };
-      if (format === "csv") return { content: [text(formatAsCsv(rows as Array<Record<string, unknown>>))] };
-      return { content: [text(`${rows.length} localização(ões) para "${query}".\n\n${formatJson(rows)}`)] };
-    }
-  );
+  // list_geo_targets: registrada em src/tools/targeting-geo.ts (lote targeting-geo).
 
   mcp.registerTool(
     "list_recommendations",
