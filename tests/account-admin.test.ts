@@ -1202,7 +1202,7 @@ test("list_account_links: no modo hospedado não mostra contas fora da allowlist
   }
 });
 
-test("list_invoices: orçamentos de contas fora da allowlist viram um total agregado e o PDF sai", async () => {
+test("list_invoices: hosted scoped connections reject consolidated foreign totals; standalone stays compatible", async () => {
   const invoice = {
     id: "5555", currencyCode: "BRL", totalAmountMicros: "3000000000", pdfUrl: "https://ads.google.com/pdf/5555",
     accountBudgetSummaries: [
@@ -1216,10 +1216,8 @@ test("list_invoices: orçamentos de contas fora da allowlist viram um total agre
   const { client } = fakeClient({ rows: billingRows(), get: () => ({ invoices: [invoice] }) });
   const hosted = textOf(await call(client, "list_invoices", { customerId: CID, year: 2026, month: 8, granular: true }, [CID], true));
   assert.doesNotMatch(hosted, /Cliente Secreto|Outro Secreto|Orçamento Secreto|Campanha Secreta|4443332221|1112223334/);
-  assert.match(hosted, /Busca Liberada/);
-  assert.match(hosted, /"outras_contas_fora_da_allowlist": \{\s*"orcamentos": 2,\s*"subtotal": 1850,\s*"tax": 0,\s*"total": 2000/);
-  assert.match(hosted, /"pdf_url": null/);
-  assert.match(hosted, /2 orçamento\(s\) de contas fora de ALLOWED_CUSTOMER_IDS agrupado/);
+  assert.match(hosted, /escopo autorizado/);
+  assert.doesNotMatch(hosted, /3000|2000|1850|5555|Busca Liberada|outras_contas_fora_da_allowlist/);
 
   const open = textOf(await call(client, "list_invoices", { customerId: CID, year: 2026, month: 8, granular: true }));
   assert.match(open, /Cliente Secreto/);
