@@ -2575,12 +2575,23 @@ export function registerAccountAdminTools(ctx: ToolContext): void {
           errors.push({ billing_setup: billingSetup, error: explainError(err) });
         }
       }
-      /* Fatura consolidada cobre todas as contas do perfil de pagamentos. No modo
-         hospedado, as contas fora de ALLOWED_CUSTOMER_IDS não aparecem uma a uma (nem ID,
-         nem nome, nem orçamento): viram um único total "outras contas", que fecha a conta
-         com o total da fatura. O PDF traz o detalhe dessas contas, então o link sai. */
+      /* Consolidated invoices can cover multiple customers. Hosted explicit scopes
+         reject unprovable ownership below; the legacy aggregate/PDF treatment
+         remains only for standalone connections. */
       const visibleCustomer = (summary: Row) =>
         !checkCustomerAccess(lastSegment(str(summary.customer)), ctx.allowedCustomerIds, ctx.hosted);
+      // #306: a total or PDF from a consolidated invoice is still cross-account
+      // financial data. Redacting names is not authorization. In a hosted,
+      // explicitly scoped connection, refuse the whole response when ownership
+      // is incomplete or any budget belongs outside the connection's allowlist.
+      // Do not fabricate a partial invoice total or change standalone agency mode.
+      if (ctx.hosted && !ctx.allowedCustomerIds.includes("*") && invoices.some((invoice) => {
+        const summaries = invoice.accountBudgetSummaries;
+        return !Array.isArray(summaries) || summaries.length === 0 ||
+          summaries.some((summary) => !summary || typeof summary !== "object" || !visibleCustomer(summary as Row));
+      })) {
+        return fail("Fatura não disponibilizada: não foi possível confirmar que todos os seus orçamentos pertencem ao escopo autorizado desta conexão. Nenhum total consolidado ou PDF foi exposto.");
+      }
       let hiddenSummaries = 0;
       const views = invoices.map((invoice) => {
         const summaries = (invoice.accountBudgetSummaries as Row[] | undefined) ?? [];

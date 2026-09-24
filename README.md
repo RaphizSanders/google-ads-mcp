@@ -710,6 +710,12 @@ Grupo `account-auth` · 7 tools · [documentação](docs/tools/account-auth.md)
 
 ### Administração do MCC: contas, vínculos, usuários, faturamento e edição em massa
 
+Em HTTP com allowlist explícita, `list_invoices` só retorna uma fatura se todos
+os seus orçamentos identificarem contas autorizadas. Uma fatura consolidada que
+inclua outra conta, ou sem atribuição verificável, é recusada inteira: ocultar
+nomes mas mostrar o total ainda revelaria dados financeiros externos ao escopo.
+Não é calculada uma fatura parcial. O modo local/agência permanece compatível.
+
 Grupo `account-admin` · 24 tools · [documentação](docs/tools/account-admin.md)
 
 | Tool | | Descrição |
